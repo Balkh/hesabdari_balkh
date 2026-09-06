@@ -16,6 +16,7 @@ INSTALLED_APPS = [
     "core",
     "currencies",
     "documents",
+    "accounting",
 ]
 
 MIDDLEWARE = [
