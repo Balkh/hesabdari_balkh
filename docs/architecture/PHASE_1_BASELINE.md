@@ -6,7 +6,7 @@
 
 ## Scope
 
-This document records the first clean-repository increment for ERP_Afghanistan. No existing ERP repository was found in `/home/user`; only the attached planning document was present.
+This document records the first clean-repository increment for hesabdari_balkh. No existing ERP repository was found in `/home/user`; only the attached planning document was present.
 
 ## Intended architecture
 

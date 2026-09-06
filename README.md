@@ -1,4 +1,4 @@
-# ERP_Afghanistan
+# hesabdari_balkh
 
 Professional, offline-first, bilingual ERP foundation for an Afghan trading company.
 

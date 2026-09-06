@@ -5,7 +5,7 @@
 
 ## Decision
 
-Create `ERP_Afghanistan` from zero because no existing ERP repository was present in the working directory.
+Create `hesabdari_balkh` from zero because no existing ERP repository was present in the working directory.
 
 ## Consequences
 
