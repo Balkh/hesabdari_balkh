@@ -1,4 +1,4 @@
-.PHONY: verify backend-test frontend-test
+.PHONY: verify phase1 backend-test frontend-test
 
 backend-test:
 	./scripts/verify_backend.sh
@@ -6,4 +6,7 @@ backend-test:
 frontend-test:
 	./scripts/verify_frontend.sh
 
-verify: backend-test frontend-test
+verify: phase1
+
+phase1:
+	./scripts/verify_phase1.sh
