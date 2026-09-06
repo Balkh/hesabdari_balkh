@@ -1,0 +1,2 @@
+import { tokens } from "../theme/tokens";
+export function StatusBadge({ status }: { status: "success" | "warning" | "danger" | "neutral" }) { const color = { success: tokens.colors.success, warning: tokens.colors.warning, danger: tokens.colors.danger, neutral: tokens.colors.muted }[status]; return <span style={{ color, fontSize: tokens.typography.small, fontWeight: 700 }}>{status.toUpperCase()}</span>; }
