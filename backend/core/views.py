@@ -1,5 +1,6 @@
 from django.db import connection
 from rest_framework.decorators import api_view
+from rest_framework.exceptions import NotFound
 from rest_framework.response import Response
 
 
@@ -14,3 +15,8 @@ def health_check(request):
         "service": "hesabdari_balkh-backend",
         "database": "ok" if database_ok else "error",
     })
+
+
+@api_view(["GET"])
+def missing_resource(request):
+    raise NotFound("The requested resource was not found.")
