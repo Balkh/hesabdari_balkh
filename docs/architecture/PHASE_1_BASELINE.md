@@ -18,7 +18,7 @@ The backend remains the authority for accounting, inventory, posting, validation
 
 ## Important open decision
 
-The project brief describes an offline Windows deployment and the Phase 0 blueprint says SQLite initially / PostgreSQL-ready, while the Phase 1 prompt requires PostgreSQL. This baseline follows the explicit Phase 1 development requirement for PostgreSQL. The offline packaging choice must be resolved before database integration and packaging.
+The project brief describes an offline Windows deployment and the Phase 0 blueprint says SQLite initially / PostgreSQL-ready, while the Phase 1 prompt requires PostgreSQL. This baseline follows the explicit Phase 1 development requirement for PostgreSQL. The current development choice is SQLite. PostgreSQL integration remains a later verification step before network/production deployment.
 
 ## Boundary rules
 
