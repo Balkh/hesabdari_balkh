@@ -32,3 +32,10 @@ class ApiErrorContractTests(TestCase):
         self.assertIn("error", body)
         self.assertIn("code", body["error"])
         self.assertIn("message", body["error"])
+
+
+class ApiRootTests(TestCase):
+    def test_api_root_identifies_version(self):
+        response = APIClient().get("/api/v1/")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["api"], "v1")

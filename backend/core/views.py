@@ -20,3 +20,7 @@ def health_check(request):
 @api_view(["GET"])
 def missing_resource(request):
     raise NotFound("The requested resource was not found.")
+
+@api_view(["GET"])
+def api_root(request):
+    return Response({"api": "v1", "service": "hesabdari_balkh", "status": "available"})
