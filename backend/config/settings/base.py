@@ -17,6 +17,7 @@ INSTALLED_APPS = [
     "currencies",
     "documents",
     "accounting",
+    "security",
 ]
 
 MIDDLEWARE = [
@@ -75,3 +76,9 @@ LOGGING = {
         "core.requests": {"handlers": ["console"], "level": "INFO", "propagate": False},
     },
 }
+
+AUTH_PASSWORD_VALIDATORS = [
+    {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},
+    {"NAME": "django.contrib.auth.password_validation.MinimumLengthValidator"},
+    {"NAME": "django.contrib.auth.password_validation.CommonPasswordValidator"},
+]
