@@ -38,4 +38,15 @@ PHASE 1 LOCAL VERIFICATION: PASS   (Django 17 tests, pytest 25, frontend build, 
 
 ## Status
 
-Setup PASS locally. PostgreSQL suite result is reported once the CI `postgresql` job completes.
+Setup PASS locally. PostgreSQL suite executed in CI run `34148473369` (`postgresql` job, 37s):
+
+```text
+✓ backend in 15s
+✓ frontend in 11s
+✓ postgresql in 37s   <- Django suite + pytest executed against PostgreSQL 16
+```
+
+The `postgresql` CI job ran `scripts/verify_postgresql.sh` against a `postgres:16`
+service container: `manage.py check`, `migrate`, the Django test suite, and
+pytest all passed on PostgreSQL. The full foundation is portable to PostgreSQL.
+

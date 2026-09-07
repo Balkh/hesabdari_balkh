@@ -40,8 +40,15 @@ Frontend tests: 4 passed
 PHASE 1 LOCAL VERIFICATION: PASS
 ```
 
-Remote CI execution result is reported separately once the pull request triggers GitHub Actions.
+Remote CI execution result (GitHub Actions run `34148328298`, PR #1, head `7a44a14`):
+
+```text
+✓ backend in 16s    (verify_backend.sh: Django check + 17 tests + 25 pytest)
+✓ frontend in 14s   (verify_frontend.sh: tsc + vite build + 4 node tests)
+```
+
+Both jobs PASS. This is the first green remote CI execution for the repository.
 
 ## Status
 
-PASS for this increment (local). Remote CI re-execution is triggered by the accompanying pull request.
+PASS — remote CI backend and frontend verification is green (run `34148328298`).
