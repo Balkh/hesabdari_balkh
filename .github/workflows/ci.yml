@@ -70,7 +70,9 @@ jobs:
       - name: Install Tauri system libraries (GTK/WebKit)
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential \
+          sudo apt-get install -y libwebkit2gtk-4.1-dev \
+            libjavascriptcoregtk-4.1-dev libsoup-3.0-dev \
+            libgtk-3-dev build-essential \
             curl wget file libxdo-dev libssl-dev \
             libayatana-appindicator3-dev librsvg2-dev
       - uses: actions/setup-node@v4
@@ -89,5 +91,21 @@ jobs:
         with:
           workspaces: frontend/src-tauri
       - name: cargo check (Tauri shell compiles)
-        run: cargo check
         working-directory: frontend/src-tauri
+        run: |
+          set +e
+          cargo check > /tmp/cargo_check.log 2>&1
+          status=$?
+          if [ "$status" -ne 0 ]; then
+            # Surface the compiler error through a workflow annotation so it
+            # stays readable even when raw log archives are unavailable.
+            python3 - <<'PY'
+import pathlib
+text = pathlib.Path('/tmp/cargo_check.log').read_text(errors='replace')
+tail = text[-3500:]
+tail = tail.replace('%', '%25').replace('\r', '').replace('\n', '%0A')
+print(f'::error title=cargo-check-details::{tail}')
+PY
+            echo "cargo check exited with status $status" >&2
+            exit "$status"
+          fi
