@@ -4,19 +4,47 @@ Professional, offline-first, bilingual ERP foundation for an Afghan trading comp
 
 ## Phase 1 status
 
-**BLOCKED** — clean baseline created; technical dependencies and Phase 0 approval are still required before implementation of business workflows.
+```text
+FOUNDATION COMPLETE AND VERIFIED — all CI jobs green
+```
 
-## Scope of this baseline
+Phase 1 delivered the complete technical foundation: Django backend, DRF API
+boundary, currencies + historical exchange rates, Jalali/Gregorian date
+boundary, Jalali-aware document numbering, double-entry journal foundation,
+atomicity/idempotency infrastructure, security/audit foundation, and a
+React/TypeScript frontend shell with Persian/English i18n and RTL/LTR.
 
-This increment creates the repository structure, documentation locations, environment configuration strategy, and verification scaffolding. It intentionally does not implement purchasing, sales, inventory transactions, payments, returns, remittance, or reporting workflows.
+Verification (GitHub Actions run 34149040085):
+
+```text
+✓ backend    Django check + 17 tests + 25 pytest
+✓ frontend   tsc + Vite build + 4 node tests
+✓ postgresql full foundation suite on a real PostgreSQL 16 server
+✓ tauri      cargo check PASS (Tauri v2 desktop shell compiles)
+```
+
+Business workflows (purchasing, sales, inventory transactions, payments,
+returns, remittance, reporting) are intentionally NOT implemented yet. They
+start only after the Foundation is approved and the Phase 0 domain contracts
+are defined.
+
+Remaining open item: desktop installer packaging (`tauri build`) and the
+Windows target are deferred until a suitable packaging environment is used.
 
 ## Planned stack
 
 - Backend: Python, Django, Django REST Framework
-- Database: PostgreSQL for the Phase 1 development baseline; SQLite remains a future offline deployment decision
+- Database: PostgreSQL for deployment; SQLite is the approved local/offline
+  development baseline (ADR-0002)
 - Frontend: React, TypeScript
 - Desktop: Tauri
 
 ## Development
 
-See `docs/architecture/PHASE_1_BASELINE.md` and `.env.example`.
+See `docs/architecture/PHASE_1_BASELINE.md`, `docs/decisions/`, and
+`.env.example`.
+
+```bash
+make verify        # local backend + frontend verification
+scripts/verify_postgresql.sh   # full suite against PostgreSQL (needs a server)
+```
