@@ -4,4 +4,10 @@ The Tauri v2 shell scaffold is present and intentionally contains no ERP busines
 
 ## Verification status
 
-`cargo`/Rust is not installed in the current environment, so `cargo check` and desktop packaging are **NOT TESTED**.
+`cargo check` for the shell is verified in GitHub Actions CI (the `tauri` job,
+which installs the GTK/WebKit system libraries and Rust on an ubuntu-latest
+runner). Desktop installer packaging and the Windows target are not yet built.
+
+This development sandbox cannot run the compile locally because outbound
+access to OS package repositories is blocked (no GTK/WebKit development
+libraries available).

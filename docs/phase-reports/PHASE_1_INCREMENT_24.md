@@ -24,6 +24,45 @@ GitHub Actions `ubuntu-latest` runners can install both the GTK/WebKit libraries
 
 No desktop business logic, packaging, or bundling was added or executed in this increment. `cargo check` proves the Tauri shell compiles; it is not an installer/package run.
 
+## First CI attempt and fix
+
+The first CI run (run `34148473369`) reached the compile but failed with:
+
+```text
+error: proc macro panicked
+ --> src/lib.rs:4:14
+  |
+4 |         .run(tauri::generate_context!())
+  |
+  = help: message: failed to open icon .../frontend/src-tauri/icons/icon.png:
+         No such file or directory (os error 2)
+```
+
+Root cause: the Increment 19 scaffold had no icon set, and Tauri's
+`generate_context!` requires one at compile time.
+
+## Fix
+
+1. `frontend/src-tauri/icons/generate_icons.py` — reproducible Pillow generator
+   for a desktop icon set (no external artwork; a navy rounded square with a
+   golden double-entry balance mark).
+2. Generated `icons/icon.png`, `32x32.png`, `128x128.png`, `128x128@2x.png`,
+   `icon.ico` and declared `bundle.icon` in `tauri.conf.json`.
+3. CI cargo step now also captures and re-emits the compiler error tail as a
+   workflow annotation when the check fails (keeps failures diagnosable).
+
+## Executed evidence (GitHub Actions run `34149040085`, head `f310eeb`)
+
+```text
+✓ frontend in 7s
+✓ backend in 17s
+✓ tauri in 2m28s     <- cargo check PASS: the Tauri v2 shell compiles on Linux
+✓ postgresql in 35s
+```
+
 ## Status
 
-Setup committed. `cargo check` result is reported once the CI `tauri` job completes.
+PASS — `cargo check` for the Tauri v2 desktop shell is green in CI
+(run `34149040085`). Desktop installer packaging (`tauri build` → .deb/.rpm/
+AppImage and the future Windows target) is still NOT executed; it remains a
+later packaging task outside this increment's scope.
