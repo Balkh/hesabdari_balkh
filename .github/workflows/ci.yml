@@ -99,13 +99,7 @@ jobs:
           if [ "$status" -ne 0 ]; then
             # Surface the compiler error through a workflow annotation so it
             # stays readable even when raw log archives are unavailable.
-            python3 - <<'PY'
-import pathlib
-text = pathlib.Path('/tmp/cargo_check.log').read_text(errors='replace')
-tail = text[-3500:]
-tail = tail.replace('%', '%25').replace('\r', '').replace('\n', '%0A')
-print(f'::error title=cargo-check-details::{tail}')
-PY
+            python3 -c 'import pathlib,sys; t=pathlib.Path("/tmp/cargo_check.log").read_text(errors="replace")[-3500:]; sys.stdout.write("::error title=cargo-check-details::"+t.replace("%","%25").replace("\r","").replace("\n","%0A")+"\n")'
             echo "cargo check exited with status $status" >&2
             exit "$status"
           fi
