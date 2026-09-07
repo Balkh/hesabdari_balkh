@@ -30,3 +30,64 @@ jobs:
       - run: npm ci
         working-directory: frontend
       - run: scripts/verify_frontend.sh
+
+  postgresql:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: erp_afghanistan
+          POSTGRES_USER: erp_afghanistan
+          POSTGRES_PASSWORD: erp_afghanistan
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U erp_afghanistan -d erp_afghanistan"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DJANGO_SETTINGS_MODULE: config.settings.postgres
+      POSTGRES_DB: erp_afghanistan
+      POSTGRES_USER: erp_afghanistan
+      POSTGRES_PASSWORD: erp_afghanistan
+      POSTGRES_HOST: 127.0.0.1
+      POSTGRES_PORT: "5432"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: python -m venv backend/.venv
+      - run: backend/.venv/bin/python -m pip install -r requirements.txt
+      - run: scripts/verify_postgresql.sh
+
+  tauri:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Tauri system libraries (GTK/WebKit)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential \
+            curl wget file libxdo-dev libssl-dev \
+            libayatana-appindicator3-dev librsvg2-dev
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Build frontend bundle (Tauri embeds ../dist)
+        run: npm ci && npm run build
+        working-directory: frontend
+      - name: Install Rust toolchain
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: frontend/src-tauri
+      - name: cargo check (Tauri shell compiles)
+        run: cargo check
+        working-directory: frontend/src-tauri
