@@ -8,7 +8,7 @@ side fails loudly here.
 
 Conventions:
 - FA names are proposed canonical labels; final authority is user review.
-- Posting tests exercise the real Phase 1 ``post_journal`` path (unmodified).
+- Posting tests exercise the real ``post_journal`` path (Stage 2.2 contract).
 - The universal test counter-account is 3900 (handoff §19, test use only).
 """
 
@@ -16,6 +16,7 @@ from decimal import Decimal
 from unittest import mock
 
 from django.test import TestCase
+from currencies.models import Currency
 
 from . import coa as coa_module
 from .coa import COASeedError, seed_chart_of_accounts
@@ -191,6 +192,7 @@ class GroupRejectionTests(TestCase):
     @classmethod
     def setUpTestData(cls):
         seed_chart_of_accounts()
+        cls.afn = Currency.objects.create(code="AFN", name="Afghani", is_base=True)
 
     def test_every_group_account_rejects_posting(self):
         counter = Account.objects.get(code="3900")
@@ -202,6 +204,7 @@ class GroupRejectionTests(TestCase):
                     post_journal(
                         number=number, posting_date=POSTING_DATE,
                         description=f"Stage 2.1 group rejection probe {code}",
+                        currency=self.afn,
                         lines=[
                             {"account": Account.objects.get(code=code), "debit": AMOUNT},
                             {"account": counter, "credit": AMOUNT},
@@ -217,6 +220,7 @@ class PostingAcceptanceTests(TestCase):
     @classmethod
     def setUpTestData(cls):
         seed_chart_of_accounts()
+        cls.afn = Currency.objects.create(code="AFN", name="Afghani", is_base=True)
 
     def test_every_posting_account_accepts_balanced_posting(self):
         for code in POSTING_CODES:
@@ -227,6 +231,7 @@ class PostingAcceptanceTests(TestCase):
                 entry = post_journal(
                     number=number, posting_date=POSTING_DATE,
                     description=f"Stage 2.1 posting acceptance probe {code}",
+                        currency=self.afn,
                     lines=[
                         {"account": account, "debit": AMOUNT},
                         {"account": Account.objects.get(code=counter_code), "credit": AMOUNT},
@@ -246,6 +251,7 @@ class Tax2400Tests(TestCase):
     @classmethod
     def setUpTestData(cls):
         seed_chart_of_accounts()
+        cls.afn = Currency.objects.create(code="AFN", name="Afghani", is_base=True)
 
     def test_2400_is_inactive_and_non_posting(self):
         account = Account.objects.get(code="2400")
@@ -260,6 +266,7 @@ class Tax2400Tests(TestCase):
             post_journal(
                 number=number, posting_date=POSTING_DATE,
                 description="Stage 2.1 2400 rejection probe",
+                currency=self.afn,
                 lines=[
                     {"account": Account.objects.get(code="2400"), "debit": AMOUNT},
                     {"account": Account.objects.get(code="3900"), "credit": AMOUNT},

@@ -1,4 +1,5 @@
 from decimal import Decimal
+from django.conf import settings
 from django.core.validators import MinValueValidator
 from django.db import models
 
@@ -40,6 +41,16 @@ class JournalEntry(models.Model):
     source_type = models.CharField(max_length=80, blank=True)
     source_id = models.CharField(max_length=80, blank=True)
     status = models.CharField(max_length=12, choices=JournalStatus.choices, default=JournalStatus.DRAFT)
+    # Stage 2.2 — journal currency contract (§1.8). NULL/empty snapshot fields
+    # mean "legacy pre-2.2 row, original context unknown" — never fabricated.
+    currency = models.ForeignKey("currencies.Currency", null=True, blank=True, on_delete=models.PROTECT, related_name="journal_entries")
+    total_debit = models.DecimalField(max_digits=20, decimal_places=2, default=Decimal("0.00"))
+    total_credit = models.DecimalField(max_digits=20, decimal_places=2, default=Decimal("0.00"))
+    afn_total = models.DecimalField(max_digits=20, decimal_places=2, null=True, blank=True)
+    rate = models.DecimalField(max_digits=20, decimal_places=4, null=True, blank=True)
+    rate_date = models.DateField(null=True, blank=True)
+    rate_direction = models.CharField(max_length=20, blank=True, default="")
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="+")
     created_at = models.DateTimeField(auto_now_add=True)
     posted_at = models.DateTimeField(null=True, blank=True)
 
@@ -53,6 +64,7 @@ class JournalLine(models.Model):
     debit = models.DecimalField(max_digits=20, decimal_places=2, default=Decimal("0.00"), validators=[MinValueValidator(Decimal("0"))])
     credit = models.DecimalField(max_digits=20, decimal_places=2, default=Decimal("0.00"), validators=[MinValueValidator(Decimal("0"))])
     description = models.CharField(max_length=500, blank=True)
+    reference = models.CharField(max_length=200, blank=True, default="")
 
     class Meta:
         constraints = [
