@@ -219,13 +219,17 @@ class LegacyReadabilityTests(TestCase):
     def test_legacy_journal_readable_and_backfillable(self):
         cash = Account.objects.get(code="1110")
         revenue = Account.objects.get(code="4110")
+        # Crafted via DRAFT + status flip: Stage 2.3 guards block direct line
+        # creation on POSTED rows, so legacy shape is built the way old data
+        # would have existed. All assertions below are unchanged.
         legacy = JournalEntry.objects.create(
-            number="JE-LEG-1", posting_date="2026-09-01",
-            description="legacy", status=JournalStatus.POSTED,
+            number="JE-LEG-1", posting_date="2026-09-01", description="legacy",
         )
         from .models import JournalLine
         JournalLine.objects.create(entry=legacy, account=cash, debit=Decimal("100.00"))
         JournalLine.objects.create(entry=legacy, account=revenue, credit=Decimal("100.00"))
+        legacy.status = JournalStatus.POSTED
+        legacy.save()
         draft = JournalEntry.objects.create(
             number="JE-LEG-2", posting_date="2026-09-01", description="legacy draft",
         )
