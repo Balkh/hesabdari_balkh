@@ -69,6 +69,9 @@ class JournalEntry(models.Model):
 
     class Meta:
         ordering = ["posting_date", "number"]
+        indexes = [
+            models.Index(fields=["source_type", "source_id"], name="je_src_type_id_idx"),
+        ]
 
     def save(self, *args, **kwargs):
         bypass = kwargs.pop("allow_protected_update", False)
