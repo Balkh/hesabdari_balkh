@@ -20,6 +20,7 @@ class JournalStatus(models.TextChoices):
 class Account(models.Model):
     code = models.CharField(max_length=20, unique=True)
     name = models.CharField(max_length=200)
+    name_fa = models.CharField(max_length=200, blank=True, default="")
     account_type = models.CharField(max_length=20, choices=AccountType.choices)
     parent = models.ForeignKey("self", null=True, blank=True, on_delete=models.PROTECT, related_name="children")
     is_posting = models.BooleanField(default=True)
