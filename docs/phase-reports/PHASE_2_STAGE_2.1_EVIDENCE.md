@@ -4,6 +4,7 @@
 **Date:** 2026-09-09
 **Authoritative scope:** Phase 2 handoff §§1–38 (Stage 2.1 only) + `PHASE_0_CONTRACT_V2.1.md` §16.4/Section 1/G1–G12
 **Status:** IMPLEMENTED · TESTED · EXECUTED · EVIDENCE READY · **AWAITING USER REVIEW**
+**User review (2026-09-09):** CONDITIONAL APPROVAL received — see §P. FROZEN declaration pending.
 
 Evidence classification per claim: `EXECUTED` / `OBSERVED` / `VERIFIED` / `INFERRED` / `NOT VERIFIED` / `DEFERRED` (§31).
 
@@ -281,3 +282,36 @@ AWAITING USER REVIEW
 ```
 
 (APPROVED / FROZEN / COMPLETE are the user's to declare — not claimed here.)
+
+---
+
+## P. USER REVIEW RECORD (2026-09-09)
+
+Reviewer verdict, quoted: **CONDITIONAL APPROVAL**. The following were positively
+verified by the reviewer: 38 canonical COA rows; idempotent seed execution;
+non-destructive seed behavior; seed atomic rollback; complete group-rejection
+matrix; complete posting-acceptance matrix; 2400 inactive/non-posting rejection;
+no leaked journals; Phase 1 regression green; no Stage 2.2 work started; no
+unrelated redesign. `OBSERVED` (reviewer's words, recorded — not self-declared).
+
+**Ruling 1 — 8100/8200 types (resolves §M.1):** keep current implementation
+(8100 = REVENUE, 8200 = EXPENSE) as the **current approved interpretation** unless
+the authoritative contract explicitly specifies otherwise. No code change made.
+
+**Ruling 2 — bilingual names (resolves §M.2):** keep current architecture
+(`name` = English, `name_fa` = Persian/Dari). Current labels may receive later
+wording refinement; that does NOT justify model or COA redesign. No code change made.
+
+Constraints for this clarification step (all honored): no unrelated code changes;
+`post_journal`, `JournalEntry`, `JournalLine` untouched; Stage 2.2 not started.
+`VERIFIED` via `git status`/`git diff` (docs-only diff — this file only).
+
+Post-clarification certification (tree state at commit time): `EXECUTED`
+
+```text
+manage.py check → System check identified no issues (0 silenced).
+pytest (full)   → 38 passed
+```
+
+Next: Stage 2.1 FROZEN declaration and Stage 2.2 authorization are the user's
+to give. Work is STOPPED until then.
