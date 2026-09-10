@@ -1,0 +1,899 @@
+============================= test session starts ==============================
+platform linux -- Python 3.13.14, pytest-8.4.2, pluggy-1.6.0
+django: version: 5.2.17, settings: config.settings.postgres (from option)
+rootdir: /home/user/hesabdari_balkh/backend
+configfile: pytest.ini
+plugins: django-4.14.0
+collected 21 items
+
+accounting/golden_tests.py 
+==================================================================
+GOLDEN 01 — BALANCED JOURNAL
+==================================================================
+
+INPUT
+  Debit 1110 Cash                 5000.00
+  Credit 3100 Owner Capital       5000.00
+  Currency                        USD
+  Rate                            70.0000
+
+EXPECTED
+  Total Debit = Total Credit      5000.00 = 5000.00
+
+JOURNAL JE-G01
+  JOURNAL Number                  JE-G01
+  Posting Date                    2026-03-01
+  Currency                        USD
+  Rate Snapshot                   70.0000
+  Rate Date                       2026-03-01
+  Rate Direction                  USD->AFN
+  Status                          POSTED
+  -- Debit Lines --               
+  Dr 1110 Cash in Hand            5000.00
+  -- Credit Lines --              
+  Cr 3100 Owner Capital           5000.00
+  TOTAL DEBIT                     5000.00
+  TOTAL CREDIT                    5000.00
+  AFN EQUIVALENT                  350000.00
+
+BALANCE
+  1110 Cash                       5000.00
+  3100 Owner Capital              5000.00
+
+RECONCILIATION
+  Lines vs stored totals          5000.00 == 5000.00
+  Trial balance difference        0.00
+
+STATUS
+  Result                          PASS
+
+.
+==================================================================
+GOLDEN 02 — UNBALANCED JOURNAL REJECTION
+==================================================================
+
+INPUT
+  Debit 1110 Cash                 5000.00
+  Credit 3100 Owner Capital       4999.00
+  Idempotency key                 golden-02
+
+EXPECTED
+  Posting rejected                JournalValidationError
+  No partial state                0 entries / 0 lines / 0 audits
+
+OBSERVED
+  Error                           Total debit must equal total credit
+  JournalEntry count              0
+  JournalLine count               0
+  Audit count                     0
+  Idempotency reservation releasedTrue
+  NumberSequence unchanged        True
+
+RECONCILIATION
+  before == after                 {'entries': 0, 'lines': 0, 'audits': 0, 'idem': 0, 'sequences': 0} == {'entries': 0, 'lines': 0, 'audits': 0, 'idem': 0, 'sequences': 0}
+
+STATUS
+  Result                          PASS
+
+.
+==================================================================
+GOLDEN 03 — CUSTOMER RECEIVABLE
+==================================================================
+
+INPUT
+  Debit 1310 Trade Receivables    1000.00
+  Credit 4110 Wholesale Sales     1000.00
+  Currency                        USD
+  Rate                            70.0000
+
+EXPECTED
+  Balanced                        1000.00 = 1000.00
+  1310 normal balance             DEBIT
+  4110 normal balance             CREDIT
+
+JOURNAL JE-G03
+  JOURNAL Number                  JE-G03
+  Posting Date                    2026-03-01
+  Currency                        USD
+  Rate Snapshot                   70.0000
+  Rate Date                       2026-03-01
+  Rate Direction                  USD->AFN
+  Status                          POSTED
+  -- Debit Lines --               
+  Dr 1310 Trade Receivables       1000.00
+  -- Credit Lines --              
+  Cr 4110 Wholesale Sales         1000.00
+  TOTAL DEBIT                     1000.00
+  TOTAL CREDIT                    1000.00
+  AFN EQUIVALENT                  70000.00
+
+BALANCE
+  1310 Receivable                 1000.00 (DEBIT)
+  4110 Sales                      1000.00 (CREDIT)
+
+SOURCE TRACE
+  journals_by_source(SALE, INV-G03)['JE-G03']
+
+RECONCILIATION
+  Debits == Credits               1000.00 == 1000.00
+
+STATUS
+  Result                          PASS
+
+.
+==================================================================
+GOLDEN 04 — SUPPLIER PAYABLE
+==================================================================
+
+INPUT
+  Debit 1410 Main Warehouse       2500.00
+  Credit 2110 Trade Payables      2500.00
+  Currency                        USD
+  Rate                            70.0000
+
+EXPECTED
+  Payable increases               2500.00 CREDIT
+
+JOURNAL JE-G04
+  JOURNAL Number                  JE-G04
+  Posting Date                    2026-03-01
+  Currency                        USD
+  Rate Snapshot                   70.0000
+  Rate Date                       2026-03-01
+  Rate Direction                  USD->AFN
+  Status                          POSTED
+  -- Debit Lines --               
+  Dr 1410 Main Warehouse          2500.00
+  -- Credit Lines --              
+  Cr 2110 Trade Payables          2500.00
+  TOTAL DEBIT                     2500.00
+  TOTAL CREDIT                    2500.00
+  AFN EQUIVALENT                  175000.00
+
+BALANCE
+  2110 Payable                    2500.00 (CREDIT)
+  1410 Inventory                  2500.00
+
+SOURCE TRACE
+  journals_by_source(PURCHASE, BILL-G04)['JE-G04']
+
+HISTORICAL RATE
+  Rate snapshot stored            70.0000
+  Rate date                       2026-03-01
+
+RECONCILIATION
+  Debits == Credits               2500.00 == 2500.00
+
+STATUS
+  Result                          PASS
+
+.
+==================================================================
+GOLDEN 05 — CUSTOMER RECEIPT
+==================================================================
+
+INPUT
+  Debit 1110 Cash                 1000.00
+  Credit 1310 Trade Receivables   1000.00
+  Currency                        USD
+  Rate                            70.0000
+
+EXPECTED
+  Receivable decreases            1000.00 -> 0.00
+  Cash increases                  0.00 -> 1000.00
+
+JOURNAL JE-G05B
+  JOURNAL Number                  JE-G05B
+  Posting Date                    2026-03-01
+  Currency                        USD
+  Rate Snapshot                   70.0000
+  Rate Date                       2026-03-01
+  Rate Direction                  USD->AFN
+  Status                          POSTED
+  -- Debit Lines --               
+  Dr 1110 Cash in Hand            1000.00
+  -- Credit Lines --              
+  Cr 1310 Trade Receivables       1000.00
+  TOTAL DEBIT                     1000.00
+  TOTAL CREDIT                    1000.00
+  AFN EQUIVALENT                  70000.00
+
+BALANCE
+  1310 before                     1000.00
+  1310 after                      0.00
+  1110 Cash                       1000.00 (DEBIT)
+
+SOURCE TRACE
+  journals_by_source(RECEIPT, RCPT-G05)['JE-G05B']
+
+RECONCILIATION
+  Debits == Credits               1000.00 == 1000.00
+
+STATUS
+  Result                          PASS
+
+.
+==================================================================
+GOLDEN 06 — SUPPLIER PAYMENT
+==================================================================
+
+INPUT
+  Debit 2110 Trade Payables       2500.00
+  Credit 1110 Cash                2500.00
+  Currency                        USD
+  Rate                            70.0000
+
+EXPECTED
+  Payable decreases               2500.00 -> 0.00
+  Cash decreases                  -2500.00
+
+JOURNAL JE-G06B
+  JOURNAL Number                  JE-G06B
+  Posting Date                    2026-03-01
+  Currency                        USD
+  Rate Snapshot                   70.0000
+  Rate Date                       2026-03-01
+  Rate Direction                  USD->AFN
+  Status                          POSTED
+  -- Debit Lines --               
+  Dr 2110 Trade Payables          2500.00
+  -- Credit Lines --              
+  Cr 1110 Cash in Hand            2500.00
+  TOTAL DEBIT                     2500.00
+  TOTAL CREDIT                    2500.00
+  AFN EQUIVALENT                  175000.00
+
+BALANCE
+  2110 before                     2500.00
+  2110 after                      0.00
+  1110 Cash                       -2500.00 (DEBIT)
+
+SOURCE TRACE
+  journals_by_source(PAYMENT, PAY-G06)['JE-G06B']
+
+RECONCILIATION
+  Debits == Credits               2500.00 == 2500.00
+
+STATUS
+  Result                          PASS
+
+.
+==================================================================
+GOLDEN 07 — PURCHASE
+==================================================================
+
+INPUT
+  Debit 1410 Main Warehouse       4000.00
+  Credit 2110 Trade Payables      4000.00
+  Currency                        USD
+  Rate                            70.0000
+
+EXPECTED
+  Inventory increases             4000.00
+  Payable increases               4000.00
+
+JOURNAL JE-G07
+  JOURNAL Number                  JE-G07
+  Posting Date                    2026-03-01
+  Currency                        USD
+  Rate Snapshot                   70.0000
+  Rate Date                       2026-03-01
+  Rate Direction                  USD->AFN
+  Status                          POSTED
+  -- Debit Lines --               
+  Dr 1410 Main Warehouse          4000.00
+  -- Credit Lines --              
+  Cr 2110 Trade Payables          4000.00
+  TOTAL DEBIT                     4000.00
+  TOTAL CREDIT                    4000.00
+  AFN EQUIVALENT                  280000.00
+
+BALANCE
+  1410 Inventory                  4000.00 (DEBIT)
+  2110 Payable                    4000.00 (CREDIT)
+
+HISTORICAL RATE
+  Rate snapshot                   70.0000
+  Rate date                       2026-03-01
+  AFN equivalent                  280000.00
+
+SOURCE TRACE
+  journals_by_source(PURCHASE, BILL-G07)['JE-G07']
+
+RECONCILIATION
+  Debits == Credits               4000.00 == 4000.00
+
+STATUS
+  Result                          PASS
+
+.
+==================================================================
+GOLDEN 08 — SALE + COGS PAIR
+==================================================================
+
+INPUT
+  Sale: Dr 1310 / Cr 4110         3000.00
+  COGS: Dr 5100 / Cr 1410         1800.00
+
+EXPECTED
+  Both journals balanced          yes
+  Inventory decreases             1800.00
+
+JOURNAL JE-G08A
+  SALE Number                     JE-G08A
+  Posting Date                    2026-03-01
+  Currency                        USD
+  Rate Snapshot                   70.0000
+  Rate Date                       2026-03-01
+  Rate Direction                  USD->AFN
+  Status                          POSTED
+  -- Debit Lines --               
+  Dr 1310 Trade Receivables       3000.00
+  -- Credit Lines --              
+  Cr 4110 Wholesale Sales         3000.00
+  TOTAL DEBIT                     3000.00
+  TOTAL CREDIT                    3000.00
+  AFN EQUIVALENT                  210000.00
+
+JOURNAL JE-G08B
+  COGS Number                     JE-G08B
+  Posting Date                    2026-03-01
+  Currency                        USD
+  Rate Snapshot                   70.0000
+  Rate Date                       2026-03-01
+  Rate Direction                  USD->AFN
+  Status                          POSTED
+  -- Debit Lines --               
+  Dr 5100 COGS                    1800.00
+  -- Credit Lines --              
+  Cr 1410 Main Warehouse          1800.00
+  TOTAL DEBIT                     1800.00
+  TOTAL CREDIT                    1800.00
+  AFN EQUIVALENT                  126000.00
+
+BALANCE
+  1310 Trade Receivables          3000.00 (DEBIT)
+  4110 Wholesale Sales            3000.00 (CREDIT)
+  5100 COGS                       1800.00 (DEBIT)
+  1410 Main Warehouse             0.00 (DEBIT)
+
+COMBINED
+  Total debit                     6600.00
+  Total credit                    6600.00
+
+SOURCE TRACE
+  journals_by_source(GOLDEN, INV-G08)['JE-G08A', 'JE-G08B']
+
+RECONCILIATION
+  Trial balance difference        0.00
+
+STATUS
+  Result                          PASS
+
+.
+==================================================================
+GOLDEN 09 — COGS MATH
+==================================================================
+
+INPUT
+  Quantity                        3.00
+  AVCO                            125.56
+
+EXPECTED
+  Round(3 x 125.555, 2) Half-Up   376.67
+  Float used                      no
+
+OBSERVED
+  core.money.cogs(3, 125.555)     376.67
+  Result type                     Decimal
+
+JOURNAL JE-G09
+  JOURNAL Number                  JE-G09
+  Posting Date                    2026-03-01
+  Currency                        USD
+  Rate Snapshot                   70.0000
+  Rate Date                       2026-03-01
+  Rate Direction                  USD->AFN
+  Status                          POSTED
+  -- Debit Lines --               
+  Dr 5100 COGS                    376.67
+  -- Credit Lines --              
+  Cr 1410 Main Warehouse          376.67
+  TOTAL DEBIT                     376.67
+  TOTAL CREDIT                    376.67
+  AFN EQUIVALENT                  26366.90
+
+BALANCE
+  5100 COGS                       376.67 (DEBIT)
+  1410 Main Warehouse             -376.67 (DEBIT)
+
+RECONCILIATION
+  376.67 == 376.67                376.67 == 376.67
+
+STATUS
+  Result                          PASS
+
+.
+==================================================================
+GOLDEN 10 — EXCHANGE HOUSE MOVEMENT
+==================================================================
+
+INPUT
+  Debit 1210 Exchange House A     6000.00
+  Credit 1110 Cash                6000.00
+  Currency                        USD
+  Rate                            70.0000
+
+EXPECTED
+  Cash decreases                  9000.00 -> 3000.00
+  Exchange house increases        6000.00
+
+JOURNAL JE-G10B
+  JOURNAL Number                  JE-G10B
+  Posting Date                    2026-03-01
+  Currency                        USD
+  Rate Snapshot                   70.0000
+  Rate Date                       2026-03-01
+  Rate Direction                  USD->AFN
+  Status                          POSTED
+  -- Debit Lines --               
+  Dr 1210 Exchange House A        6000.00
+  -- Credit Lines --              
+  Cr 1110 Cash in Hand            6000.00
+  TOTAL DEBIT                     6000.00
+  TOTAL CREDIT                    6000.00
+  AFN EQUIVALENT                  420000.00
+
+BALANCE
+  1110 Cash                       3000.00 (DEBIT)
+  1210 Exchange House             6000.00 (DEBIT)
+
+RATE SNAPSHOT
+  Rate                            70.0000
+  Rate date                       2026-03-01
+  Direction                       USD->AFN
+
+SOURCE TRACE
+  journals_by_source(EXCHANGE, EXH-G10)['JE-G10B']
+
+RECONCILIATION
+  Debits == Credits               6000.00 == 6000.00
+
+STATUS
+  Result                          PASS
+
+.
+==================================================================
+GOLDEN 11 — FX GAIN
+==================================================================
+
+INPUT
+  Historical                      100.00 USD @ 70.0000 AFN/USD
+  Historical AFN                  7000.00
+  Settlement                      100.00 USD @ 72.0000 AFN/USD
+  Settlement AFN                  7200.00
+
+EXPECTED
+  FX Gain                         200.00
+  Account                         8100 FX Gain
+  8200 used                       no
+
+JOURNAL JE-G11
+  JOURNAL Number                  JE-G11
+  Posting Date                    2026-03-01
+  Currency                        AFN
+  Rate Snapshot                   1.0000
+  Rate Date                       2026-03-01
+  Rate Direction                  AFN->AFN
+  Status                          POSTED
+  -- Debit Lines --               
+  Dr 1110 Cash in Hand            7200.00
+  -- Credit Lines --              
+  Cr 1310 Trade Receivables       7000.00
+  Cr 8100 Foreign Exchange Gain   200.00
+  TOTAL DEBIT                     7200.00
+  TOTAL CREDIT                    7200.00
+  AFN EQUIVALENT                  7200.00
+
+BALANCE
+  1110 Cash                       7200.00
+  1310 Receivable                 -7000.00
+  8100 FX Gain                    200.00 (CREDIT)
+
+RATE SNAPSHOT
+  Historical rate (input)         70.0000
+  Settlement rate                 72.0000
+  Recorded in description         golden fx | Realized FX GAIN: 100.00 USD settled at 72.0000 (historical 70.0000) difference 200.00
+
+SOURCE TRACE
+  journals_by_source(FX, OBL-G11) ['JE-G11']
+
+RECONCILIATION
+  7200.00 == 7200.00              7200.00 == 7200.00
+  Trial balance difference        0.00
+
+STATUS
+  Result                          PASS
+
+.
+==================================================================
+GOLDEN 12 — FX LOSS
+==================================================================
+
+INPUT
+  Historical                      100.00 USD @ 72.0000 AFN/USD
+  Historical AFN                  7200.00
+  Settlement                      100.00 USD @ 70.0000 AFN/USD
+  Settlement AFN                  7000.00
+
+EXPECTED
+  FX Loss                         200.00
+  Account                         8200 FX Loss
+  8100 used                       no
+
+JOURNAL JE-G12
+  JOURNAL Number                  JE-G12
+  Posting Date                    2026-03-01
+  Currency                        AFN
+  Rate Snapshot                   1.0000
+  Rate Date                       2026-03-01
+  Rate Direction                  AFN->AFN
+  Status                          POSTED
+  -- Debit Lines --               
+  Dr 1110 Cash in Hand            7000.00
+  Dr 8200 Foreign Exchange Loss   200.00
+  -- Credit Lines --              
+  Cr 1310 Trade Receivables       7200.00
+  TOTAL DEBIT                     7200.00
+  TOTAL CREDIT                    7200.00
+  AFN EQUIVALENT                  7200.00
+
+BALANCE
+  1110 Cash                       7000.00
+  1310 Receivable                 -7200.00
+  8200 FX Loss                    200.00 (DEBIT)
+
+RATE SNAPSHOT
+  Historical rate (input)         72.0000
+  Settlement rate                 70.0000
+
+SOURCE TRACE
+  journals_by_source(FX, OBL-G11) ['JE-G12']
+
+RECONCILIATION
+  7200.00 == 7200.00              7200.00 == 7200.00
+  Trial balance difference        0.00
+
+STATUS
+  Result                          PASS
+
+.
+==================================================================
+GOLDEN 13 — HISTORICAL RATE PRESERVATION
+==================================================================
+
+INPUT
+  Obligation                      100.00 USD @ 70.0000 (JE-G13A)
+  Current rate changed to         75.0000
+  Settlement rate                 72.0000
+
+EXPECTED
+  Obligation rate stays           70.0000
+  Settlement journal stores       72.0000
+  FX difference from 70 vs 72     200.00
+
+OBLIGATION BEFORE
+  number                          JE-G13A
+  rate                            70.0000
+  total_debit                     100.00
+  total_credit                    100.00
+  afn_total                       7000.00
+  direction                       USD->AFN
+  rate_date                       2026-01-01
+  status                          POSTED
+
+OBLIGATION AFTER
+  number                          JE-G13A
+  rate                            70.0000
+  total_debit                     100.00
+  total_credit                    100.00
+  afn_total                       7000.00
+  direction                       USD->AFN
+  rate_date                       2026-01-01
+  status                          POSTED
+
+JOURNAL JE-G13B
+  SETTLEMENT Number               JE-G13B
+  Posting Date                    2026-03-01
+  Currency                        AFN
+  Rate Snapshot                   1.0000
+  Rate Date                       2026-03-01
+  Rate Direction                  AFN->AFN
+  Status                          POSTED
+  -- Debit Lines --               
+  Dr 1110 Cash in Hand            7200.00
+  -- Credit Lines --              
+  Cr 1310 Trade Receivables       7000.00
+  Cr 8100 Foreign Exchange Gain   200.00
+  TOTAL DEBIT                     7200.00
+  TOTAL CREDIT                    7200.00
+  AFN EQUIVALENT                  7200.00
+
+RECONCILIATION
+  before == after                 True
+  Settlement AFN                  7200.00
+  Carrying AFN                    7000.00
+  Difference                      200.00
+
+STATUS
+  Result                          PASS
+
+.
+==================================================================
+GOLDEN 14 — DUPLICATE POSTING PREVENTION
+==================================================================
+
+INPUT
+  Idempotency key                 golden-14
+  First post                      1500.00 / 1500.00
+  Exact retry                     identical request
+  Key reuse                       different amount
+
+EXPECTED
+  Retry returns original          yes
+  No duplicate journal            1 entry
+  No duplicate audit              1 POST audit
+  Changed request                 rejected
+
+OBSERVED
+  First entry id                  20
+  Retry entry id                  20
+  Same object                     True
+  JournalEntry count              1
+  JournalLine count               2
+  POST audit count                1
+  Balance 1110                    1500.00
+  Reuse error                     This idempotency key was already used for a different operation
+
+RECONCILIATION
+  1500.00 == 1500.00              1500.00 == 1500.00
+
+STATUS
+  Result                          PASS
+
+.
+==================================================================
+GOLDEN 16 — SOURCE TRACEABILITY
+==================================================================
+
+INPUT
+  source_type                     SALE
+  source_id                       INV-G16
+  Journal                         Dr 1310 / Cr 4110 2200.00
+
+EXPECTED
+  journals_by_source finds it     yes
+  trace_source returns structure  yes
+  Lines reachable                 2
+  Trial balance includes it       yes
+  Traceable after reversal        yes
+  Fake business document          none
+
+OBSERVED
+  entry_id                        21
+  entry_number                    JE-G16
+  entry_status                    POSTED
+  source_type                     SALE
+  source_id                       INV-G16
+  resolved                        False
+  document                        None
+
+LINES
+  1310                            Dr 2200.00 Cr 0.00
+  4110                            Dr 0.00 Cr 2200.00
+
+BALANCES
+  1310                            0.00
+  4110                            0.00
+
+TRIAL BALANCE
+  Total debit                     2200.00
+  Total credit                    2200.00
+  Difference                      0.00
+
+AFTER REVERSAL
+  journals_by_source              ['JE-1404-00001', 'JE-G16']
+  Reversal                        JE-1404-00001
+  Original status                 REVERSED
+
+NO FABRICATION
+  NumberSequence rows             1
+
+STATUS
+  Result                          PASS
+
+.
+==================================================================
+GOLDEN R3 — ACCOUNT BALANCE REGRESSION (USD fixture)
+==================================================================
+
+EXPECTED
+  1110 Cash                       15000.00 DEBIT
+  1210 Exchange House             5000.00 DEBIT
+  1310 Receivable                 7000.00 DEBIT
+  1410 Inventory                  2500.00 DEBIT
+  2110 Payable                    4000.00 CREDIT
+  4110 Sales                      7000.00 CREDIT
+  5100 COGS                       1500.00 DEBIT
+  4100 Sales Revenue (group)      0.00 — non-posting group in the frozen COA
+
+OBSERVED
+  1110 Cash in Hand               15000.00 (DEBIT)
+  1210 Exchange House A           5000.00 (DEBIT)
+  1310 Trade Receivables          7000.00 (DEBIT)
+  1410 Main Warehouse             2500.00 (DEBIT)
+  2110 Trade Payables             4000.00 (CREDIT)
+  4100 Sales Revenue              0.00 (CREDIT)
+  4110 Wholesale Sales            7000.00 (CREDIT)
+  5100 COGS                       1500.00 (DEBIT)
+
+STATUS
+  Result                          PASS
+
+.
+==================================================================
+GOLDEN R4 — ACCOUNT BALANCE REGRESSION (8100 / 8200)
+==================================================================
+
+EXPECTED
+  8100 FX Gain                    200.00 CREDIT-normal
+  8200 FX Loss                    0.00 (unused)
+
+OBSERVED
+  8100                            200.00 (CREDIT)
+  8200                            0.00 (DEBIT)
+
+STATUS
+  Result                          PASS
+
+.
+==================================================================
+GOLDEN R2 — TRIAL BALANCE REGRESSION (AFN realized-FX fixture)
+==================================================================
+
+EXPECTED
+  Difference                      0.00
+  8100 classified                 CREDIT normal (REVENUE)
+  8200 classified                 DEBIT normal (EXPENSE)
+
+ROWS
+  1110 Cash in Hand               Dr 7200.00 Cr 3750.00 bal 3450.00 (DEBIT)
+  1310 Trade Receivables          Dr 0.00 Cr 7000.00 bal -7000.00 (DEBIT)
+  2110 Trade Payables             Dr 3500.00 Cr 0.00 bal -3500.00 (CREDIT)
+  8100 Foreign Exchange Gain      Dr 0.00 Cr 200.00 bal 200.00 (CREDIT)
+  8200 Foreign Exchange Loss      Dr 250.00 Cr 0.00 bal 250.00 (DEBIT)
+
+TOTALS
+  Total debit                     10950.00
+  Total credit                    10950.00
+  Difference                      0.00
+
+STATUS
+  Result                          PASS
+
+.
+==================================================================
+GOLDEN R1 — TRIAL BALANCE REGRESSION (USD fixture)
+==================================================================
+
+EXPECTED
+  Difference                      0.00
+  DRAFT excluded                  yes
+  4200 contra-revenue             DEBIT normal
+  5200 contra-COGS                CREDIT normal
+
+ROWS
+  1110 Cash in Hand               Dr 10000.00 Cr 0.00 bal 10000.00 (DEBIT)
+  1310 Trade Receivables          Dr 3000.00 Cr 300.00 bal 2700.00 (DEBIT)
+  1410 Main Warehouse             Dr 2700.00 Cr 700.00 bal 2000.00 (DEBIT)
+  2110 Trade Payables             Dr 150.00 Cr 2000.00 bal 1850.00 (CREDIT)
+  3100 Owner Capital              Dr 0.00 Cr 10000.00 bal 10000.00 (CREDIT)
+  4110 Wholesale Sales            Dr 0.00 Cr 3000.00 bal 3000.00 (CREDIT)
+  4200 Sales Returns              Dr 300.00 Cr 0.00 bal 300.00 (DEBIT)
+  5100 COGS                       Dr 700.00 Cr 700.00 bal 0.00 (DEBIT)
+  5200 Purchase Returns           Dr 0.00 Cr 150.00 bal 150.00 (CREDIT)
+
+TOTALS
+  Total debit                     16850.00
+  Total credit                    16850.00
+  Difference                      0.00
+  Balanced                        True
+
+STATUS
+  Result                          PASS
+
+.
+==================================================================
+GOLDEN R5 — HISTORICAL INTEGRITY (Stage 2.1–2.4 data)
+==================================================================
+
+BEFORE
+  Currencies                      2
+  Accounts                        38
+  Journals                        3
+  Lines                           6
+  Audit events                    2
+
+AFTER
+  Currencies                      2
+  Accounts                        38
+  Journals                        5
+  Lines                           12
+  Audit events                    4
+
+NEW RECORDS (expected only)
+  Journals                        ['JE-HIST-FX', 'JE-1404-00002']
+  Lines                           6
+  Audits                          ['POST', 'REVERSE']
+
+FROZEN FACTS
+  COA account count               38
+  2400 inactive                   True
+  Legacy row currency             None
+  Legacy totals readable          {'total_debit': Decimal('250.00'), 'total_credit': Decimal('250.00')}
+  Source index present            True
+
+RECONCILIATION
+  COA unchanged                   True
+  Currencies unchanged            True
+  Existing journals unchanged     True
+  Existing lines unchanged        True
+  Existing audits unchanged       True
+
+STATUS
+  Result                          PASS
+
+.
+==================================================================
+GOLDEN 15 — ATOMIC ROLLBACK
+==================================================================
+
+INPUT
+  Post                            8000.00 / 8000.00
+  Failure injection               audit writer raises after persist
+  Idempotency key                 golden-15
+
+EXPECTED
+  State after failure             identical to state before
+  Retry with same key             succeeds
+
+BEFORE FAILURE
+  entries                         0
+  lines                           0
+  audits                          0
+  idem                            0
+  sequences                       0
+
+AFTER FAILURE
+  entries                         0
+  lines                           0
+  audits                          0
+  idem                            0
+  sequences                       0
+
+AFTER RETRY
+  JournalEntry count              1
+  JournalLine count               2
+  Entry number                    JE-G15
+  Idempotency key                 golden-15
+
+RECONCILIATION
+  before == after failure         True
+  8000.00 == 8000.00              8000.00 == 8000.00
+
+STATUS
+  Result                          PASS
+
+.
+
+============================== 21 passed in 2.49s ==============================
