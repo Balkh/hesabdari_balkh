@@ -4,7 +4,7 @@ django: version: 5.2.17, settings: config.settings.postgres (from option)
 rootdir: /home/user/hesabdari_balkh/backend
 configfile: pytest.ini
 plugins: django-4.14.0
-collected 21 items
+collected 24 items
 
 accounting/golden_tests.py 
 ==================================================================
@@ -505,6 +505,25 @@ RATE SNAPSHOT
   Settlement rate                 72.0000
   Recorded in description         golden fx | Realized FX GAIN: 100.00 USD settled at 72.0000 (historical 70.0000) difference 200.00
 
+SETTLEMENT RECORD (structured)
+  Kind                            RECEIVABLE
+  Transaction date                2026-03-01
+  Source currency                 USD
+  Source amount                   100.00
+  Target currency                 AFN
+  Target amount                   7200.00
+  SETTLEMENT RATE (manual)        72.0000
+  Rate direction                  USD->AFN
+  Historical rate                 70.0000
+  Source/obligation account       1310
+  Destination account             1110
+  FX account                      8100
+  Carrying value (AFN)            7000.00
+  Settlement value (AFN)          7200.00
+  Difference                      200.00
+  Direction                       GAIN
+  Stored as structured data       FXSettlement row (not description text)
+
 SOURCE TRACE
   journals_by_source(FX, OBL-G11) ['JE-G11']
 
@@ -556,6 +575,25 @@ BALANCE
 RATE SNAPSHOT
   Historical rate (input)         72.0000
   Settlement rate                 70.0000
+
+SETTLEMENT RECORD (structured)
+  Kind                            RECEIVABLE
+  Transaction date                2026-03-01
+  Source currency                 USD
+  Source amount                   100.00
+  Target currency                 AFN
+  Target amount                   7000.00
+  SETTLEMENT RATE (manual)        70.0000
+  Rate direction                  USD->AFN
+  Historical rate                 72.0000
+  Source/obligation account       1310
+  Destination account             1110
+  FX account                      8200
+  Carrying value (AFN)            7200.00
+  Settlement value (AFN)          7000.00
+  Difference                      200.00
+  Direction                       LOSS
+  Stored as structured data       FXSettlement row (not description text)
 
 SOURCE TRACE
   journals_by_source(FX, OBL-G11) ['JE-G12']
@@ -855,6 +893,183 @@ STATUS
 
 .
 ==================================================================
+GOLDEN R6A — MANUAL SETTLEMENT RATE — EXAMPLE A (50,000 AFN -> USD @ 70)
+==================================================================
+
+INPUT
+  Source amount                   50000.00 AFN
+  Source currency                 AFN
+  Target currency                 USD
+  Settlement rate (manual)        70
+  Destination                     1210 Exchange House A
+  Reference                       EXCH-X
+
+EXPECTED
+  Target amount = 50000 / 70      714.29 USD
+  Rate persisted structurally     70.0000
+  Journal                         AFN book values, 2 lines, no 8100/8200
+
+JOURNAL JE-R6A
+  JOURNAL Number                  JE-R6A
+  Posting Date                    2026-04-02
+  Currency                        AFN
+  Rate Snapshot                   1.0000
+  Rate Date                       2026-04-02
+  Rate Direction                  AFN->AFN
+  Status                          POSTED
+  -- Debit Lines --               
+  Dr 1210 Exchange House A        50000.00
+  -- Credit Lines --              
+  Cr 1110 Cash in Hand            50000.00
+  TOTAL DEBIT                     50000.00
+  TOTAL CREDIT                    50000.00
+  AFN EQUIVALENT                  50000.00
+
+SETTLEMENT RECORD (structured)
+  Kind                            CONVERSION
+  Transaction date                2026-04-02
+  Source currency                 AFN
+  Source amount                   50000.00
+  Target currency                 USD
+  Target amount                   714.29
+  SETTLEMENT RATE (manual)        70.0000
+  Rate direction                  AFN->USD
+  Historical rate                 —
+  Source/obligation account       1110
+  Destination account             1210
+  FX account                      — (no FX line)
+  Carrying value (AFN)            50000.00
+  Settlement value (AFN)          50000.00
+  Difference                      0.00
+  Direction                       NONE
+  Stored as structured data       FXSettlement row (not description text)
+
+BALANCE
+  1110 Cash                       -50000.00
+  1210 Exchange House             50000.00
+
+RECONCILIATION
+  50000.00 == 50000.00            50000.00 == 50000.00
+  Structured rate == entered rate 70.0000 == 70.0000
+
+STATUS
+  Result                          PASS
+
+.
+==================================================================
+GOLDEN R6B — MANUAL SETTLEMENT RATE — EXAMPLE B (500 USD -> AFN @ 72)
+==================================================================
+
+INPUT
+  Source amount                   500.00 USD
+  Source currency                 USD
+  Target currency                 AFN
+  Settlement rate (manual)        72
+  Historical carrying rate        70
+  Destination                     1110 Cash
+
+EXPECTED
+  Target amount = 500 x 72        36000.00 AFN
+  Carrying value = 500 x 70       35000.00 AFN
+  Realized gain                   1000.00 -> Cr 8100
+
+JOURNAL JE-R6B
+  JOURNAL Number                  JE-R6B
+  Posting Date                    2026-04-03
+  Currency                        AFN
+  Rate Snapshot                   1.0000
+  Rate Date                       2026-04-03
+  Rate Direction                  AFN->AFN
+  Status                          POSTED
+  -- Debit Lines --               
+  Dr 1110 Cash in Hand            36000.00
+  -- Credit Lines --              
+  Cr 1310 Trade Receivables       35000.00
+  Cr 8100 Foreign Exchange Gain   1000.00
+  TOTAL DEBIT                     36000.00
+  TOTAL CREDIT                    36000.00
+  AFN EQUIVALENT                  36000.00
+
+SETTLEMENT RECORD (structured)
+  Kind                            RECEIVABLE
+  Transaction date                2026-04-03
+  Source currency                 USD
+  Source amount                   500.00
+  Target currency                 AFN
+  Target amount                   36000.00
+  SETTLEMENT RATE (manual)        72.0000
+  Rate direction                  USD->AFN
+  Historical rate                 70.0000
+  Source/obligation account       1310
+  Destination account             1110
+  FX account                      8100
+  Carrying value (AFN)            35000.00
+  Settlement value (AFN)          36000.00
+  Difference                      1000.00
+  Direction                       GAIN
+  Stored as structured data       FXSettlement row (not description text)
+
+BALANCE
+  1110 Cash                       36000.00
+  1310 Receivable                 -35000.00
+  8100 FX Gain                    1000.00
+
+RECONCILIATION
+  36000.00 == 36000.00            36000.00 == 36000.00
+  Structured rate == entered rate 72.0000 == 72.0000
+
+STATUS
+  Result                          PASS
+
+.
+==================================================================
+GOLDEN R6C — MANUAL SETTLEMENT RATE — EXAMPLE C (text + structured, then rate changes)
+==================================================================
+
+INPUT
+  User text                       50,000 AFN converted to USD at rate 70 and received by Exchange X
+  Later global rates              75.0000 then 80.0000
+
+EXPECTED
+  Structured fields hold the data independently of the text
+  Historical rate unchanged       70.0000
+
+OBSERVED (structured, not text)
+  Kind                            CONVERSION
+  Transaction date                2026-04-04
+  Source currency                 AFN
+  Source amount                   50000.00
+  Target currency                 USD
+  Target amount                   714.29
+  SETTLEMENT RATE (manual)        70.0000
+  Rate direction                  AFN->USD
+  Historical rate                 —
+  Source/obligation account       1110
+  Destination account             1210
+  FX account                      — (no FX line)
+  Carrying value (AFN)            50000.00
+  Settlement value (AFN)          50000.00
+  Difference                      0.00
+  Direction                       NONE
+  Stored as structured data       FXSettlement row (not description text)
+
+BEFORE/AFTER GLOBAL RATE CHANGE
+  settlement_rate                 70.0000 -> 70.0000
+  source_amount                   50000.00 -> 50000.00
+  target_amount                   714.29 -> 714.29
+  rate_direction                  AFN->USD -> AFN->USD
+  transaction_date                2026-04-04 -> 2026-04-04
+  destination                     1210 -> 1210
+
+RECONCILIATION
+  before == after                 True
+  Structured rate != any later global rateTrue
+
+STATUS
+  Result                          PASS
+
+.
+==================================================================
 GOLDEN 15 — ATOMIC ROLLBACK
 ==================================================================
 
@@ -896,4 +1111,4 @@ STATUS
 
 .
 
-============================== 21 passed in 2.49s ==============================
+============================== 24 passed in 2.01s ==============================

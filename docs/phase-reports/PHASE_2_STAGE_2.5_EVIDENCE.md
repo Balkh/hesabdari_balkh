@@ -3,13 +3,26 @@
 **Branch:** `phase/2` (never `main`)
 **Baseline commit:** `ad5359bced0149807f27c3116c44f5aa213b800f` (Stage 2.4, FROZEN)
 **`main` untouched at:** `846a777438e1375331a7ce2821c9483ef5f77fc7`
-**Final commit:** one clean Stage 2.5 commit on `phase/2`, message
-`feat(accounting): complete Phase 2 Stage 2.5 realized FX` — exact SHA from
-`git rev-parse HEAD` (reproduced in the review response; the report cannot
-contain its own hash).
+**Stage 2.5 implementation commit:** `ca59078f69b2ad6db6a1a86bbc7b87414b94ed4e`
+**Correction/closure commit:** one clean commit on `phase/2` implementing the user
+rulings L1 + L2 — exact SHA from `git rev-parse HEAD` (reproduced in the review
+response; a report cannot contain its own hash).
 **Date of execution:** 2026-09-10 (UTC)
 **Golden-suite raw output:** `docs/phase-reports/PHASE_2_STAGE_2.5_GOLDEN_OUTPUT.txt`
-(21 printed blocks, captured on PostgreSQL)
+(24 printed blocks, captured on PostgreSQL)
+
+---
+
+## 0. User-ruling correction (this revision)
+
+| Ruling | Required | Implemented | Evidence |
+|---|---|---|---|
+| **L1** — settlement rate | Manual transaction-time rate, persisted as **structured** data, never taken from the global `ExchangeRate` table, never stored only in description/reference | New immutable `FXSettlement` model (migration `0007`) holding source/target currency + amount, `settlement_rate` (4dp), `rate_direction`, `transaction_date`, obligation + destination accounts, `historical_rate`, carrying/settlement values and difference; written in the **same transaction** as the journal. `JournalEntry.rate` keeps its own `1.0000 / AFN->AFN` snapshot. | §9, §11.1, blocks R6A/R6B/R6C, `ManualSettlementRateTests` |
+| **L2** — revenue account | Post revenue to 4110; 4100 stays a non-posting group | Already the case in the committed implementation; now covered by an explicit test asserting 4100 rejects postings and 4110 accepts them | §11.1 item 25, `test_revenue_uses_4110_not_non_posting_4100` |
+
+No other behaviour changed: the verified realized-FX rules, currency-safety
+rules, money rules, idempotency, atomicity, reversal and audit contracts are
+untouched (§8, §17–§21 all re-executed).
 
 Classification legend: `EXECUTED` = command actually run · `OBSERVED` = output read
 from that run · `VERIFIED` = proven by artefact/inspection · `INFERRED` = reasoning,
@@ -57,14 +70,13 @@ AVCO engine, any business module, any UI.
 
 | File | Change |
 |---|---|
-| `backend/accounting/fx.py` | **NEW** — realized-FX calculation + posting helper |
-| `backend/accounting/fx_tests.py` | **NEW** — 69 tests (vectors, directions, validation, idempotency, rollback, reversal) |
-| `backend/accounting/golden_tests.py` | **NEW** — 21 tests: 16 goldens + 4 regression blocks + historical-integrity |
+| `backend/accounting/fx.py` | **NEW** — realized-FX calculation + posting helper; extended with `post_fx_conversion` and structured-record persistence |
+| `backend/accounting/fx_tests.py` | **NEW** — 95 tests (vectors, directions, validation, L1 manual-rate, idempotency, rollback, reversal) |
+| `backend/accounting/golden_tests.py` | **NEW** — 24 tests: 16 goldens + 8 regression blocks (R1–R5, R6A–R6C) + historical-integrity |
+| `backend/accounting/models.py` | **ADDITIVE** — new `FXSettlement` model appended (no existing class/field altered) |
+| `backend/accounting/migrations/0007_fx_settlement_record.py` | **NEW** — minimal additive migration (§21: forward + reverse verified) |
 | `docs/phase-reports/PHASE_2_STAGE_2.5_EVIDENCE.md` | **NEW** — this report |
-| `docs/phase-reports/PHASE_2_STAGE_2.5_GOLDEN_OUTPUT.txt` | **NEW** — captured golden-suite printout (PostgreSQL) |
-
-No migration was created: Stage 2.5 adds no schema. `makemigrations --check`
-reports "No changes detected" on both backends.
+| `docs/phase-reports/PHASE_2_STAGE_2.5_GOLDEN_OUTPUT.txt` | **NEW** — captured golden-suite printout (PostgreSQL, 24 blocks) |
 
 ## 6. Files intentionally unchanged
 
@@ -118,12 +130,27 @@ All four directions are covered by executed tests with exact line assertions
   amounts under a USD journal would be multiplied by the rate a second time. With
   USD lines the golden amounts are also unreachable exactly (7000 ÷ 72 = 97.2222…,
   which 2-decimal line columns cannot hold without drift).
-  Consequence — **the settlement rate is preserved in the journal's description and
-  in every line's `reference` field, not in the `rate` column** (which necessarily
-  holds `1.0000` for a base-currency journal). This is the one place where §10's
-  wording ("settlement journal contains C") is satisfied by recorded context rather
-  than by the `rate` column; the frozen single-currency journal cannot do both.
-  **Flagged for the user's ruling.**
+  Consequence — the `rate` column of that journal necessarily holds `1.0000`, so
+  it cannot also store the settlement rate (putting 72 there would misrepresent
+  the journal's currency context and multiply its AFN equivalent by 72).
+* **L1 RESOLVED — the settlement rate is structured persisted transaction data.**
+  `JournalEntry.rate` stays `1.0000 / AFN->AFN`; the manually entered rate is
+  stored on the immutable `FXSettlement` row linked to that journal:
+  `settlement_rate` (4 dp) together with `source_currency`, `source_amount`,
+  `target_currency`, `target_amount`, `rate_direction`, `transaction_date`,
+  `historical_rate`, `obligation_account`, `settlement_account`, `fx_account`,
+  `carrying_value`, `settlement_value`, `difference` and `direction`.
+  It is written **inside the same atomic transaction** as the journal, so it can
+  never exist without it (or survive its rollback).
+  It is **never read from** the `ExchangeRate` table and **never updated** by a
+  later rate: `test_later_global_rate_does_not_change_settlement` creates global
+  rates of 75 and 80 afterwards and proves the snapshot is untouched.
+  `description` / `reference` still carry the user's own explanation (Example C)
+  but are **not** the storage location: `test_rate_is_not_stored_only_in_description_or_reference`
+  posts with an empty description and empty reference and still reads the exact
+  rate back from the structured columns, filtering with
+  `FXSettlement.objects.filter(settlement_rate=...)`,
+  `...filter(rate_direction=...)`.
 * **Cross-currency settlement is rejected** (`obligation_currency !=
   settlement_currency`) with `JournalValidationError` — no silent conversion, no
   hidden bridge journal, no new multi-currency model (§5).
@@ -140,7 +167,8 @@ contract. No binary float anywhere. Verified by vector G (70.1234 / 72.1234 →
 
 ## 11. §1.13 Golden Suite — 16/16 (`EXECUTED`, all PASS)
 
-Full printed output: `PHASE_2_STAGE_2.5_GOLDEN_OUTPUT.txt`. Summary table:
+Full printed output: `PHASE_2_STAGE_2.5_GOLDEN_OUTPUT.txt` (24 blocks, all PASS,
+captured on PostgreSQL). Summary table:
 
 | # | Scenario | Journal(s) | Result |
 |---|---|---|---|
@@ -162,7 +190,97 @@ Full printed output: `PHASE_2_STAGE_2.5_GOLDEN_OUTPUT.txt`. Summary table:
 | 16 | Source traceability | SALE / INV-G16 round-trip + after reversal | PASS |
 
 Blocks R1–R5 (regressions: two trial-balance fixtures, two account-balance
-fixtures, historical integrity) are in the same output file and all PASS.
+fixtures, historical integrity) and R6A–R6C (manual settlement rate,
+Examples A/B/C) are in the same output file and all PASS.
+
+### 11.1 Manual settlement rate — L1 / L2 evidence (`EXECUTED`)
+
+Mapping of the 25 required tests to the executed tests:
+
+| # | Requirement | Test |
+|---|---|---|
+| 1 | Manual settlement rate accepted | `test_manual_settlement_rate_is_accepted` |
+| 2 | Persisted structurally | `test_manual_settlement_rate_is_persisted_structurally` |
+| 3 | Not only in description/reference | `test_rate_is_not_stored_only_in_description_or_reference` |
+| 4 | 50,000 AFN → USD @70 keeps rate=70 | `test_example_a_50000_afn_to_usd_at_70`, block R6A |
+| 5 | 500 USD → AFN @72 keeps rate=72, AFN=36,000 | `test_example_b_500_usd_to_afn_at_72` (+ zero-FX variant), block R6B |
+| 6 | Rate direction preserved | `test_rate_direction_preserved_both_paths` |
+| 7 | Later global rate does not change it | `test_later_global_rate_does_not_change_settlement`, `test_conversion_rate_not_taken_from_exchange_rate_table`, block R6C |
+| 8–11 | Customer/supplier gain and loss | `FXDirectionTests` (4 tests) + vectors B–E |
+| 12 | Zero FX | `ZeroFXTests` (3 tests) |
+| 13 | Partial settlement | `PartialSettlementTests` (3 tests) |
+| 14 | Invalid settlement rates | 7 conversion-path tests (zero/negative/missing/float rate, zero/negative amount, 2400) |
+| 15 | Cross-currency invalid cases | `test_conversion_cross_currency_rejected`, `test_conversion_same_currency_rejected`, `test_foreign_to_base_must_use_the_realized_path`, `test_conversion_same_account_rejected`, `test_conversion_inactive_currency_rejected` |
+| 16 | Idempotency | `FXIdempotencyTests` (7 tests) |
+| 17 | Atomic rollback | `FXAtomicRollbackTests` (3 tests, `TransactionTestCase`) |
+| 18 | Reversal preserves the settlement snapshot | `test_reversal_preserves_settlement_rate_snapshot` |
+| 19 | Audit records correct | `test_audit_records_remain_correct` |
+| 20 | Source traceability | GOLDEN 16 + `test_source_metadata_stored` |
+| 21 | Trial balance balanced | blocks R1 (USD) and R2 (AFN FX) |
+| 22 | Account balances correct | blocks R3 and R4 |
+| 23 | 8100 remains Revenue | `test_fx_accounts_keep_their_coa_type`, block R2 |
+| 24 | 8200 remains Expense | `test_fx_accounts_keep_their_coa_type`, block R2 |
+| 25 | Revenue uses 4110, not 4100 | `test_revenue_uses_4110_not_non_posting_4100` |
+
+Verbatim excerpt — block R6A (PostgreSQL run):
+
+```
+GOLDEN R6A — MANUAL SETTLEMENT RATE — EXAMPLE A (50,000 AFN -> USD @ 70)
+==================================================================
+
+INPUT
+  Source amount                   50000.00 AFN
+  Source currency                 AFN
+  Target currency                 USD
+  Settlement rate (manual)        70
+  Destination                     1210 Exchange House A
+  Reference                       EXCH-X
+
+EXPECTED
+  Target amount = 50000 / 70      714.29 USD
+  Rate persisted structurally     70.0000
+  Journal                         AFN book values, 2 lines, no 8100/8200
+
+JOURNAL JE-R6A
+  JOURNAL Number                  JE-R6A
+  Posting Date                    2026-04-02
+  Currency                        AFN
+  Rate Snapshot                   1.0000
+  Rate Date                       2026-04-02
+  Rate Direction                  AFN->AFN
+  Status                          POSTED
+  -- Debit Lines --
+  Dr 1210 Exchange House A        50000.00
+  -- Credit Lines --
+  Cr 1110 Cash in Hand            50000.00
+  TOTAL DEBIT                     50000.00
+  TOTAL CREDIT                    50000.00
+  AFN EQUIVALENT                  50000.00
+
+SETTLEMENT RECORD (structured)
+  Kind                            CONVERSION
+  Transaction date                2026-04-02
+  Source currency                 AFN
+  Source amount                   50000.00
+  Target currency                 USD
+  Target amount                   714.29
+  SETTLEMENT RATE (manual)        70.0000
+  Rate direction                  AFN->USD
+  Historical rate                 —
+  Source/obligation account       1110
+  Destination account             1210
+  FX account                      — (no FX line)
+  Carrying value (AFN)            50000.00
+  Settlement value (AFN)          50000.00
+  Difference                      0.00
+  Direction                       NONE
+  Stored as structured data       FXSettlement row (not description text)
+```
+
+Block R6B proves Example B (500 USD @72 → 36,000 AFN, gain 1,000 to 8100) and
+block R6C proves that after the global rate moves to 75 and then 80 the stored
+settlement rate is still exactly 70.0000, while the user's explanation text is
+preserved alongside the structured fields.
 
 Verbatim excerpt — GOLDEN 11 (PostgreSQL run):
 
@@ -378,13 +496,13 @@ Frozen facts: 38 accounts · 2400 inactive · legacy row currency None ·
 ```
 manage.py check  (config.settings.development)     System check identified no issues (0 silenced).
 makemigrations --check --dry-run                   No changes detected
-pytest -q                                          217 passed in 4.46s
-pytest -q accounting/fx_tests.py accounting/golden_tests.py   90 passed in 1.73s
+pytest -q                                          246 passed in 5.28s
+pytest -q accounting/fx_tests.py accounting/golden_tests.py   119 passed
 manage.py test                                     Ran 17 tests — OK
-manage.py test --pattern="*_tests.py"              Ran 200 tests — OK
+manage.py test --pattern="*_tests.py"              Ran 229 tests — OK
 ```
 
-17 + 200 = 217: Django's default discovery pattern (`test*.py`) does not match this
+17 + 229 = 246: Django's default discovery pattern (`test*.py`) does not match this
 project's `*_tests.py` convention, so both patterns together reproduce the pytest
 total exactly. Stage 2.5 kept the frozen `*_tests.py` convention.
 
@@ -392,14 +510,20 @@ total exactly. Stage 2.5 kept the frozen `*_tests.py` convention.
 
 ```
 manage.py check      (config.settings.postgres)    System check identified no issues (0 silenced).
-manage.py migrate --no-input                       No migrations to apply (0001–0006 already [X])
-manage.py showmigrations accounting                0001..0006 all [X]
+manage.py migrate --no-input                       accounting.0007_fx_settlement_record ... OK
+manage.py showmigrations accounting                0001..0007 all [X]
 makemigrations --check --dry-run                   No changes detected
-pytest -q --ds=config.settings.postgres            217 passed in 11.51s
-pytest --ds=... accounting/fx_tests.py accounting/golden_tests.py   90 passed in 4.94s
+pytest -q --ds=config.settings.postgres            246 passed in 9.74s
+pytest --ds=... accounting/fx_tests.py accounting/golden_tests.py   119 passed in 4.53s
 manage.py test                                     Ran 17 tests — OK
-manage.py test --pattern="*_tests.py"              Ran 200 tests in 10.076s — OK
+manage.py test --pattern="*_tests.py"              Ran 229 tests in 8.182s — OK
 ```
+
+`FXSettlement` on PostgreSQL (`EXECUTED`): table `accounting_fxsettlement` with a
+unique `entry_id` (one settlement record per journal), `fx_settle_date_idx` on
+`transaction_date`, `settlement_rate` as `numeric(20,4)` and the amount columns as
+`numeric(20,2)`; the behavioural suite (including rollback, idempotency and the
+manual-rate tests) ran against this schema.
 
 Schema verified on PostgreSQL (`EXECUTED`): index `je_src_type_id_idx` present
 (`USING btree (source_type, source_id)`); `journal_line_one_sided_positive` CHECK
@@ -416,9 +540,22 @@ PostgreSQL 17.11 (Debian 17.11-0+deb13u1) on x86_64-pc-linux-gnu, compiled by gc
 
 ## 28. Migration evidence
 
-No schema change: **no migration created**; `0001`–`0006` untouched;
-`makemigrations --check` clean on both backends; forward migration state `[X]` for
-0001–0006 on PostgreSQL (0006 re-verified applied).
+One **minimal additive** migration — `0007_fx_settlement_record` (user ruling L1):
+it only creates the new `FXSettlement` table. `0001`–`0006` untouched, no data
+rewritten, nothing squashed. Verified on PostgreSQL (`EXECUTED`):
+
+```
+manage.py migrate accounting 0007   Applying accounting.0007_fx_settlement_record... OK
+pg_indexes for accounting_fxsettlement -> 8 (incl. fx_settle_date_idx)
+manage.py migrate accounting 0006   Unapplying accounting.0007_fx_settlement_record... OK
+pg_indexes for accounting_fxsettlement -> 0
+manage.py migrate accounting 0007   Applying accounting.0007_fx_settlement_record... OK
+pg_indexes for accounting_fxsettlement -> 8
+makemigrations --check --dry-run    No changes detected   (both backends)
+```
+
+The first Stage 2.5 commit (`ca59078`) added no schema; this correction commit adds
+exactly one table.
 
 ## 29. Django check evidence
 
@@ -427,29 +564,34 @@ No schema change: **no migration created**; `0001`–`0006` untouched;
 
 ## 30. pytest evidence
 
-217 passed / 0 failed on SQLite and on PostgreSQL (127 frozen + 90 new: 69 FX +
-21 golden/regression). No skips in the accounting core.
+246 passed / 0 failed on SQLite and on PostgreSQL (127 frozen + 119 new: 95 FX +
+24 golden/regression). No skips in the accounting core.
 
 ## 31. Frontend evidence
 
 ```
 npm test         1..4 · tests 4 · pass 4 · fail 0
-npm run build    ✓ 31 modules transformed · ✓ built in 276ms
+npm run build    ✓ 31 modules transformed · ✓ built in 203ms
 ```
 
-(Frontend is out of scope and untouched; re-run because `node_modules` is not
-preserved between sessions.)
+`node_modules` is not preserved between sessions, so `npm ci` was re-run first;
+the first `npm run build` attempt failed with `tsc: not found` for exactly that
+reason and passed after the reinstall — recorded here rather than hidden.
+Frontend is out of scope and untouched.
 
 ## 32. Known limitations (actual, not hedges)
 
-* **L1 — settlement rate lives in the journal text, not the `rate` column.** The
-  settlement journal is base-currency (§9); its `rate` column necessarily holds
-  `1.0000`. The settlement rate is preserved in the description and in every line's
-  `reference`, and is returned by `compute_realized_fx`. Needs the user's ruling.
-* **L2 — revenue is posted to 4110, not 4100.** In the frozen Stage 2.1 COA,
-  `4100 Sales Revenue` is a non-posting group account (`is_posting=False`), so the
-  brief's "Cr 4100" is unreachable without breaking a frozen contract. 4100 is
-  verified as a group with zero direct activity; 4110 carries the revenue.
+* **L1 — RESOLVED.** The settlement rate is now structured persisted data
+  (`FXSettlement.settlement_rate`), never derived from the `ExchangeRate` table and
+  never stored only as text. Residual, by design: `JournalEntry.rate` remains
+  `1.0000 / AFN->AFN` because the settlement journal's lines are AFN book values —
+  the rate lives on the linked settlement row, not on the journal.
+* **L2 — RESOLVED (no change needed).** Revenue is posted to **4110**; `4100`
+  remains a non-posting group account in the frozen COA. An explicit test now
+  asserts that 4100 rejects postings and 4110 accepts them.
+
+### Remaining limitations
+
 * **L3 — trial balance / account balances are proven on single-currency fixtures.**
   The frozen Stage 2.4 read layer refuses to merge currencies, so an FX scenario
   (USD obligation journal + AFN settlement journal) is reconciled at entry level
@@ -513,31 +655,38 @@ cd frontend && npm test && npm run build
 | Item | Result |
 |---|---|
 | Baseline verified | PASS |
-| No duplicate architecture | PASS |
+| No duplicate architecture | PASS (one helper module, one additive table) |
 | Realized FX helper | PASS (minimal, reuses the frozen engine) |
 | Customer gain / loss | PASS |
 | Supplier gain / loss | PASS |
 | Historical rate snapshot preserved | PASS |
-| Settlement rate recorded | PASS (text/context — limitation L1) |
+| **L1 — settlement rate structured, manual, immutable** | **PASS** (§0, §9, §11.1) |
+| **L2 — revenue via 4110; 4100 stays non-posting** | **PASS** (§0, §11.1) |
+| Manual settlement rate: accepted / persisted / not text-only | PASS (3 tests) |
+| Example A: 50,000 AFN → USD @70 | PASS (rate 70.0000, target 714.29) |
+| Example B: 500 USD → AFN @72 | PASS (rate 72.0000, target 36,000.00) |
+| Example C: text + structured, later rates 75/80 | PASS (snapshot still 70.0000) |
+| Settlement record immutability | PASS (save/delete refused) |
 | Zero-FX case | PASS |
 | Partial settlement | PASS |
-| Invalid FX inputs rejected | PASS (25 cases) |
-| Golden suite | **16/16 PASS** (plus 5 regression blocks) |
+| Invalid FX inputs rejected | PASS (32 cases: 25 obligation-path + 7 conversion-path) |
+| Golden suite | **16/16 PASS** (plus 8 regression blocks: R1–R5, R6A–R6C) |
 | Idempotency | PASS |
 | Atomic rollback | PASS (SQLite **and** PostgreSQL, real transactions) |
-| Reversal compatibility | PASS |
+| Reversal compatibility | PASS (settlement snapshot unchanged) |
 | Audit integrity | PASS |
 | Source traceability | PASS |
 | Trial balance | PASS (difference 0.00) |
 | Account balances | PASS |
 | Historical integrity | PASS |
-| SQLite regression | PASS (217 pytest / 200+17 Django) |
-| PostgreSQL regression | PASS (217 pytest / 200+17 Django, v17.11) |
+| Migration 0007 forward/reverse | PASS (PostgreSQL, table + index) |
+| SQLite regression | PASS (246 pytest / 229+17 Django) |
+| PostgreSQL regression | PASS (246 pytest / 229+17 Django, v17.11) |
 | Django checks | PASS |
 | Frontend | PASS (4/4 tests, build OK) |
-| `makemigrations --check` | PASS (no changes) |
+| `makemigrations --check` | PASS (no changes, both backends) |
 | `main` untouched | PASS |
 | Phase 3 work started | **No** |
 
-**STATUS: IMPLEMENTED / TESTED / EVIDENCE READY — AWAITING USER REVIEW.**
+**STATUS: IMPLEMENTED / TESTED / EXECUTED / EVIDENCE READY — AWAITING USER REVIEW.**
 Stage 2.5 is not APPROVED or FROZEN until the user says so.

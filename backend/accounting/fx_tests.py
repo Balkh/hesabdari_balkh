@@ -9,10 +9,12 @@ The rollback tests use TransactionTestCase: TestCase wraps the whole test in a
 transaction, so only a real transaction proves application-level atomicity.
 """
 
+from datetime import date
 from decimal import Decimal
 from unittest import mock
 
 from django.db import IntegrityError
+from django.db.models import ProtectedError
 from django.test import TestCase, TransactionTestCase
 
 from core.idempotency import DuplicateOperationError, IdempotencyRecord
@@ -24,13 +26,15 @@ from security.models import AuditAction, AuditEvent
 from .balances import account_balance, journals_by_source, trace_source
 from .coa import seed_chart_of_accounts
 from .fx import (
+    FX_CONVERSION,
     FX_GAIN,
     FX_LOSS,
     FX_NONE,
     compute_realized_fx,
+    post_fx_conversion,
     post_realized_fx_settlement,
 )
-from .models import Account, AccountType, JournalEntry, JournalLine, JournalStatus
+from .models import Account, AccountType, FXSettlement, JournalEntry, JournalLine, JournalStatus
 from .services import JournalValidationError, reverse_journal, verify_entry_totals
 
 ZERO = Decimal("0.00")
@@ -681,10 +685,19 @@ class FXIdempotencyTests(FXFixture, TestCase):
 
     def test_orphaned_reservation_does_not_return_wrong_entry(self):
         first = self._settle("JE-FX-ORPHAN", idempotency_key="fx-orphan")
+        # The settlement record protects its journal (see the test below), so the
+        # orphan is created the way only a bulk operation could: queryset delete.
+        FXSettlement.objects.filter(entry_id=first.pk).delete()
         JournalLine.objects.filter(entry_id=first.pk).delete()
         JournalEntry.objects.filter(pk=first.pk).delete()
         with self.assertRaises(DuplicateOperationError):
             self._settle("JE-FX-ORPHAN", idempotency_key="fx-orphan")
+
+    def test_settlement_record_protects_its_journal(self):
+        entry = self._settle("JE-FX-PROTECT")
+        self.assertTrue(FXSettlement.objects.filter(entry_id=entry.pk).exists())
+        with self.assertRaises(ProtectedError):
+            JournalEntry.objects.filter(pk=entry.pk).delete()
 
 
 # ---------------------------------------------------------------------------
@@ -732,3 +745,322 @@ class FXAtomicRollbackTests(FXFixture, TransactionTestCase):
             with self.assertRaises(RuntimeError):
                 self._settle("JE-FX-NUM", idempotency_key="fx-num")
         self.assertEqual(NumberSequence.objects.count(), before)
+
+
+# ---------------------------------------------------------------------------
+# User ruling L1 — settlement rate is manual transaction-time structured data
+# ---------------------------------------------------------------------------
+
+class ManualSettlementRateTests(FXFixture, TestCase):
+    """The settlement rate is entered by the user and persisted structurally."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.afn, cls.usd, cls.eur = cls._seed()
+        cls.acc = cls._accounts()
+
+    def _settle(self, number="JE-MR", **overrides):
+        params = dict(
+            obligation_kind="RECEIVABLE",
+            obligation_account=self.acc["1310"], obligation_amount="100.00",
+            obligation_currency=self.usd, historical_rate="70",
+            settlement_account=self.acc["1110"], settlement_amount="100.00",
+            settlement_currency=self.usd, settlement_rate="72.5000",
+        )
+        params.update(overrides)
+        call = dict(number=number, posting_date="2026-04-01",
+                    description="manual rate settlement", source_type="FX", source_id="MR-1")
+        for key in ("description", "reference"):
+            if key in params:
+                call[key] = params.pop(key)
+        return post_realized_fx_settlement(**call, **params)
+
+    # (1) accepted --------------------------------------------------------
+    def test_manual_settlement_rate_is_accepted(self):
+        entry = self._settle("JE-MR-ACC")
+        self.assertEqual(entry.status, JournalStatus.POSTED)
+        self.assertEqual(entry.lines.get(account__code="8100").credit, Decimal("250.00"))
+
+    # (2) persisted structurally -----------------------------------------
+    def test_manual_settlement_rate_is_persisted_structurally(self):
+        entry = self._settle("JE-MR-PERSIST")
+        record = FXSettlement.objects.get(entry=entry)
+        self.assertEqual(record.settlement_rate, Decimal("72.5000"))
+        self.assertEqual(record.source_currency.code, "USD")
+        self.assertEqual(record.source_amount, Decimal("100.00"))
+        self.assertEqual(record.target_currency.code, "AFN")
+        self.assertEqual(record.target_amount, Decimal("7250.00"))
+        self.assertEqual(record.rate_direction, "USD->AFN")
+        self.assertEqual(record.historical_rate, Decimal("70.0000"))
+        self.assertEqual(record.transaction_date, date(2026, 4, 1))
+        self.assertEqual(record.obligation_account.code, "1310")
+        self.assertEqual(record.settlement_account.code, "1110")
+        self.assertEqual(record.fx_account.code, "8100")
+        self.assertEqual(record.direction, FX_GAIN)
+        self.assertEqual(record.carrying_value, Decimal("7000.00"))
+        self.assertEqual(record.settlement_value, Decimal("7250.00"))
+        self.assertEqual(record.difference, Decimal("250.00"))
+        # the journal keeps its OWN accounting-currency snapshot
+        entry.refresh_from_db()
+        self.assertEqual(entry.rate, Decimal("1.0000"))
+        self.assertEqual(entry.rate_direction, "AFN->AFN")
+        self.assertEqual(entry.currency.code, "AFN")
+
+    # (3) not only text ----------------------------------------------------
+    def test_rate_is_not_stored_only_in_description_or_reference(self):
+        entry = self._settle("JE-MR-TEXT", description="", reference="")
+        record = FXSettlement.objects.get(entry=entry)
+        self.assertEqual(record.description, "")
+        self.assertEqual(record.reference, "")
+        self.assertEqual(record.settlement_rate, Decimal("72.5000"))
+        # queryable/filterable/reportable as structured data
+        self.assertEqual(
+            [r.entry.number for r in FXSettlement.objects.filter(settlement_rate=Decimal("72.5000"))],
+            [entry.number])
+        self.assertEqual(
+            [r.entry.number for r in FXSettlement.objects.filter(rate_direction="USD->AFN")],
+            [entry.number])
+
+    # (4) Example A: 50,000 AFN -> USD @ 70 --------------------------------
+    def test_example_a_50000_afn_to_usd_at_70(self):
+        entry = post_fx_conversion(
+            number="JE-CONV-A", posting_date="2026-04-02",
+            source_account=self.acc["1110"], source_amount="50000.00", source_currency=self.afn,
+            target_account=self.acc["1210"], target_currency=self.usd, settlement_rate="70",
+            description="50,000 AFN converted to USD at rate 70 and received by Exchange X",
+            reference="EXCH-X", source_type="EXCHANGE", source_id="CONV-A")
+        record = FXSettlement.objects.get(entry=entry)
+        self.assertEqual(record.settlement_rate, Decimal("70.0000"))
+        self.assertEqual(record.source_currency.code, "AFN")
+        self.assertEqual(record.source_amount, Decimal("50000.00"))
+        self.assertEqual(record.target_currency.code, "USD")
+        self.assertEqual(record.target_amount, Decimal("714.29"))   # 50000 / 70, Half-Up
+        self.assertEqual(record.rate_direction, "AFN->USD")
+        self.assertEqual(record.kind, FX_CONVERSION)
+        self.assertEqual(record.direction, FX_NONE)
+        self.assertIsNone(record.fx_account)
+        self.assertEqual(record.settlement_account.code, "1210")
+        self.assertEqual(record.obligation_account.code, "1110")
+        # journal: AFN book values, balanced, its own snapshot untouched
+        self.assertEqual(entry.total_debit, Decimal("50000.00"))
+        self.assertEqual(entry.total_credit, Decimal("50000.00"))
+        self.assertEqual(entry.rate, Decimal("1.0000"))
+        self.assertEqual(entry.rate_direction, "AFN->AFN")
+        self.assertEqual(entry.lines.get(account__code="1210").debit, Decimal("50000.00"))
+        self.assertEqual(entry.lines.get(account__code="1110").credit, Decimal("50000.00"))
+        self.assertEqual(entry.lines.count(), 2)   # no 8100/8200 on a conversion
+        # the description is preserved AND the structured fields stand alone
+        self.assertIn("Exchange X", entry.description)
+        self.assertEqual(record.description, "50,000 AFN converted to USD at rate 70 and received by Exchange X")
+        self.assertEqual(record.reference, "EXCH-X")
+
+    # (5) Example B: 500 USD -> AFN @ 72 -----------------------------------
+    def test_example_b_500_usd_to_afn_at_72(self):
+        entry = post_realized_fx_settlement(
+            number="JE-CONV-B", posting_date="2026-04-03", description="500 USD converted to AFN",
+            obligation_kind="RECEIVABLE", obligation_account=self.acc["1310"],
+            obligation_amount="500.00", obligation_currency=self.usd, historical_rate="70",
+            settlement_account=self.acc["1110"], settlement_amount="500.00",
+            settlement_currency=self.usd, settlement_rate="72",
+            source_type="EXCHANGE", source_id="CONV-B")
+        record = FXSettlement.objects.get(entry=entry)
+        self.assertEqual(record.settlement_rate, Decimal("72.0000"))
+        self.assertEqual(record.source_amount, Decimal("500.00"))
+        self.assertEqual(record.source_currency.code, "USD")
+        self.assertEqual(record.target_amount, Decimal("36000.00"))
+        self.assertEqual(record.target_currency.code, "AFN")
+        self.assertEqual(record.rate_direction, "USD->AFN")
+        self.assertEqual(record.difference, Decimal("1000.00"))
+        self.assertEqual(record.direction, FX_GAIN)
+        self.assertEqual(entry.lines.get(account__code="8100").credit, Decimal("1000.00"))
+
+    def test_example_b_zero_fx_variant(self):
+        """500 USD -> AFN at its own carrying rate: 36,000 AFN, no gain/loss line."""
+        entry = post_realized_fx_settlement(
+            number="JE-CONV-B0", posting_date="2026-04-03", description="500 USD converted at carrying rate",
+            obligation_kind="RECEIVABLE", obligation_account=self.acc["1310"],
+            obligation_amount="500.00", obligation_currency=self.usd, historical_rate="72",
+            settlement_account=self.acc["1110"], settlement_amount="500.00",
+            settlement_currency=self.usd, settlement_rate="72")
+        record = FXSettlement.objects.get(entry=entry)
+        self.assertEqual(record.settlement_rate, Decimal("72.0000"))
+        self.assertEqual(record.target_amount, Decimal("36000.00"))
+        self.assertEqual(record.direction, FX_NONE)
+        self.assertEqual(entry.lines.count(), 2)
+
+    # (6) direction preserved ----------------------------------------------
+    def test_rate_direction_preserved_both_paths(self):
+        settle = self._settle("JE-MR-DIR")
+        convert = post_fx_conversion(
+            number="JE-MR-DIR2", posting_date="2026-04-04",
+            source_account=self.acc["1110"], source_amount="1000.00", source_currency=self.afn,
+            target_account=self.acc["1210"], target_currency=self.usd, settlement_rate="70")
+        self.assertEqual(FXSettlement.objects.get(entry=settle).rate_direction, "USD->AFN")
+        self.assertEqual(FXSettlement.objects.get(entry=convert).rate_direction, "AFN->USD")
+
+    # (7) later global rate never rewrites history --------------------------
+    def test_later_global_rate_does_not_change_settlement(self):
+        entry = self._settle("JE-MR-HIST")
+        before = {
+            "settlement_rate": FXSettlement.objects.get(entry=entry).settlement_rate,
+            "historical_rate": FXSettlement.objects.get(entry=entry).historical_rate,
+            "target_amount": FXSettlement.objects.get(entry=entry).target_amount,
+            "journal_rate": entry.rate,
+            "journal_afn": entry.afn_total,
+        }
+        ExchangeRate.objects.create(source_currency=self.usd, target_currency=self.afn,
+                                   rate=Decimal("75.0000"), effective_date="2026-05-01")
+        ExchangeRate.objects.create(source_currency=self.usd, target_currency=self.afn,
+                                   rate=Decimal("80.0000"), effective_date="2026-06-01")
+        entry.refresh_from_db()
+        record = FXSettlement.objects.get(entry=entry)
+        self.assertEqual(record.settlement_rate, Decimal("72.5000"))
+        self.assertEqual(record.historical_rate, Decimal("70.0000"))
+        self.assertEqual(record.target_amount, Decimal("7250.00"))
+        self.assertEqual(entry.rate, Decimal("1.0000"))
+        self.assertEqual(entry.afn_total, Decimal("7250.00"))
+        self.assertEqual(before["settlement_rate"], record.settlement_rate)
+        # the settlement rate is NOT taken from the ExchangeRate table
+        self.assertEqual(FXSettlement.objects.filter(settlement_rate=Decimal("75.0000")).count(), 0)
+
+    def test_conversion_rate_not_taken_from_exchange_rate_table(self):
+        ExchangeRate.objects.create(source_currency=self.usd, target_currency=self.afn,
+                                   rate=Decimal("88.0000"), effective_date="2026-04-01")
+        entry = post_fx_conversion(
+            number="JE-MR-NOTBL", posting_date="2026-04-02",
+            source_account=self.acc["1110"], source_amount="70000.00", source_currency=self.afn,
+            target_account=self.acc["1210"], target_currency=self.usd, settlement_rate="70")
+        self.assertEqual(FXSettlement.objects.get(entry=entry).settlement_rate, Decimal("70.0000"))
+        self.assertEqual(FXSettlement.objects.get(entry=entry).target_amount, Decimal("1000.00"))
+
+    # (14) invalid settlement rates ----------------------------------------
+    def test_conversion_zero_rate_rejected(self):
+        with self.assertRaises(JournalValidationError):
+            self._convert(settlement_rate="0")
+        self.assertEqual(FXSettlement.objects.count(), 0)
+
+    def test_conversion_negative_rate_rejected(self):
+        with self.assertRaises(JournalValidationError):
+            self._convert(settlement_rate="-70")
+
+    def test_conversion_missing_rate_rejected(self):
+        with self.assertRaises(JournalValidationError):
+            self._convert(settlement_rate=None)
+
+    def test_conversion_float_rate_rejected(self):
+        with self.assertRaises(TypeError):
+            self._convert(settlement_rate=70.0)
+
+    def test_conversion_zero_amount_rejected(self):
+        with self.assertRaises(JournalValidationError):
+            self._convert(source_amount="0.00")
+
+    def test_conversion_negative_amount_rejected(self):
+        with self.assertRaises(JournalValidationError):
+            self._convert(source_amount="-100.00")
+
+    def test_conversion_inactive_2400_rejected(self):
+        with self.assertRaises(JournalValidationError):
+            self._convert(target_account=self.acc["2400"])
+
+    # (15) cross-currency / unsupported shapes ------------------------------
+    def test_conversion_cross_currency_rejected(self):
+        with self.assertRaises(JournalValidationError):
+            self._convert(source_currency=self.usd, target_currency=self.eur)
+        self.assertEqual(FXSettlement.objects.count(), 0)
+
+    def test_conversion_same_currency_rejected(self):
+        with self.assertRaises(JournalValidationError):
+            self._convert(target_currency=self.afn)
+
+    def test_foreign_to_base_must_use_the_realized_path(self):
+        with self.assertRaises(JournalValidationError) as ctx:
+            self._convert(source_currency=self.usd, target_currency=self.afn)
+        self.assertIn("post_realized_fx_settlement", str(ctx.exception))
+        self.assertEqual(FXSettlement.objects.count(), 0)
+
+    def test_conversion_same_account_rejected(self):
+        with self.assertRaises(JournalValidationError):
+            self._convert(target_account=self.acc["1110"])
+
+    def test_conversion_inactive_currency_rejected(self):
+        self.usd.is_active = False
+        self.usd.save(update_fields=["is_active"])
+        with self.assertRaises(JournalValidationError):
+            self._convert()
+
+    # (18) reversal preserves the original snapshot -------------------------
+    def test_reversal_preserves_settlement_rate_snapshot(self):
+        entry = self._settle("JE-MR-REV")
+        record = FXSettlement.objects.get(entry=entry)
+        snapshot = {
+            "settlement_rate": record.settlement_rate,
+            "historical_rate": record.historical_rate,
+            "source_amount": record.source_amount,
+            "target_amount": record.target_amount,
+            "rate_direction": record.rate_direction,
+            "direction": record.direction,
+            "transaction_date": record.transaction_date,
+            "created_at": record.created_at,
+        }
+        reverse_journal(entry, "manual rate reversal", None)
+        entry.refresh_from_db()
+        record.refresh_from_db()
+        self.assertEqual(entry.status, JournalStatus.REVERSED)
+        self.assertEqual(entry.rate, Decimal("1.0000"))
+        for field, value in snapshot.items():
+            self.assertEqual(getattr(record, field), value)
+        # the reversal has no settlement record of its own
+        reversal = JournalEntry.objects.get(reverses=entry)
+        self.assertFalse(FXSettlement.objects.filter(entry=reversal).exists())
+
+    # (19) audit integrity ---------------------------------------------------
+    def test_audit_records_remain_correct(self):
+        entry = self._settle("JE-MR-AUD", idempotency_key="mr-audit")
+        self.assertEqual(AuditEvent.objects.filter(action=AuditAction.POST,
+                                                   entity_id=str(entry.id)).count(), 1)
+        retry = self._settle("JE-MR-AUD", idempotency_key="mr-audit")
+        self.assertEqual(retry.pk, entry.pk)
+        self.assertEqual(AuditEvent.objects.filter(action=AuditAction.POST,
+                                                   entity_id=str(entry.id)).count(), 1)
+        self.assertEqual(FXSettlement.objects.filter(entry=entry).count(), 1)
+        reverse_journal(entry, "audit check", None)
+        self.assertEqual(AuditEvent.objects.filter(action=AuditAction.REVERSE,
+                                                   entity_id=str(entry.id)).count(), 1)
+
+    def test_settlement_record_is_immutable(self):
+        entry = self._settle("JE-MR-IMMUT")
+        record = FXSettlement.objects.get(entry=entry)
+        from .models import PostedImmutabilityError
+        record.settlement_rate = Decimal("99.0000")
+        with self.assertRaises(PostedImmutabilityError):
+            record.save()
+        with self.assertRaises(PostedImmutabilityError):
+            record.delete()
+
+    # (25) revenue posting account ------------------------------------------
+    def test_revenue_uses_4110_not_non_posting_4100(self):
+        from .services import post_journal
+        self.assertFalse(Account.objects.get(code="4100").is_posting)
+        self.assertTrue(Account.objects.get(code="4110").is_posting)
+        with self.assertRaises(JournalValidationError):
+            post_journal(number="JE-REV-4100", posting_date="2026-04-05", description="revenue on group account",
+                         lines=[{"account": self.acc["1310"], "debit": "100.00"},
+                                {"account": self.acc["4100"], "credit": "100.00"}],
+                         currency=self.usd, rate="70.0000", rate_date="2026-04-05")
+        entry = post_journal(number="JE-REV-4110", posting_date="2026-04-05", description="revenue on posting account",
+                             lines=[{"account": self.acc["1310"], "debit": "100.00"},
+                                    {"account": self.acc["4110"], "credit": "100.00"}],
+                             currency=self.usd, rate="70.0000", rate_date="2026-04-05")
+        self.assertEqual(entry.status, JournalStatus.POSTED)
+        self.assertEqual(account_balance(self.acc["4110"])["balance"], Decimal("100.00"))
+        self.assertEqual(account_balance(self.acc["4100"])["lines_count"], 0)
+
+    def _convert(self, **overrides):
+        params = dict(
+            number="JE-CONV-X", posting_date="2026-04-02",
+            source_account=self.acc["1110"], source_amount="1000.00", source_currency=self.afn,
+            target_account=self.acc["1210"], target_currency=self.usd, settlement_rate="70",
+        )
+        params.update(overrides)
+        return post_fx_conversion(**params)

@@ -28,8 +28,8 @@ from security.models import AuditAction, AuditEvent
 
 from .balances import account_balance, journals_by_source, trace_source, trial_balance
 from .coa import seed_chart_of_accounts
-from .fx import compute_realized_fx, post_realized_fx_settlement
-from .models import Account, JournalEntry, JournalLine, JournalStatus
+from .fx import compute_realized_fx, post_fx_conversion, post_realized_fx_settlement
+from .models import Account, FXSettlement, JournalEntry, JournalLine, JournalStatus
 from .services import JournalValidationError, post_journal, reverse_journal, verify_entry_totals
 
 WIDTH = 66
@@ -80,6 +80,29 @@ def journal_rows(entry, title="JOURNAL"):
     rows.append(("TOTAL CREDIT", f"{entry.total_credit:.2f}"))
     rows.append(("AFN EQUIVALENT", f"{entry.afn_total:.2f}"))
     return rows
+
+
+def settlement_rows(record):
+    """Structured settlement-rate snapshot (user ruling L1)."""
+    return [
+        ("Kind", record.kind),
+        ("Transaction date", record.transaction_date),
+        ("Source currency", record.source_currency.code),
+        ("Source amount", f"{record.source_amount:.2f}"),
+        ("Target currency", record.target_currency.code),
+        ("Target amount", f"{record.target_amount:.2f}"),
+        ("SETTLEMENT RATE (manual)", f"{record.settlement_rate:.4f}"),
+        ("Rate direction", record.rate_direction),
+        ("Historical rate", "—" if record.historical_rate is None else f"{record.historical_rate:.4f}"),
+        ("Source/obligation account", record.obligation_account.code),
+        ("Destination account", record.settlement_account.code),
+        ("FX account", record.fx_account.code if record.fx_account else "— (no FX line)"),
+        ("Carrying value (AFN)", f"{record.carrying_value:.2f}"),
+        ("Settlement value (AFN)", f"{record.settlement_value:.2f}"),
+        ("Difference", f"{record.difference:.2f}"),
+        ("Direction", record.direction),
+        ("Stored as structured data", "FXSettlement row (not description text)"),
+    ]
 
 
 def balance_rows(codes, accounts):
@@ -425,6 +448,7 @@ class GoldenFXTests(GoldenFixture, TestCase):
             ("RATE SNAPSHOT", [("Historical rate (input)", format_rate(plan["historical_rate"])),
                                ("Settlement rate", format_rate(plan["settlement_rate"])),
                                ("Recorded in description", entry.description)]),
+            ("SETTLEMENT RECORD (structured)", settlement_rows(FXSettlement.objects.get(entry=entry))),
             ("SOURCE TRACE", [("journals_by_source(FX, OBL-G11)",
                                str([e.number for e in journals_by_source("FX", "OBL-G11")]))]),
             ("RECONCILIATION", [("7200.00 == 7200.00", f"{entry.total_debit:.2f} == {entry.total_credit:.2f}"),
@@ -458,6 +482,7 @@ class GoldenFXTests(GoldenFixture, TestCase):
                          ("8200 FX Loss", f"{loss_balance['balance']:.2f} ({loss_balance['normal_balance']})")]),
             ("RATE SNAPSHOT", [("Historical rate (input)", format_rate(plan["historical_rate"])),
                                ("Settlement rate", format_rate(plan["settlement_rate"]))]),
+            ("SETTLEMENT RECORD (structured)", settlement_rows(FXSettlement.objects.get(entry=entry))),
             ("SOURCE TRACE", [("journals_by_source(FX, OBL-G11)",
                                str([e.number for e in journals_by_source("FX", "OBL-G11")]))]),
             ("RECONCILIATION", [("7200.00 == 7200.00", f"{entry.total_debit:.2f} == {entry.total_credit:.2f}"),
@@ -910,3 +935,126 @@ class HistoricalIntegrityTests(GoldenFixture, TestCase):
             constraints = connection.introspection.get_constraints(cursor, table)
         return any("source_type" in (info.get("columns") or []) and "source_id" in (info.get("columns") or [])
                    for info in constraints.values())
+
+
+# ---------------------------------------------------------------------------
+# R6 — manual transaction-time settlement rate (user ruling L1), Examples A/B/C
+# ---------------------------------------------------------------------------
+
+class ManualSettlementRateGoldenTests(GoldenFixture, TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        cls.afn, cls.usd = cls._seed()
+        cls.acc = cls._accounts()
+
+    def test_r6a_example_a_50000_afn_to_usd_at_70(self):
+        entry = post_fx_conversion(
+            number="JE-R6A", posting_date="2026-04-02",
+            source_account=self.acc["1110"], source_amount="50000.00", source_currency=self.afn,
+            target_account=self.acc["1210"], target_currency=self.usd, settlement_rate="70",
+            description="50,000 AFN converted to USD at rate 70 and received by Exchange X",
+            reference="EXCH-X", source_type="EXCHANGE", source_id="CONV-A")
+        record = FXSettlement.objects.get(entry=entry)
+        golden_report("R6A", "MANUAL SETTLEMENT RATE — EXAMPLE A (50,000 AFN -> USD @ 70)", [
+            ("INPUT", [("Source amount", "50000.00 AFN"), ("Source currency", "AFN"),
+                       ("Target currency", "USD"), ("Settlement rate (manual)", "70"),
+                       ("Destination", "1210 Exchange House A"), ("Reference", "EXCH-X")]),
+            ("EXPECTED", [("Target amount = 50000 / 70", "714.29 USD"),
+                          ("Rate persisted structurally", "70.0000"),
+                          ("Journal", "AFN book values, 2 lines, no 8100/8200")]),
+            (f"JOURNAL {entry.number}", journal_rows(entry, "JOURNAL")),
+            ("SETTLEMENT RECORD (structured)", settlement_rows(record)),
+            ("BALANCE", [("1110 Cash", f"{account_balance(self.acc['1110'])['balance']:.2f}"),
+                         ("1210 Exchange House", f"{account_balance(self.acc['1210'])['balance']:.2f}")]),
+            ("RECONCILIATION", [("50000.00 == 50000.00", f"{entry.total_debit:.2f} == {entry.total_credit:.2f}"),
+                                ("Structured rate == entered rate",
+                                 f"{record.settlement_rate:.4f} == 70.0000")]),
+            ("STATUS", [("Result", "PASS")]),
+        ])
+        self.assertEqual(record.settlement_rate, Decimal("70.0000"))
+        self.assertEqual(record.target_amount, Decimal("714.29"))
+        self.assertEqual(record.rate_direction, "AFN->USD")
+        self.assertEqual(entry.total_debit, Decimal("50000.00"))
+        self.assertEqual(entry.rate, Decimal("1.0000"))
+        self.assertEqual(entry.lines.count(), 2)
+
+    def test_r6b_example_b_500_usd_to_afn_at_72(self):
+        entry = post_realized_fx_settlement(
+            number="JE-R6B", posting_date="2026-04-03", description="500 USD converted to AFN",
+            obligation_kind="RECEIVABLE", obligation_account=self.acc["1310"],
+            obligation_amount="500.00", obligation_currency=self.usd, historical_rate="70",
+            settlement_account=self.acc["1110"], settlement_amount="500.00",
+            settlement_currency=self.usd, settlement_rate="72",
+            source_type="EXCHANGE", source_id="CONV-B")
+        record = FXSettlement.objects.get(entry=entry)
+        golden_report("R6B", "MANUAL SETTLEMENT RATE — EXAMPLE B (500 USD -> AFN @ 72)", [
+            ("INPUT", [("Source amount", "500.00 USD"), ("Source currency", "USD"),
+                       ("Target currency", "AFN"), ("Settlement rate (manual)", "72"),
+                       ("Historical carrying rate", "70"), ("Destination", "1110 Cash")]),
+            ("EXPECTED", [("Target amount = 500 x 72", "36000.00 AFN"),
+                          ("Carrying value = 500 x 70", "35000.00 AFN"),
+                          ("Realized gain", "1000.00 -> Cr 8100")]),
+            (f"JOURNAL {entry.number}", journal_rows(entry, "JOURNAL")),
+            ("SETTLEMENT RECORD (structured)", settlement_rows(record)),
+            ("BALANCE", [("1110 Cash", f"{account_balance(self.acc['1110'])['balance']:.2f}"),
+                         ("1310 Receivable", f"{account_balance(self.acc['1310'])['balance']:.2f}"),
+                         ("8100 FX Gain", f"{account_balance(self.acc['8100'])['balance']:.2f}")]),
+            ("RECONCILIATION", [("36000.00 == 36000.00", f"{entry.total_debit:.2f} == {entry.total_credit:.2f}"),
+                                ("Structured rate == entered rate",
+                                 f"{record.settlement_rate:.4f} == 72.0000")]),
+            ("STATUS", [("Result", "PASS")]),
+        ])
+        self.assertEqual(record.settlement_rate, Decimal("72.0000"))
+        self.assertEqual(record.source_amount, Decimal("500.00"))
+        self.assertEqual(record.target_amount, Decimal("36000.00"))
+        self.assertEqual(record.rate_direction, "USD->AFN")
+        self.assertEqual(record.difference, Decimal("1000.00"))
+        self.assertEqual(entry.lines.get(account__code="8100").credit, Decimal("1000.00"))
+
+    def test_r6c_example_c_text_plus_structured_fields_and_rate_immutability(self):
+        entry = post_fx_conversion(
+            number="JE-R6C", posting_date="2026-04-04",
+            source_account=self.acc["1110"], source_amount="50000.00", source_currency=self.afn,
+            target_account=self.acc["1210"], target_currency=self.usd, settlement_rate="70",
+            description="50,000 AFN converted to USD at rate 70 and received by Exchange X",
+            reference="EXCH-X", source_type="EXCHANGE", source_id="CONV-C")
+        record = FXSettlement.objects.get(entry=entry)
+        before = {
+            "settlement_rate": record.settlement_rate,
+            "source_amount": record.source_amount,
+            "target_amount": record.target_amount,
+            "rate_direction": record.rate_direction,
+            "transaction_date": record.transaction_date,
+            "destination": record.settlement_account.code,
+        }
+        ExchangeRate.objects.create(source_currency=self.usd, target_currency=self.afn,
+                                   rate=Decimal("75.0000"), effective_date="2026-05-01")
+        ExchangeRate.objects.create(source_currency=self.usd, target_currency=self.afn,
+                                   rate=Decimal("80.0000"), effective_date="2026-06-01")
+        entry.refresh_from_db()
+        record.refresh_from_db()
+        after = {
+            "settlement_rate": record.settlement_rate,
+            "source_amount": record.source_amount,
+            "target_amount": record.target_amount,
+            "rate_direction": record.rate_direction,
+            "transaction_date": record.transaction_date,
+            "destination": record.settlement_account.code,
+        }
+        golden_report("R6C", "MANUAL SETTLEMENT RATE — EXAMPLE C (text + structured, then rate changes)", [
+            ("INPUT", [("User text", "50,000 AFN converted to USD at rate 70 and received by Exchange X"),
+                       ("Later global rates", "75.0000 then 80.0000")]),
+            ("EXPECTED", [("Structured fields hold the data", "independently of the text"),
+                          ("Historical rate unchanged", "70.0000")]),
+            ("OBSERVED (structured, not text)", settlement_rows(record)),
+            ("BEFORE/AFTER GLOBAL RATE CHANGE", [(k, f"{before[k]} -> {after[k]}") for k in before]),
+            ("RECONCILIATION", [("before == after", str(before == after)),
+                                ("Structured rate != any later global rate",
+                                 str(record.settlement_rate not in (Decimal("75.0000"), Decimal("80.0000"))))]),
+            ("STATUS", [("Result", "PASS")]),
+        ])
+        self.assertEqual(before, after)
+        self.assertEqual(record.settlement_rate, Decimal("70.0000"))
+        self.assertEqual(record.description,
+                         "50,000 AFN converted to USD at rate 70 and received by Exchange X")
+        self.assertEqual(record.reference, "EXCH-X")

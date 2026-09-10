@@ -131,3 +131,82 @@ class JournalLine(models.Model):
             if original and original["entry__status"] in IMMUTABLE_JOURNAL_STATUSES:
                 raise PostedImmutabilityError("POSTED/REVERSED journal lines cannot be deleted")
         return super().delete(*args, **kwargs)
+
+
+class FXSettlement(models.Model):
+    """Structured, immutable snapshot of one manual-rate FX transaction.
+
+    Stage 2.5, user ruling L1: the settlement rate is TRANSACTION DATA. It is
+    entered by the user at settlement/conversion time, snapshotted here at 4
+    decimals, and is never derived from — nor updated by — any later
+    ``ExchangeRate`` row (§1.12). A later global rate of 75 or 80 leaves this
+    row exactly as it was entered.
+
+    ``JournalEntry.rate`` deliberately keeps the journal's own accounting
+    currency snapshot (``1.0000`` / ``AFN->AFN`` for AFN book-value journals);
+    it is NOT repurposed as the settlement rate, because doing so would
+    misrepresent that journal's currency context and its AFN equivalent.
+
+    Every field is structured, so the settlement can be queried, filtered,
+    audited and reported without parsing any free text. ``description`` /
+    ``reference`` remain available for the user's own explanation, but they are
+    never the only storage location for the rate.
+
+    Immutable (§1.9): updates and deletes are refused, exactly like posted
+    journals. Correction happens through reversal of the linked journal.
+    """
+
+    class Result(models.TextChoices):
+        GAIN = "GAIN", "Gain"
+        LOSS = "LOSS", "Loss"
+        NONE = "NONE", "No FX result"
+
+    CONVERSION = "CONVERSION"
+    RECEIVABLE = "RECEIVABLE"
+    PAYABLE = "PAYABLE"
+
+    entry = models.OneToOneField("JournalEntry", on_delete=models.PROTECT, related_name="fx_settlement")
+    transaction_date = models.DateField()
+    kind = models.CharField(max_length=12, default=CONVERSION)
+    source_currency = models.ForeignKey("currencies.Currency", on_delete=models.PROTECT,
+                                        related_name="fx_settlement_sources")
+    source_amount = models.DecimalField(max_digits=20, decimal_places=2)
+    target_currency = models.ForeignKey("currencies.Currency", on_delete=models.PROTECT,
+                                        related_name="fx_settlement_targets")
+    target_amount = models.DecimalField(max_digits=20, decimal_places=2)
+    settlement_rate = models.DecimalField(max_digits=20, decimal_places=4)
+    rate_direction = models.CharField(max_length=20)
+    historical_rate = models.DecimalField(max_digits=20, decimal_places=4, null=True, blank=True)
+    obligation_account = models.ForeignKey("Account", on_delete=models.PROTECT,
+                                           related_name="fx_settlement_obligations")
+    settlement_account = models.ForeignKey("Account", on_delete=models.PROTECT,
+                                           related_name="fx_settlement_destinations")
+    fx_account = models.ForeignKey("Account", null=True, blank=True, on_delete=models.PROTECT,
+                                   related_name="fx_settlement_results")
+    carrying_value = models.DecimalField(max_digits=20, decimal_places=2, default=Decimal("0.00"))
+    settlement_value = models.DecimalField(max_digits=20, decimal_places=2, default=Decimal("0.00"))
+    difference = models.DecimalField(max_digits=20, decimal_places=2, default=Decimal("0.00"))
+    direction = models.CharField(max_length=8, choices=Result.choices, default=Result.NONE)
+    description = models.CharField(max_length=500, blank=True, default="")
+    reference = models.CharField(max_length=200, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["id"]
+        indexes = [
+            models.Index(fields=["transaction_date"], name="fx_settle_date_idx"),
+        ]
+
+    def __str__(self):
+        return (
+            f"{self.source_amount} {self.source_currency} -> {self.target_amount} "
+            f"{self.target_currency} @ {self.settlement_rate}"
+        )
+
+    def save(self, *args, **kwargs):
+        if self.pk is not None:
+            raise PostedImmutabilityError("FX settlement records are immutable")
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise PostedImmutabilityError("FX settlement records cannot be deleted")

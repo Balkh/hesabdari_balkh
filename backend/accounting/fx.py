@@ -45,11 +45,18 @@ direction ``AFN->AFN``, ``afn_total`` equal to its total.
 Rate snapshots are preserved as follows (§1.12, §10):
 
 * the HISTORICAL rate stays on the obligation journal — frozen and immutable;
-* the SETTLEMENT rate is written into the settlement journal's description and
-  into every line's ``reference`` field, and is returned by
-  :func:`compute_realized_fx`;
-* neither is ever recomputed from later rate data, and nothing here rewrites
-  history.
+* the SETTLEMENT rate is a **manual transaction-time rate** (user ruling L1). It
+  is persisted as STRUCTURED data on :class:`~accounting.models.FXSettlement`
+  (``settlement_rate``, 4dp) together with the source/target currencies and
+  amounts, the rate direction, the transaction date and both accounts. It is
+  never read from — and never updated by — the ``ExchangeRate`` table. The
+  journal's ``description`` and the lines' ``reference`` fields repeat it for
+  human readability, but they are never its only home;
+* neither rate is ever recomputed from later rate data, and nothing here
+  rewrites history.
+
+Revenue is posted to **4110** (user ruling L2): 4100 is a non-posting group
+account in the frozen canonical COA and stays that way.
 
 Cross-currency settlement (obligation currency != settlement currency) is
 REJECTED with a domain error: the frozen single-currency journal cannot
@@ -68,11 +75,13 @@ rule and no new schema here.
 
 from decimal import Decimal
 
+from django.db import transaction as db_transaction
+
 from core.money import fx_equivalent, format_rate, normalize_rate, quantize_half_up, to_decimal
 from currencies.models import Currency
 
-from .models import Account, AccountType
-from .services import JournalValidationError, post_journal
+from .models import Account, AccountType, FXSettlement
+from .services import JournalValidationError, _as_date, post_journal
 
 __all__ = [
     "OBLIGATION_RECEIVABLE",
@@ -83,14 +92,19 @@ __all__ = [
     "FX_GAIN",
     "FX_LOSS",
     "FX_NONE",
+    "FX_CONVERSION",
     "compute_realized_fx",
     "post_realized_fx_settlement",
+    "post_fx_conversion",
 ]
 
 
 OBLIGATION_RECEIVABLE = "RECEIVABLE"
 OBLIGATION_PAYABLE = "PAYABLE"
 OBLIGATION_KINDS = (OBLIGATION_RECEIVABLE, OBLIGATION_PAYABLE)
+
+# A manual-rate conversion with no obligation being released (e.g. AFN -> USD).
+FX_CONVERSION = "CONVERSION"
 
 FX_GAIN_ACCOUNT_CODE = "8100"
 FX_LOSS_ACCOUNT_CODE = "8200"
@@ -275,12 +289,25 @@ def compute_realized_fx(*, obligation_kind, obligation_account, obligation_amoun
     total_debit = sum((line["debit"] for line in lines), ZERO)
     total_credit = sum((line["credit"] for line in lines), ZERO)
 
+    base_currency = Currency.objects.filter(is_base=True).first()
+    if base_currency is None:
+        raise JournalValidationError("No base currency is configured")
+
     return {
         "obligation_kind": obligation_kind,
         "currency_code": obligation_currency.code,
         "obligation_amount": total_amount,
         "settlement_amount": settled_amount,
         "unsettled_amount": quantize_half_up(total_amount - settled_amount, 2),
+        # Structured settlement data (user ruling L1) — the settlement rate plus
+        # the source/target legs it produced.
+        "source_currency": obligation_currency,
+        "source_amount": settled_amount,
+        "target_currency": base_currency,
+        "target_amount": settlement_value,
+        "rate_direction": f"{obligation_currency.code}->{base_currency.code}",
+        "obligation_account": obligation,
+        "settlement_account": settlement,
         "historical_rate": historical,
         "settlement_rate": settlement_rate_value,
         "carrying_value": carrying_value,
@@ -300,18 +327,48 @@ def compute_realized_fx(*, obligation_kind, obligation_account, obligation_amoun
 # Posting — one atomic, audited, idempotent journal through the frozen engine
 # ---------------------------------------------------------------------------
 
+def _settlement_defaults(*, plan, transaction_date, kind, obligation_account, settlement_account,
+                         description="", reference=""):
+    """Structured field values for one :class:`FXSettlement` row (user ruling L1)."""
+    fx_account = plan["gain_account"] if plan["direction"] == FX_GAIN else (
+        plan["loss_account"] if plan["direction"] == FX_LOSS else None)
+    return dict(
+        transaction_date=transaction_date,
+        kind=kind,
+        source_currency=plan["source_currency"],
+        source_amount=plan["source_amount"],
+        target_currency=plan["target_currency"],
+        target_amount=plan["target_amount"],
+        settlement_rate=plan["settlement_rate"],
+        rate_direction=plan["rate_direction"],
+        historical_rate=plan["historical_rate"],
+        obligation_account=obligation_account,
+        settlement_account=settlement_account,
+        fx_account=fx_account,
+        carrying_value=plan["carrying_value"],
+        settlement_value=plan["settlement_value"],
+        difference=plan["difference"],
+        direction=plan["direction"],
+        description=description,
+        reference=reference,
+    )
+
+
 def post_realized_fx_settlement(*, number, posting_date, description="", source_type="",
-                                source_id="", created_by=None, idempotency_key=None, **compute_kwargs):
+                                source_id="", reference="", created_by=None,
+                                idempotency_key=None, **compute_kwargs):
     """Post one realized-FX settlement journal through ``post_journal``.
 
     The journal is denominated in the BASE currency (see module docstring): its
-    lines are AFN book values, so its rate snapshot is ``1.0000`` /
-    ``AFN->AFN``. The historical and settlement rates that produced the result
-    are written into the description and the line references — they are never
-    recomputed later.
+    lines are AFN book values, so its ``rate`` snapshot stays ``1.0000`` /
+    ``AFN->AFN``. The manually entered settlement rate is persisted
+    structurally on :class:`FXSettlement` in the SAME transaction — it is
+    transaction data, never derived from the ``ExchangeRate`` table and never
+    updated afterwards (user ruling L1).
 
     ``number`` is required (as in ``post_journal``) so that an idempotent retry
-    reproduces the identical request fingerprint (§14).
+    reproduces the identical request fingerprint (§14). An exact retry returns
+    the original entry and leaves its settlement record untouched.
     """
     plan = compute_realized_fx(**compute_kwargs)
 
@@ -319,6 +376,7 @@ def post_realized_fx_settlement(*, number, posting_date, description="", source_
     if base is None:
         raise JournalValidationError("No base currency is configured")
 
+    day = _as_date(posting_date, "posting_date")
     context = (
         f"Realized FX {plan['direction']}: {plan['settlement_amount']} {plan['currency_code']} "
         f"settled at {format_rate(plan['settlement_rate'])} "
@@ -327,15 +385,125 @@ def post_realized_fx_settlement(*, number, posting_date, description="", source_
     )
     text = f"{description} | {context}" if description else context
 
-    return post_journal(
-        number=number,
-        posting_date=posting_date,
-        description=text[:500],
-        lines=plan["lines"],
-        source_type=source_type,
-        source_id=source_id,
-        currency=base,
-        rate_date=posting_date,
-        created_by=created_by,
-        idempotency_key=idempotency_key,
+    with db_transaction.atomic():
+        entry = post_journal(
+            number=number,
+            posting_date=posting_date,
+            description=text[:500],
+            lines=plan["lines"],
+            source_type=source_type,
+            source_id=source_id,
+            currency=base,
+            rate_date=day,
+            created_by=created_by,
+            idempotency_key=idempotency_key,
+        )
+        # get_or_create: an idempotent retry returns the original entry, whose
+        # immutable settlement record already exists.
+        FXSettlement.objects.get_or_create(
+            entry=entry,
+            defaults=_settlement_defaults(
+                plan=plan, transaction_date=day, kind=plan["obligation_kind"],
+                obligation_account=plan["obligation_account"],
+                settlement_account=plan["settlement_account"],
+                description=description, reference=reference,
+            ),
+        )
+    return entry
+
+
+def post_fx_conversion(*, number, posting_date, source_account, source_amount, source_currency,
+                       target_account, target_currency, settlement_rate, description="",
+                       reference="", source_type="", source_id="", created_by=None,
+                       idempotency_key=None):
+    """Post a manual-rate currency CONVERSION (user ruling L1, Example A/C).
+
+    ``50,000 AFN -> USD @ 70`` is the canonical case: the user enters the rate
+    at conversion time, the system derives the target amount and posts an AFN
+    book-value journal (Dr destination / Cr source), then snapshots the
+    structured conversion data — source currency/amount, target currency/amount,
+    the manually entered rate, the direction, the date and both accounts.
+
+    Only the BASE -> FOREIGN direction is supported here: converting a foreign
+    balance back into AFN releases a carrying value, which is the realized-FX
+    settlement handled by :func:`post_realized_fx_settlement` (it needs the
+    historical rate of that balance). Anything else is rejected, never guessed:
+    no silent conversion, no hidden bridge account.
+    """
+    source = _require_account(source_account, "source account")
+    target = _require_account(target_account, "destination account")
+    if source.pk == target.pk:
+        raise JournalValidationError("source account and destination account must differ")
+    source_currency = _require_currency(source_currency, "source currency")
+    target_currency = _require_currency(target_currency, "target currency")
+    if source_currency.pk == target_currency.pk:
+        raise JournalValidationError("A conversion requires two different currencies")
+    if not source_currency.is_base:
+        raise JournalValidationError(
+            "Converting a foreign balance into the base currency releases a carrying "
+            "value: use post_realized_fx_settlement with its historical rate"
+        )
+    if target_currency.is_base:
+        raise JournalValidationError("Target currency must be the foreign currency of the conversion")
+
+    amount = _require_amount(source_amount, "source amount")
+    rate = _require_rate(settlement_rate, target_currency, "settlement rate")
+
+    # §1.11: AFN / Rate = foreign equivalent (Half-Up, 2dp — core.money).
+    target_amount = quantize_half_up(to_decimal(amount) / to_decimal(rate), 2)
+    if target_amount <= 0:
+        raise JournalValidationError("The conversion result must be greater than zero")
+
+    day = _as_date(posting_date, "posting_date")
+    context = (
+        f"FX conversion {amount} {source_currency.code} -> {target_amount} "
+        f"{target_currency.code} at {format_rate(rate)}"
     )
+    text = f"{description} | {context}" if description else context
+
+    lines = [
+        {"account": target, "debit": amount, "credit": ZERO,
+         "description": f"Receive {target_amount} {target_currency.code}",
+         "reference": f"CONVERT IN {target_currency.code}@{format_rate(rate)}"},
+        {"account": source, "debit": ZERO, "credit": amount,
+         "description": f"Pay {amount} {source_currency.code}",
+         "reference": f"CONVERT OUT {source_currency.code}"},
+    ]
+
+    with db_transaction.atomic():
+        entry = post_journal(
+            number=number,
+            posting_date=posting_date,
+            description=text[:500],
+            lines=lines,
+            source_type=source_type,
+            source_id=source_id,
+            currency=source_currency,  # base currency: AFN book values
+            rate_date=day,
+            created_by=created_by,
+            idempotency_key=idempotency_key,
+        )
+        FXSettlement.objects.get_or_create(
+            entry=entry,
+            defaults=dict(
+                transaction_date=day,
+                kind=FX_CONVERSION,
+                source_currency=source_currency,
+                source_amount=amount,
+                target_currency=target_currency,
+                target_amount=target_amount,
+                settlement_rate=rate,
+                rate_direction=f"{source_currency.code}->{target_currency.code}",
+                historical_rate=None,
+                obligation_account=source,
+                settlement_account=target,
+                fx_account=None,
+                carrying_value=amount,
+                settlement_value=amount,
+                difference=ZERO,
+                direction=FX_NONE,
+                description=description,
+                reference=reference,
+            ),
+        )
+    return entry
