@@ -62,7 +62,7 @@ PERIOD
   PERIOD Name                   FY 2026
   Range                         2026-01-01 .. 2026-12-31
   Status                        CLOSED
-  Closed At                     2026-09-12 17:58:52.401714+00:00
+  Closed At                     2026-09-12 18:19:29.662765+00:00
 
 ATTEMPT
   Posting Date                  2026-05-05
@@ -203,4 +203,29 @@ RESULT
   Verdict                       PASS
 
 .
-11 passed in 3.17s
+==================================================================
+GOLDEN G31-12 — Unbalanced lines reject close
+==================================================================
+
+CORRUPTION
+  Journal                       JE-G31-00001
+  Stored Debit/Credit           100.00/90.00
+  Actual Debit/Credit           100.00/90.00
+  Stored Check Alone            would PASS (100/90 == 100/90)
+
+CLOSE ATTEMPT
+  Verdict                       PASS: rejected (Cannot close fiscal period FY 2026: journal JE-G31-00001 is unbalanced (actual debit 100.00 != actual credit 90.00).)
+
+STATE AFTER
+  PERIOD Name                   FY 2026
+  Range                         2026-01-01 .. 2026-12-31
+  Status                        OPEN
+  Closed At                     -
+  Actual Still                  100.00/90.00 (no repair)
+  Close Audits                  0
+
+RESULT
+  Verdict                       PASS: rejected (Cannot close fiscal period FY 2026: journal JE-G31-00001 is unbalanced (actual debit 100.00 != actual credit 90.00).)
+
+.
+12 passed in 3.56s

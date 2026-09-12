@@ -146,3 +146,35 @@ minimal edits + tests + this evidence pair.
   row lock on the post path — proportionate for V1 offline/single-user;
   hardening path documented: lock the covering row in `post_journal`).
 - No Phase 4 work started. No unrelated refactors.
+
+---
+
+## FIX-1 — Close-Time Journal Line Balance (review finding, FIX MODE)
+
+**Defect:** `_verify_range_balanced()` relied solely on
+`verify_entry_totals()`, which proves stored totals == recomputed line
+sums but NOT the double-entry invariant `Σdebit == Σcredit`. Stored
+totals manipulated to match unbalanced lines (e.g. stored 100/90 over
+actual 100/90) passed the old check, so close could succeed over a
+corrupted journal.
+
+**Fix (`fiscal_periods/services.py`, +7/−1 in one function):** reuse the
+recomputed sums that `verify_entry_totals()` already returns and reject
+unless `actual debit == actual credit` per entry. Stored-total check
+kept. Per-entry only — no cross-currency aggregation. No model, audit,
+gate, or frozen-file change; no new migration
+(`makemigrations --check` clean).
+
+**Tests:** `period_tests.py::test_g31_12_unbalanced_lines_block_close`
+(two variants: §10 literal stored 100/100 over actual 100/90, and the
+true gap stored 100/90 matched to actual 100/90; all 9 §10 assertions)
++ golden `G31-12`. Pre-fix proof: both new tests FAIL on the old code
+(verified via temporary stash, fix restored byte-identical); post-fix
+both PASS.
+
+**Executed results:** SQLite pytest **292** (246 frozen + 46 fiscal),
+Django 17 + 275; PostgreSQL 17.10 pytest **292**, Django 17 + 275;
+golden G31-01..G31-12 all PASS, 0 FAIL (G31-01..11 output byte-identical
+except the wall-clock `Closed At` stamp); frozen suite alone 246/246.
+Failed close leaves period OPEN, `closed_at` NULL, journals/lines
+byte-identical, zero close audits, transaction rolled back.

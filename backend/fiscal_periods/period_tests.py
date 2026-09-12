@@ -22,6 +22,7 @@ from accounting.coa import seed_chart_of_accounts
 from accounting.models import (
     Account,
     JournalEntry,
+    JournalLine,
     JournalStatus,
     PostedImmutabilityError,
 )
@@ -390,3 +391,51 @@ class PeriodIntegrationTests(PeriodFixture, TestCase):
         self.assertEqual(gregorian_to_jalali(period.end_date), "1404/12/09")
         leap = self._period(name="LEAP", start="2024-02-01", end="2024-02-29")
         self.assertEqual(find_period_for_date(date(2024, 2, 29)), leap)
+
+    def test_g31_12_unbalanced_lines_block_close(self):
+        """G31-12: close must reject journals whose ACTUAL lines are unbalanced.
+
+        Variant 1 (§10 literal): stored (100/100), actual lines (100/90).
+        Variant 2 (true §5 gap): stored manipulated to (100/90) to match the
+        unbalanced lines — the old stored-only check passes it, so only the
+        new actual==actual check rejects. Corruption via QuerySet.update
+        (repo tamper convention: bypasses frozen save guards, like real
+        low-level corruption would).
+        """
+        variants = [
+            ("spec-numbers", Decimal("100.00"), Decimal("100.00"), "failed integrity check"),
+            ("matched-manipulation", Decimal("100.00"), Decimal("90.00"), "unbalanced"),
+        ]
+        for label, stored_debit, stored_credit, message_bit in variants:
+            with self.subTest(label):
+                months = (1, 6) if label == "spec-numbers" else (7, 12)
+                period = self._period(
+                    name=f"G12-{label}",
+                    start=f"2026-{months[0]:02d}-01",
+                    end=f"2026-{months[1]:02d}-28",
+                )
+                entry = self._post(f"2026-{months[0]:02d}-15", number=f"JE-G12-{label}")
+                JournalLine.objects.filter(entry_id=entry.pk, credit__gt=0).update(
+                    credit=Decimal("90.00"))
+                JournalEntry.objects.filter(pk=entry.pk).update(
+                    total_debit=stored_debit, total_credit=stored_credit)
+                with self.assertRaises(PeriodValidationError) as ctx:
+                    close_period(period, user=self.user)
+                self.assertIn(message_bit, str(ctx.exception))
+                fresh = FiscalPeriod.objects.get(pk=period.pk)
+                self.assertEqual(fresh.status, PeriodStatus.OPEN)
+                self.assertIsNone(fresh.closed_at)
+                still = JournalEntry.objects.get(pk=entry.pk)
+                self.assertEqual(still.status, JournalStatus.POSTED)
+                self.assertEqual(still.total_debit, stored_debit)
+                self.assertEqual(still.total_credit, stored_credit)
+                lines = list(JournalLine.objects.filter(entry_id=entry.pk).order_by("id"))
+                self.assertEqual(sum(line.debit for line in lines), Decimal("100.00"))
+                self.assertEqual(sum(line.credit for line in lines), Decimal("90.00"))
+                self.assertFalse(
+                    AuditEvent.objects.filter(
+                        entity="FiscalPeriod", entity_id=str(period.pk),
+                        new_state__status="CLOSED",
+                    ).exists()
+                )
+                self.assertEqual(FiscalPeriod.objects.filter(pk=period.pk).count(), 1)

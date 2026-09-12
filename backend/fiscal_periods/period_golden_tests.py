@@ -19,6 +19,7 @@ from accounting.coa import seed_chart_of_accounts
 from accounting.models import (
     Account,
     JournalEntry,
+    JournalLine,
     JournalStatus,
     PostedImmutabilityError,
 )
@@ -306,3 +307,38 @@ class PeriodGoldenTests(PeriodGoldenFixture, TestCase):
         ])
         self.assertTrue(direct.startswith("PASS"))
         self.assertEqual(reversal.status, JournalStatus.POSTED)
+
+    def test_g31_12_unbalanced_lines_reject_close(self):
+        period = create_period(
+            name="FY 2026", start_date="2026-01-01", end_date="2026-12-31")
+        entry = self._post("2026-04-04")
+        JournalLine.objects.filter(entry_id=entry.pk, credit__gt=0).update(
+            credit=Decimal("90.00"))
+        JournalEntry.objects.filter(pk=entry.pk).update(
+            total_debit=Decimal("100.00"), total_credit=Decimal("90.00"))
+        tampered = JournalEntry.objects.get(pk=entry.pk)
+        try:
+            close_period(period, user=self.user)
+            verdict = "FAIL: closed over unbalanced journal"
+        except PeriodValidationError as exc:
+            verdict = f"PASS: rejected ({exc})"
+        fresh = FiscalPeriod.objects.get(pk=period.pk)
+        close_audits = AuditEvent.objects.filter(
+            entity="FiscalPeriod", new_state__status="CLOSED").count()
+        golden_report("G31-12", "Unbalanced lines reject close", [
+            ("CORRUPTION", [
+                ("Journal", entry.number),
+                ("Stored Debit/Credit", f"{tampered.total_debit:.2f}/{tampered.total_credit:.2f}"),
+                ("Actual Debit/Credit", "100.00/90.00"),
+                ("Stored Check Alone", "would PASS (100/90 == 100/90)"),
+            ]),
+            ("CLOSE ATTEMPT", [("Verdict", verdict)]),
+            ("STATE AFTER", period_rows(fresh) + [
+                ("Actual Still", "100.00/90.00 (no repair)"),
+                ("Close Audits", close_audits),
+            ]),
+            ("RESULT", [("Verdict", verdict if fresh.status == "OPEN" else "FAIL: mutated")]),
+        ])
+        self.assertEqual(fresh.status, PeriodStatus.OPEN)
+        self.assertEqual(close_audits, 0)
+        self.assertTrue(verdict.startswith("PASS"))

@@ -181,11 +181,14 @@ def create_period(*, name, start_date, end_date, user=None):
 def _verify_range_balanced(period):
     """Close-validation (§12.5 "verifies balanced journals").
 
-    Every posted/reversed journal in range must carry intact stored totals.
-    Any mismatch rejects the close. Read-only: detection never repairs.
-    (Per-entry checks mathematically imply a balanced range, with no
-    currency merging — the frozen read layer's multi-currency refusal is
-    respected by never summing across journals.)
+    Every posted/reversed journal in range must carry intact stored totals,
+    AND each entry must satisfy the double-entry invariant on its ACTUAL
+    lines: actual debit == actual credit. Stored-total agreement alone is
+    insufficient (stored totals can be manipulated to match unbalanced
+    lines). Any failure rejects the close. Read-only: detection never
+    repairs. (Per-entry checks imply a balanced range with no currency
+    merging — the frozen read layer's multi-currency refusal is respected
+    by never summing across journals.)
     """
     from accounting.balances import EFFECTIVE_STATUSES
     from accounting.services import verify_entry_totals
@@ -196,12 +199,18 @@ def _verify_range_balanced(period):
     checked = 0
     for entry in entries:
         try:
-            verify_entry_totals(entry)
+            sums = verify_entry_totals(entry)
         except ValueError as exc:
             raise PeriodValidationError(
                 "Cannot close fiscal period "
                 f"{period.name}: journal {entry.number} failed integrity check."
             ) from exc
+        if sums["total_debit"] != sums["total_credit"]:
+            raise PeriodValidationError(
+                "Cannot close fiscal period "
+                f"{period.name}: journal {entry.number} is unbalanced "
+                f"(actual debit {sums['total_debit']} != actual credit {sums['total_credit']})."
+            )
         checked += 1
     return checked
 
