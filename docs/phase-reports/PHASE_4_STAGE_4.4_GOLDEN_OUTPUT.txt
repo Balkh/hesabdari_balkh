@@ -1,0 +1,34 @@
+G44-01 create a cash account with defaults:
+  [cash] id=1 name='Main Cashbox' fa='' active=True
+  [audit] CREATE by=g44user
+PASS G44-01
+  [names] fa='با فارسی' vs fa=''
+  [blank] blank English name rejected
+PASS G44-02
+  [duplicates] same name on ids 1 + 2 (no uniqueness)
+PASS G44-03
+  [flag] active=False still_present=True
+  [reactivate] active=True
+PASS G44-04
+  [rename] id=1 'Old Cashbox' -> 'New Cashbox'
+PASS G44-05
+  [trail] [('CREATE', 'Audited Cash'), ('UPDATE', 'Audited Cash')]
+PASS G44-11
+  [house] id=1 name='Qari Sardar' fa='' active=True
+  [audit] CREATE by=g44user
+PASS G44-06
+  [names] fa='با فارسی' vs fa=''
+  [blank] blank English name rejected
+PASS G44-07
+  [duplicates] same name on ids 1 + 2 (no uniqueness)
+PASS G44-08
+  [flag] active=False still_present=True
+  [reactivate] active=True
+PASS G44-09
+  [rename] id=1 'Old House' -> 'New House'
+PASS G44-10
+  [audits] before=1 after=1
+PASS G44-12
+  [absent] cash 18/18, house 18/18
+PASS G44-13
+13 passed in 2.46s
