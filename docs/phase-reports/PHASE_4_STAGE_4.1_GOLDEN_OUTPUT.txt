@@ -1,0 +1,39 @@
+G41-01 create a category:
+  [category] id=1 name=Grocery fa=خواربار active=True
+  [audit] CREATE by=g41user new={'id': 1, 'name': 'Grocery', 'name_fa': 'خواربار', 'is_active': True}
+PASS G41-01
+G41-02 blank rejected, duplicate names allowed:
+  [blank] rejected: Category name is required.
+  [duplicates] ids 1 + 2 coexist
+PASS G41-02
+G41-03 create units of measure:
+  [uoms] 1:Liter, 2:Carton
+PASS G41-03
+G41-04 blank UOM rejected:
+  [blank] rejected: UOM name is required.
+PASS G41-04
+G41-05 create Cooking Oil (1 Carton = 10 L):
+  [product] OIL-5L factor=10.0000 min=50.000
+PASS G41-05
+G41-06 used masters are PROTECTed:
+  [category] delete blocked (PROTECT)
+  [uom] delete blocked (PROTECT)
+PASS G41-06
+G41-07 duplicate product code rejected:
+  [duplicate] rejected: Product code already exists: DUP-1.
+PASS G41-07
+G41-08 inactive is a flag, blocks nothing:
+  [flags] product=False category=False
+  [update] inactive product still editable: renamed
+PASS G41-08
+G41-09 rejection matrix:
+  [blank code] rejected: Product code is required.
+  [blank fa name] rejected: Product Persian/Dari name is required.
+  [missing category] rejected: Category does not exist.
+  [zero factor] rejected: Product conversion factor must be greater than zero.
+  [float factor] rejected: Product conversion factor must be a valid number.
+  [negative min] rejected: Product minimum stock cannot be negative.
+PASS G41-09
+G41-10 audit failure rolls back the product:
+  [rows] products=0 audits=0
+PASS G41-10

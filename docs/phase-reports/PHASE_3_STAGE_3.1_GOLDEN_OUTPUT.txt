@@ -1,0 +1,231 @@
+
+==================================================================
+GOLDEN G31-01 — Period creation
+==================================================================
+
+INPUT
+  Name                          FY 2026
+  Range                         2026-01-01 .. 2026-12-31
+
+RESULT
+  PERIOD Name                   FY 2026
+  Range                         2026-01-01 .. 2026-12-31
+  Status                        OPEN
+  Closed At                     -
+  Verdict                       PASS
+
+.
+==================================================================
+GOLDEN G31-02 — Invalid range rejection
+==================================================================
+
+INPUT
+  Range                         2026-12-31 .. 2026-01-01 (start > end)
+
+RESULT
+  Periods in DB                 0
+  Verdict                       PASS: rejected (Fiscal period start_date cannot be after end_date.)
+
+.
+==================================================================
+GOLDEN G31-03 — OPEN posting allowed
+==================================================================
+
+PERIOD
+  PERIOD Name                   FY 2026
+  Range                         2026-01-01 .. 2026-12-31
+  Status                        OPEN
+  Closed At                     -
+
+JOURNAL
+  Number                        JE-G31-00001
+  Posting Date                  2026-05-05
+  Status                        POSTED
+  TOTAL DEBIT                   100.00
+  TOTAL CREDIT                  100.00
+
+TRIAL BALANCE
+  Total Debit                   100.00
+  Total Credit                  100.00
+  Difference                    0.00
+  Balanced                      True
+
+RESULT
+  Verdict                       PASS
+
+.
+==================================================================
+GOLDEN G31-04 — CLOSED rejection
+==================================================================
+
+PERIOD
+  PERIOD Name                   FY 2026
+  Range                         2026-01-01 .. 2026-12-31
+  Status                        CLOSED
+  Closed At                     2026-09-12 18:19:29.662765+00:00
+
+ATTEMPT
+  Posting Date                  2026-05-05
+
+RESULT
+  Entries Before/After          0/0
+  Verdict                       PASS: rejected (Fiscal period is CLOSED: FY 2026.)
+
+.
+==================================================================
+GOLDEN G31-05 — LOCKED rejection
+==================================================================
+
+PERIOD
+  PERIOD Name                   FY 2026
+  Range                         2026-01-01 .. 2026-12-31
+  Status                        LOCKED
+  Closed At                     -
+
+RESULT
+  Entries in DB                 0
+  Verdict                       PASS: rejected (Fiscal period is LOCKED: FY 2026.)
+
+.
+==================================================================
+GOLDEN G31-06 — Full lifecycle with audit
+==================================================================
+
+FINAL
+  PERIOD Name                   FY 2026
+  Range                         2026-01-01 .. 2026-12-31
+  Status                        OPEN
+  Closed At                     -
+
+TRAIL
+  AUDIT TRAIL                   
+  #1 CREATE -->OPEN             user=gold reason=-
+  #2 UPDATE OPEN->CLOSED        user=gold reason=year-end
+  #3 UPDATE CLOSED->OPEN        user=gold reason=correction
+  #4 UPDATE OPEN->LOCKED        user=gold reason=freeze
+  #5 UPDATE LOCKED->OPEN        user=gold reason=adjust
+
+RESULT
+  Verdict                       PASS
+
+.
+==================================================================
+GOLDEN G31-07 — Reopen preserves immutability
+==================================================================
+
+PERIOD
+  PERIOD Name                   FY 2026
+  Range                         2026-01-01 .. 2026-12-31
+  Status                        OPEN
+  Closed At                     -
+
+ATTEMPT
+  Action                        edit POSTED journal after reopen
+
+RESULT
+  Stored Description            golden probe
+  Verdict                       PASS: rejected (POSTED/REVERSED journal entries are immutable)
+
+.
+==================================================================
+GOLDEN G31-08 — Backdated posting into OPEN
+==================================================================
+
+JOURNAL
+  Number                        JE-G31-00001
+  Posting Date                  2026-02-02
+  Status                        POSTED
+
+BALANCE 1110 AS OF 2026-12-31
+  Total Debit                   100.00
+  Total Credit                  0.00
+  Balance                       100.00
+
+RESULT
+  Verdict                       PASS
+
+.
+==================================================================
+GOLDEN G31-09 — Close failure (detect→report→reject)
+==================================================================
+
+TAMPER
+  Journal                       JE-G31-00001
+  Stored Debit Now              1.00 (was 100.00)
+
+CLOSE ATTEMPT
+  Verdict                       PASS: rejected (Cannot close fiscal period FY 2026: journal JE-G31-00001 failed integrity check.)
+
+STATE AFTER
+  PERIOD Name                   FY 2026
+  Range                         2026-01-01 .. 2026-12-31
+  Status                        OPEN
+  Closed At                     -
+  Stored Debit Still            1.00
+
+RESULT
+  Verdict                       PASS: rejected (Cannot close fiscal period FY 2026: journal JE-G31-00001 failed integrity check.)
+
+.
+==================================================================
+GOLDEN G31-10 — Historical balance as-of-date
+==================================================================
+
+JOURNAL
+  Posting Date                  2026-03-03
+  Amount                        100.00
+
+BALANCE AS OF 2026-02-01
+  Balance                       0.00
+  Lines                         0
+
+BALANCE AS OF 2026-12-31
+  Balance                       100.00
+  Lines                         1
+
+RESULT
+  Verdict                       PASS
+
+.
+==================================================================
+GOLDEN G31-11 — Reopen→reverse correction flow
+==================================================================
+
+DIRECT REVERSAL INTO CLOSED
+  Verdict                       PASS: direct reversal rejected
+
+AFTER REOPEN
+  Reversal Number               JE-1405-00001
+  Reversal Date                 2026-04-04
+  Original Status               REVERSED
+
+RESULT
+  Verdict                       PASS
+
+.
+==================================================================
+GOLDEN G31-12 — Unbalanced lines reject close
+==================================================================
+
+CORRUPTION
+  Journal                       JE-G31-00001
+  Stored Debit/Credit           100.00/90.00
+  Actual Debit/Credit           100.00/90.00
+  Stored Check Alone            would PASS (100/90 == 100/90)
+
+CLOSE ATTEMPT
+  Verdict                       PASS: rejected (Cannot close fiscal period FY 2026: journal JE-G31-00001 is unbalanced (actual debit 100.00 != actual credit 90.00).)
+
+STATE AFTER
+  PERIOD Name                   FY 2026
+  Range                         2026-01-01 .. 2026-12-31
+  Status                        OPEN
+  Closed At                     -
+  Actual Still                  100.00/90.00 (no repair)
+  Close Audits                  0
+
+RESULT
+  Verdict                       PASS: rejected (Cannot close fiscal period FY 2026: journal JE-G31-00001 is unbalanced (actual debit 100.00 != actual credit 90.00).)
+
+.
+12 passed in 3.56s

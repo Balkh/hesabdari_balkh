@@ -1,0 +1,21 @@
+G43-01 create a warehouse with defaults:
+  [warehouse] id=1 name='Main Godown' fa='' active=True
+  [audit] CREATE by=g43user
+PASS G43-01
+  [names] fa='با فارسی' vs fa=''
+  [blank] blank English name rejected
+PASS G43-02
+  [duplicates] same name on ids 1 + 2 (no uniqueness)
+PASS G43-03
+  [flag] active=False still_present=True
+  [reactivate] active=True
+PASS G43-04
+  [rename] id=1 'Main Warehouse' -> 'Central Warehouse'
+PASS G43-05
+  [trail] [('CREATE', 'Audited Godown'), ('UPDATE', 'Audited Godown')]
+PASS G43-06
+  [audits] before=1 after=1
+PASS G43-07
+  [absent] 12/12 forbidden attrs missing
+PASS G43-08
+8 passed in 1.63s

@@ -11,6 +11,7 @@ from core.idempotency import DuplicateOperationError, IdempotencyRecord, idempot
 from core.money import fx_equivalent, normalize_rate, quantize_half_up
 from currencies.models import Currency
 from documents.services import next_document_number
+from fiscal_periods.services import assert_posting_date_open
 from security.models import AuditAction
 from security.services import record_audit_event
 from .models import Account, JournalEntry, JournalLine, JournalStatus
@@ -179,6 +180,7 @@ def post_journal(*, number, posting_date, description, lines, source_type="", so
         raise JournalValidationError("created_by must be a user or None")
 
     posting_day = _as_date(posting_date, "posting_date")
+    assert_posting_date_open(posting_day)  # Phase 3.1 (§12.6): posting only in an OPEN period
     if currency.is_base:
         if rate is not None and _coerce_rate(rate) != 1:
             raise JournalValidationError("A base-currency journal must use rate 1")
@@ -269,6 +271,7 @@ def reverse_journal(entry, reason, user):
             raise JournalValidationError("Only a POSTED entry can be reversed")
         if original.reverses_id is not None:
             raise JournalValidationError("A reversal entry cannot itself be reversed")
+        assert_posting_date_open(original.posting_date)  # Phase 3.1 (§12.6/R1): reversals obey the gate
         verify_entry_totals(original)
         previous_state = {"id": original.id, "number": original.number, "status": original.status}
         reversal = JournalEntry.objects.create(

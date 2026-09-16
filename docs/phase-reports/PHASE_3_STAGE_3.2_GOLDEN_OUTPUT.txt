@@ -1,0 +1,50 @@
+G32-01 list empty, create FY 2026, list again:
+  [GET collection (empty)] HTTP 200 -> []
+  [POST collection] HTTP 201 -> {'id': 1, 'name': 'FY 2026', 'start_date': '2026-01-01', 'end_date': '2026-12-31', 'status': 'OPEN', 'created_at': '2026-09-12T18:52:59.526826Z', 'closed_at': None, 'start_date_jalali': '1404/10/11', 'end_date_jalali': '1405/10/10'}
+  [GET collection (one row)] HTTP 200 -> [{'id': 1, 'name': 'FY 2026', 'start_date': '2026-01-01', 'end_date': '2026-12-31', 'status': 'OPEN', 'created_at': '2026-09-12T18:52:59.526826Z', 'closed_at': None, 'start_date_jalali': '1404/10/11', 'end_date_jalali': '1405/10/10'}]
+PASS G32-01
+G32-02 create, post balanced journal, close:
+  [journal] posted JE-G32-00001 on 2026-04-10
+  [POST close] HTTP 200 -> {'id': 1, 'name': 'FY 2026', 'start_date': '2026-01-01', 'end_date': '2026-12-31', 'status': 'CLOSED', 'created_at': '2026-09-12T18:52:59.778109Z', 'closed_at': '2026-09-12T18:52:59.788533Z', 'start_date_jalali': '1404/10/11', 'end_date_jalali': '1405/10/10'}
+  [audit] CREATE by=p32gold values={'id': 1, 'name': 'FY 2026', 'start_date': '2026-01-01', 'end_date': '2026-12-31', 'status': 'OPEN', 'closed_at': None}
+  [audit] UPDATE by=p32gold values={'id': 1, 'name': 'FY 2026', 'start_date': '2026-01-01', 'end_date': '2026-12-31', 'status': 'CLOSED', 'closed_at': '2026-09-12T18:52:59.788533+00:00', 'journals_verified': 1}
+PASS G32-02
+G32-03 close then reopen with reason:
+  [POST reopen] HTTP 200 -> {'id': 1, 'name': 'FY 2026', 'start_date': '2026-01-01', 'end_date': '2026-12-31', 'status': 'OPEN', 'created_at': '2026-09-12T18:53:00.041096Z', 'closed_at': None, 'start_date_jalali': '1404/10/11', 'end_date_jalali': '1405/10/10'}
+  [audit] UPDATE reason=correction
+PASS G32-03
+G32-04 lock an open period:
+  [POST lock] HTTP 200 -> {'id': 1, 'name': 'FY 2026', 'start_date': '2026-01-01', 'end_date': '2026-12-31', 'status': 'LOCKED', 'created_at': '2026-09-12T18:53:00.315215Z', 'closed_at': None, 'start_date_jalali': '1404/10/11', 'end_date_jalali': '1405/10/10'}
+PASS G32-04
+G32-05 lock then unlock with reason:
+  [POST unlock] HTTP 200 -> {'id': 1, 'name': 'FY 2026', 'start_date': '2026-01-01', 'end_date': '2026-12-31', 'status': 'OPEN', 'created_at': '2026-09-12T18:53:00.573774Z', 'closed_at': None, 'start_date_jalali': '1404/10/11', 'end_date_jalali': '1405/10/10'}
+  [audit] UPDATE reason=resume
+PASS G32-05
+G32-06 anonymous client is rejected everywhere:
+  [GET collection] HTTP 403 -> {'error': {'code': 'http_403', 'message': 'Authentication credentials were not provided.', 'details': {'detail': 'Authentication credentials were not provided.'}}}
+  [POST collection] HTTP 403 -> {'error': {'code': 'http_403', 'message': 'Authentication credentials were not provided.', 'details': {'detail': 'Authentication credentials were not provided.'}}}
+  [POST close] HTTP 403 -> {'error': {'code': 'http_403', 'message': 'Authentication credentials were not provided.', 'details': {'detail': 'Authentication credentials were not provided.'}}}
+  [POST reopen] HTTP 403 -> {'error': {'code': 'http_403', 'message': 'Authentication credentials were not provided.', 'details': {'detail': 'Authentication credentials were not provided.'}}}
+  [POST lock] HTTP 403 -> {'error': {'code': 'http_403', 'message': 'Authentication credentials were not provided.', 'details': {'detail': 'Authentication credentials were not provided.'}}}
+  [POST unlock] HTTP 403 -> {'error': {'code': 'http_403', 'message': 'Authentication credentials were not provided.', 'details': {'detail': 'Authentication credentials were not provided.'}}}
+PASS G32-06
+G32-07 domain rejections surface as the error shape:
+  [POST overlapping] HTTP 400 -> {'error': {'code': 'http_400', 'message': 'Fiscal period overlaps existing period: FY 2026.'}}
+  [POST close on LOCKED] HTTP 400 -> {'error': {'code': 'http_400', 'message': 'A LOCKED fiscal period cannot be closed; unlock it first.'}}
+PASS G32-07
+G32-08 mutation surface that must not exist:
+  [PUT collection] HTTP 405
+  [PATCH collection] HTTP 405
+  [DELETE collection] HTTP 405
+  [PUT close] HTTP 405
+  [DELETE lock] HTTP 405
+  [GET close] HTTP 405
+PASS G32-08
+G32-09 posted rows stay immutable after API reopen:
+  [POST reopen] HTTP 200 -> {'id': 1, 'name': 'FY 2026', 'start_date': '2026-01-01', 'end_date': '2026-12-31', 'status': 'OPEN', 'created_at': '2026-09-12T18:53:01.593957Z', 'closed_at': None, 'start_date_jalali': '1404/10/11', 'end_date_jalali': '1405/10/10'}
+  [immutability] posted row mutation refused
+PASS G32-09
+G32-10 empty database stays legacy-open until first create:
+  [GET collection (empty)] HTTP 200 -> []
+  [POST first period] HTTP 201 -> {'id': 1, 'name': 'FY 2026', 'start_date': '2026-01-01', 'end_date': '2026-12-31', 'status': 'OPEN', 'created_at': '2026-09-12T18:53:01.857226Z', 'closed_at': None, 'start_date_jalali': '1404/10/11', 'end_date_jalali': '1405/10/10'}
+PASS G32-10

@@ -1,0 +1,29 @@
+G42-01 create a customer-only party:
+  [party] id=1 customer=True supplier=False
+  [audit] CREATE by=g42user
+PASS G42-01
+G42-02 create a supplier-only party:
+  [party] id=1 customer=False supplier=True
+PASS G42-02
+G42-03 one record, both roles (ABC Trading):
+  [party] id=1 customer=True supplier=True
+PASS G42-03
+G42-04 party without any role is rejected twice:
+  [service] rejected: Party must have at least one role: customer or supplier.
+  [database] CHECK party_has_role rejected direct write
+PASS G42-04
+G42-05 Persian name optional, English required:
+  [names] fa='با فارسی' vs fa=''
+  [blank] blank English name rejected
+PASS G42-05
+G42-06 inactive is a flag — history preserved:
+  [flag] active=False still_present=True
+  [update] inactive record still maintainable: kept for history
+PASS G42-06
+G42-07 phone/address/note round-trip as plain storage:
+  [contact] +93-799-000111 | Kabul, Street 12 | call first
+  [duplicates] same phone on ids 1 + 2 (no uniqueness)
+PASS G42-07
+G42-08 audit failure rolls back the party:
+  [rows] parties=0 audits=0
+PASS G42-08
