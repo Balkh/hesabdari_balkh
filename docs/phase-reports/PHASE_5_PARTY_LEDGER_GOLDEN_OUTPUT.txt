@@ -1,0 +1,27 @@
+G51-01 customer debtor via opening balance:
+  [net] 10000.00 AFN status=DEBTOR
+PASS G51-01
+  [balance] 0.00 AFN (payment engine: future)
+PASS G51-02
+  [balance] 3000.00 AFN (payment engine: future)
+PASS G51-03
+  [credit] 1000.00 AFN on 2200 (one journal, two types)
+PASS G51-04
+  [net] -2000.00 AFN status=CREDITOR
+PASS G51-05
+  [payable] 7000.00 AFN
+PASS G51-06
+  [net] 7000.00-3000.00=4000.00 AFN status=CREDITOR
+PASS G51-07
+  [balances] AFN 300000.00 + USD 5000.00 (two balances)
+PASS G51-08
+  [trail] [('2026-01-01', Decimal('10000.00'), Decimal('0.00'), Decimal('10000.00')), ('2026-01-10', Decimal('0.00'), Decimal('3000.00'), Decimal('7000.00'))]
+PASS G51-09
+  [legs] [('1310', '1000.00', '0.00'), ('3900', '0.00', '1000.00')]
+  [afn_total] 70000.00 (supplemental)
+PASS G51-10
+  [api] no allocate/payment/invoice/settle in Phase 5
+PASS G51-11
+  [1310] GL Dr 16000.00 Cr 1000.00 = attributed Dr 16000.00 Cr 1000.00
+PASS G51-12
+12 passed in 3.38s
