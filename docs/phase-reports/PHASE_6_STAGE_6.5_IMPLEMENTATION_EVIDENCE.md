@@ -76,6 +76,8 @@ Return qty_before/after:  200 -> 180
 
 The test also verifies the original source quantity remains `100`, and the `InventoryReturn` audit links source movement id to return movement id.
 
+The explicit Sales Return audit closure test is `Stage65ReturnTests.test_sales_return_uses_original_sale_cost_not_current_avco`. It retrieves the `AuditEvent` for the `InventoryReturn` and verifies `return_type=SALES_RETURN`, source movement id, return movement id, quantity `10`, original unit cost `12.0000`, customer id, product id, and warehouse id. It passed in the final focused run (`116 passed`). The shared code path is `_post_return()` → `_create_movement()` → `record_audit_event()` for the movement, followed by the explicit `InventoryReturn` audit event; no Sales-specific audit subsystem exists.
+
 Foreign historical context test: `Stage65ReturnTests.test_foreign_purchase_return_preserves_historical_rate` passed:
 
 ```text
@@ -246,7 +248,15 @@ The four pre-existing modified `scripts/verify_*.sh` files remain outside the St
 
 ## T. Git
 
-A narrow Stage 6.5 commit will be created only after the final evidence review of this implementation. The exact hash, parent, subject, changed files, and final working-tree state will be recorded here after that commit.
+The Stage 6.5 implementation commit is:
+
+```text
+da47273040d332cfb409368e2d5c168fd9890e8a
+parent: 4820844509c59578e40c6fe2d9b2e715516dfc7e
+subject: feat(inventory): implement Stage 6.5 returns
+```
+
+The final evidence-gap closure is a separate narrow test/evidence commit created after the PostgreSQL attempt and final SQLite runs. Its exact hash, parent, subject, changed files, and final working-tree state are reported in the final response from direct Git inspection. The four pre-existing script mode changes remain outside both commits.
 
 ## U. Limitations
 
