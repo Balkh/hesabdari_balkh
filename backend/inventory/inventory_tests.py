@@ -40,6 +40,7 @@ from warehouses.services import create_warehouse
 from .models import (
     MovementType,
     StockMovement,
+    ShortageSettlement,
     WarehouseInventoryAccount,
 )
 from .services import (
@@ -907,7 +908,18 @@ class TransferCostTests(TransferFixture, TestCase):
         self._receive(
             quantity=50, unit_cost="20", reference="RCV-C2",
             warehouse=self.source)
+        source_qty_before = stock_for(self.product, self.source)
+        source_avco_before = avco_for(self.product, self.source)
+        dest_qty_before = stock_for(self.product, self.dest)
+        dest_avco_before = avco_for(self.product, self.dest)
         out, inn = self._transfer(quantity=50, reference="TRF-COST")
+        self.assertEqual(source_qty_before, 150)
+        self.assertEqual(source_avco_before, Decimal("13.3333"))
+        self.assertEqual(dest_qty_before, 0)
+        self.assertIsNone(dest_avco_before)
+        self.assertEqual(out.quantity, -50)
+        self.assertEqual(inn.quantity, 50)
+        self.assertEqual(out.unit_cost * 50, Decimal("666.6650"))
         self.assertEqual(out.unit_cost, Decimal("13.3333"))
         self.assertEqual(inn.unit_cost, Decimal("13.3333"))
         self.assertEqual(out.unit_cost_afn, Decimal("13.3333"))
@@ -918,8 +930,19 @@ class TransferCostTests(TransferFixture, TestCase):
         self.assertEqual(
             avco_for(self.product, self.dest), Decimal("13.3333"))
         # Source relief at rounded AVCO leaves honest dust, documented.
+        self.assertEqual(stock_for(self.product, self.source), 100)
+        self.assertEqual(stock_for(self.product, self.dest), 50)
         self.assertEqual(
             avco_for(self.product, self.source), Decimal("13.3334"))
+        self.assertEqual(
+            avco_for(self.product, self.dest), Decimal("13.3333"))
+        # Exact replay values conserve the original AFN value: 2000.0000.
+        # The displayed source AVCO rounds 13.33335 upward to 13.3334;
+        # that 0.0050 is display/replay dust, not a new movement value.
+        exact_source_value = Decimal("100") * Decimal("13.33335")
+        exact_destination_value = Decimal("50") * Decimal("13.3333")
+        self.assertEqual(exact_source_value + exact_destination_value,
+                         Decimal("2000.0000"))
 
     def test_no_reference_price_used(self):
         self.product.ref_purchase_price = Decimal("999")
@@ -1050,6 +1073,23 @@ class TransferAccountingTests(TransferFixture, TestCase):
         self.assertEqual(legs["1420"].credit, Decimal("0.00"))
         self.assertEqual(legs["1410"].credit, Decimal("11000.00"))
         self.assertTrue(entry.number.startswith("JE-"))
+
+    def test_usd_costed_transfer_journal_is_afn_book_value(self):
+        self._map_pair()
+        self._receive(quantity=10, unit_cost="10", currency=self.usd,
+                      rate="70", rate_date=self.day, reference="RCV-USD",
+                      warehouse=self.source)
+        _out, inn = self._transfer(quantity=10, reference="TRF-USD")
+        entry = inn.journal_entry
+        self.assertEqual(entry.currency.code, "AFN")
+        self.assertEqual(entry.rate, Decimal("1.0000"))
+        self.assertEqual(entry.rate_direction, "AFN->AFN")
+        self.assertEqual(entry.total_debit, Decimal("7000.00"))
+        self.assertEqual(entry.afn_total, Decimal("7000.00"))
+        self.assertEqual(inn.currency.code, "AFN")
+        self.assertEqual(inn.unit_cost_afn, Decimal("700.0000"))
+        self.assertEqual(stock_for(self.product, self.source), 0)
+        self.assertEqual(stock_for(self.product, self.dest), 10)
 
     def test_no_pnl_cogs_or_fx(self):
         self._map_pair()
@@ -1310,6 +1350,48 @@ class Stage64Tests(InventoryFixture, TestCase):
         self.assertEqual(StockMovement.objects.filter(idempotency_key="adj-idem").count(), 1)
         with self.assertRaises(InventoryValidationError):
             adjust_stock_in(**{**kwargs, "quantity": 3})
+
+    def test_adjustment_failure_rolls_back_movement_audit_and_idempotency(self):
+        before = (StockMovement.objects.count(), AuditEvent.objects.count(),
+                  IdempotencyRecord.objects.count())
+        with mock.patch("inventory.services.record_audit_event",
+                        side_effect=RuntimeError("audit store down")):
+            with self.assertRaises(RuntimeError):
+                self._adjust_in(idempotency_key="ADJ-ROLLBACK")
+        self.assertEqual((StockMovement.objects.count(), AuditEvent.objects.count(),
+                          IdempotencyRecord.objects.count()), before)
+
+    def test_waste_failure_rolls_back_usable_movement_audit_and_idempotency(self):
+        before = (StockMovement.objects.count(), AuditEvent.objects.count(),
+                  IdempotencyRecord.objects.count())
+        with mock.patch("inventory.services.record_audit_event",
+                        side_effect=RuntimeError("audit store down")):
+            with self.assertRaises(RuntimeError):
+                receive_with_waste(
+                    product=self.product, warehouse=self.warehouse,
+                    gross_quantity=10, waste_quantity=1, total_cost="100",
+                    currency=self.afn, movement_date=self.day, reference="W-ROLLBACK",
+                    description="unloading failure", user=self.user,
+                    idempotency_key="WASTE-ROLLBACK")
+        self.assertEqual((StockMovement.objects.count(), AuditEvent.objects.count(),
+                          IdempotencyRecord.objects.count()), before)
+
+    def test_shortage_settlement_failure_rolls_back_settlement_and_audit(self):
+        shortage = record_shortage(
+            product=self.product, warehouse=self.warehouse, quantity=1,
+            movement_date=self.day, reference="SH-ROLLBACK",
+            description="later shortage", user=self.user,
+            acknowledge_negative=True, temporary_unit_cost="2",
+            temporary_currency=self.afn)
+        before = (ShortageSettlement.objects.count(), AuditEvent.objects.count())
+        with mock.patch("inventory.services.record_audit_event",
+                        side_effect=RuntimeError("audit store down")):
+            with self.assertRaises(RuntimeError):
+                settle_shortage(
+                    shortage=shortage, settlement_date=self.day,
+                    actual_sales_rate="9", currency=self.afn, reference="SET-ROLLBACK",
+                    user=self.user, idempotency_key="SET-ROLLBACK")
+        self.assertEqual((ShortageSettlement.objects.count(), AuditEvent.objects.count()), before)
 
     def test_posted_adjustment_and_settlement_are_immutable(self):
         m = self._adjust_in()

@@ -1073,6 +1073,7 @@ def settle_shortage(*, shortage, settlement_date, actual_sales_rate,
                 record = ShortageSettlement.objects.create(
                     shortage=shortage, settlement_date=day, unit_rate=manual,
                     currency=cur, rate=rate_value, rate_date=rate_day_value,
+                    compensation_amount=amount, reference=clean_ref,
                     idempotency_key=idempotency_key)
                 idem.response_body = {"settlement_id": record.id, "fingerprint": fingerprint,
                                       "compensation_amount": str(amount)}
@@ -1084,7 +1085,11 @@ def settle_shortage(*, shortage, settlement_date, actual_sales_rate,
                     "currency": cur.code, "compensation_amount": str(amount)},
                     reason="Manual actual sales rate; no reference price used")
                 return record
-    except DuplicateOperationError:
+    except DuplicateOperationError as dup:
+        # A failed atomic body rolls back the reservation. Only an existing
+        # record represents a genuine retry; preserve the original failure.
+        if not IdempotencyRecord.objects.filter(key=idempotency_key).exists():
+            raise dup.__cause__ if dup.__cause__ is not None else dup
         stored = IdempotencyRecord.objects.get(key=idempotency_key)
         body = stored.response_body or {}
         if body.get("fingerprint") != fingerprint:
