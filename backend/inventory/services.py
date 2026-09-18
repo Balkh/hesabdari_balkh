@@ -16,6 +16,11 @@ Posting primitives (6.1 §1/§12/§15/§18; transfer added Stage 6.3):
 - ``transfer_stock`` (Stage 6.3): TRANSFER_OUT + TRANSFER_IN pair at the
   preserved cost basis plus the neutral Dr-dest/Cr-source reclass
   journal, atomically and idempotently as one operation.
+- Stage 6.4: ``adjust_stock_in`` / ``adjust_stock_out`` (ADJUSTMENT_IN /
+  OUT), ``receive_with_waste`` (usable receipt + waste annotation),
+  ``record_shortage`` (SHORTAGE leg), ``settle_shortage`` (manual-rate
+  compensation record). No journals: no approved adjustment mapping
+  exists, so accounting is explicitly deferred, never invented.
 
 Plus the explicit Warehouse → Inventory GL mapping (§19):
 ``assign_warehouse_account`` / ``resolve_warehouse_account``.
@@ -38,6 +43,7 @@ from core.models import IdempotencyRecord
 from core.money import line_total, normalize_rate, quantize_half_up, to_decimal
 from currencies.models import Currency
 from documents.services import next_document_number
+from fiscal_periods.services import assert_posting_date_open
 from products.services import ProductValidationError
 from products.services import resolve_product as _resolve_product_frozen
 from security.models import AuditAction
@@ -48,11 +54,13 @@ from warehouses.services import resolve_warehouse as _resolve_warehouse_frozen
 from .models import (
     INVENTORY_MOVEMENT_OPERATION,
     INVENTORY_TRANSFER_OPERATION,
+    SHORTAGE_SETTLEMENT_OPERATION,
     INVENTORY_ROOT_CODE,
     OPENING_EQUITY_ACCOUNT,
     OPENING_SOURCE_TYPE,
     TRANSFER_SOURCE_TYPE,
     MovementType,
+    ShortageSettlement,
     StockMovement,
     WarehouseInventoryAccount,
 )
@@ -207,14 +215,15 @@ def resolve_warehouse_account(warehouse):
     return _require_usable_account(mapping.account)
 
 
-def _coerce_units(value, *, what):
+def _coerce_units(value, *, what, allow_zero=False):
     if isinstance(value, bool) or not isinstance(value, int):
         raise InventoryValidationError(
             f"{what} must be an integer count of units."
         )
-    if value <= 0:
+    if value < 0 or (value == 0 and not allow_zero):
         raise InventoryValidationError(
-            f"{what} must be a positive integer."
+            f"{what} must be a positive integer." if not allow_zero else
+            f"{what} must be a non-negative integer."
         )
     return value
 
@@ -302,12 +311,14 @@ def _coerce_day(value):
 def _movement_fingerprint(*, movement_type, product_id, warehouse_id,
                           signed_quantity, movement_day, currency_code,
                           unit_cost, rate, rate_day, reference, description,
-                          is_temporary_cost, journal_entry_id, actor_id):
+                          is_temporary_cost, journal_entry_id, actor_id,
+                          gross_quantity=None, waste_quantity=None):
     canonical = "|".join([
         str(movement_type), str(product_id), str(warehouse_id),
         str(signed_quantity), movement_day.isoformat(), currency_code,
         str(unit_cost), str(rate), rate_day.isoformat(), reference,
         description,
+        str(gross_quantity), str(waste_quantity),
         str(is_temporary_cost), str(journal_entry_id), str(actor_id),
     ])
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
@@ -332,13 +343,16 @@ def _snapshot(movement):
         "journal_entry_id": movement.journal_entry_id,
         "reference": movement.reference,
         "description": movement.description,
+        "gross_quantity": movement.gross_quantity,
+        "waste_quantity": movement.waste_quantity,
     }
 
 
 def _create_movement(*, movement_type, product, warehouse, signed_quantity,
                      movement_day, currency, unit_cost, rate_value,
                      rate_day, reference, description, actor, journal_entry,
-                     is_temporary_cost, idempotency_key, audit_reason):
+                     is_temporary_cost, idempotency_key, audit_reason,
+                     gross_quantity=None, waste_quantity=None):
     before = stock_for(product, warehouse)
     after = before + signed_quantity
     movement = StockMovement.objects.create(
@@ -357,6 +371,8 @@ def _create_movement(*, movement_type, product, warehouse, signed_quantity,
         qty_after=after,
         reference=reference,
         description=description,
+        gross_quantity=gross_quantity,
+        waste_quantity=waste_quantity,
         journal_entry=journal_entry,
         idempotency_key=idempotency_key,
     )
@@ -393,7 +409,8 @@ def _post_movement(*, movement_type, product, warehouse, signed_quantity,
                    movement_day, currency, unit_cost, rate_value, rate_day,
                    reference, description, actor, journal_entry=None,
                    is_temporary_cost=False, idempotency_key=None,
-                   audit_reason=""):
+                   audit_reason="", gross_quantity=None,
+                   waste_quantity=None):
     """Create one movement + its audit atomically, idempotently on retry."""
     if idempotency_key is not None and (
         not isinstance(idempotency_key, str)
@@ -409,6 +426,7 @@ def _post_movement(*, movement_type, product, warehouse, signed_quantity,
         actor=actor,
         journal_entry=journal_entry, is_temporary_cost=is_temporary_cost,
         idempotency_key=idempotency_key, audit_reason=audit_reason,
+        gross_quantity=gross_quantity, waste_quantity=waste_quantity,
     )
     if idempotency_key is None:
         with transaction.atomic():
@@ -419,6 +437,7 @@ def _post_movement(*, movement_type, product, warehouse, signed_quantity,
         movement_day=movement_day, currency_code=currency.code,
         unit_cost=unit_cost, rate=rate_value, rate_day=rate_day,
         reference=reference, description=description,
+        gross_quantity=gross_quantity, waste_quantity=waste_quantity,
         is_temporary_cost=is_temporary_cost,
         journal_entry_id=journal_entry.pk if journal_entry else None,
         actor_id=actor.pk if actor else None,
@@ -454,7 +473,8 @@ def _require_active_masters(product, warehouse, currency):
 
 def receive_stock(*, product, warehouse, quantity, unit_cost, currency,
                   rate=None, rate_date=None, movement_date, reference,
-                  description="", user=None, idempotency_key=None):
+                  description="", user=None, idempotency_key=None,
+                  gross_quantity=None, waste_quantity=None):
     """Post one movement-only receipt at a caller-supplied unit cost (§12).
 
     No journal is posted: the future Purchase domain owns cost aggregation
@@ -481,6 +501,7 @@ def receive_stock(*, product, warehouse, quantity, unit_cost, currency,
         rate_day=_coerce_rate_date(resolved_currency, rate_date, day),
         reference=clean_reference, description=clean_description,
         actor=actor, idempotency_key=idempotency_key,
+        gross_quantity=gross_quantity, waste_quantity=waste_quantity,
     )
 
 
@@ -881,3 +902,191 @@ def transfer_stock(*, product, source_warehouse, destination_warehouse,
         if IdempotencyRecord.objects.filter(key=idempotency_key).exists():
             return _resolve_transfer_retry(idempotency_key, fingerprint)
         raise dup.__cause__ if dup.__cause__ is not None else dup
+
+# ---------------------------------------------------------------------------
+# Stage 6.4 — adjustments, receiving waste, and later shortage
+# ---------------------------------------------------------------------------
+
+def _adjustment_operation(*, movement_type, product, warehouse, quantity,
+                          movement_date, reference, description, user,
+                          idempotency_key=None, acknowledge_negative=False,
+                          unit_cost=None, currency=None, rate=None, rate_date=None,
+                          reason_label):
+    actor = _require_actor(user, reason_label)
+    day = _coerce_day(movement_date)
+    assert_posting_date_open(day)
+    resolved_product = resolve_product(product)
+    resolved_warehouse = resolve_warehouse(warehouse)
+    units = _coerce_units(quantity, what="Adjustment quantity")
+    clean_reference = _clean_reference(reference)
+    clean_description = _clean_description(description)
+    if not clean_description:
+        raise InventoryValidationError("A reason/description is required.")
+    if movement_type == MovementType.ADJUSTMENT_IN:
+        resolved_currency = resolve_currency(currency)
+        _require_active_masters(resolved_product, resolved_warehouse, resolved_currency)
+        cost = _coerce_unit_cost(unit_cost)
+        rate_value = _coerce_rate(resolved_currency, rate)
+        rate_day = _coerce_rate_date(resolved_currency, rate_date, day)
+        temporary = False
+        audit_reason = reason_label
+        signed = units
+    else:
+        current = stock_for(resolved_product, resolved_warehouse)
+        resulting = current - units
+        if resulting < 0 and not acknowledge_negative:
+            raise InventoryValidationError(
+                f"WARNING: this adjustment drives stock negative ({current} -> {resulting}); "
+                "explicit acknowledgement is required."
+            )
+        if resulting < 0 and unit_cost is None:
+            raise InventoryValidationError(
+                "A manually entered temporary unit cost is required when stock is negative."
+            )
+        if resulting < 0:
+            resolved_currency = resolve_currency(currency) if currency is not None else _base_currency()
+            cost = _coerce_unit_cost(unit_cost)
+            rate_value = _coerce_rate(resolved_currency, rate)
+            rate_day = _coerce_rate_date(resolved_currency, rate_date, day)
+            temporary = True
+            audit_reason = f"{reason_label}; negative stock acknowledged; temporary cost entered manually"
+        else:
+            resolved_currency = _base_currency()
+            _require_active_masters(resolved_product, resolved_warehouse, resolved_currency)
+            average = avco_for(resolved_product, resolved_warehouse)
+            if average is None:
+                raise InventoryValidationError("No cost basis is available for this adjustment.")
+            cost, rate_value, rate_day, temporary = average, Decimal("1.0000"), day, False
+            audit_reason = reason_label
+        signed = -units
+    return _post_movement(
+        movement_type=movement_type, product=resolved_product,
+        warehouse=resolved_warehouse, signed_quantity=signed, movement_day=day,
+        currency=resolved_currency, unit_cost=cost, rate_value=rate_value,
+        rate_day=rate_day, reference=clean_reference, description=clean_description,
+        actor=actor, is_temporary_cost=temporary, idempotency_key=idempotency_key,
+        audit_reason=audit_reason,
+    )
+
+
+def adjust_stock_in(**kwargs):
+    """Post a positive, explicitly costed physical inventory adjustment."""
+    return _adjustment_operation(movement_type=MovementType.ADJUSTMENT_IN,
+                                 reason_label="Positive inventory adjustment",
+                                 **kwargs)
+
+
+def adjust_stock_out(**kwargs):
+    """Post a negative physical adjustment under the existing issue policy."""
+    return _adjustment_operation(movement_type=MovementType.ADJUSTMENT_OUT,
+                                 reason_label="Negative inventory adjustment",
+                                 **kwargs)
+
+
+def receive_with_waste(*, product, warehouse, gross_quantity, waste_quantity,
+                       total_cost, currency, rate=None, rate_date=None,
+                       movement_date, reference, description, user=None,
+                       idempotency_key=None):
+    """Receive usable quantity while retaining receiving-waste facts.
+
+    ``total_cost`` is allocated over gross minus waste; waste is not a later
+    shortage and no separate stock leg is created.
+    """
+    gross = _coerce_units(gross_quantity, what="Gross receipt quantity")
+    waste = _coerce_units(waste_quantity, what="Waste quantity", allow_zero=True)
+    if waste >= gross:
+        raise InventoryValidationError("Waste must be less than gross quantity.")
+    usable = gross - waste
+    assert_posting_date_open(_coerce_day(movement_date))
+    total = to_decimal(total_cost)
+    if total < 0:
+        raise InventoryValidationError("Total shipment cost cannot be negative.")
+    unit = quantize_half_up(total / usable, 4)
+    movement = receive_stock(
+        product=product, warehouse=warehouse, quantity=usable, unit_cost=unit,
+        currency=currency, rate=rate, rate_date=rate_date,
+        movement_date=movement_date, reference=reference, description=description,
+        user=user, idempotency_key=idempotency_key,
+        gross_quantity=gross, waste_quantity=waste,
+    )
+    return movement
+
+
+def record_shortage(*, product, warehouse, quantity, movement_date, reference,
+                    description, user=None, idempotency_key=None,
+                    acknowledge_negative=False, temporary_unit_cost=None,
+                    temporary_currency=None, temporary_rate=None,
+                    temporary_rate_date=None):
+    """Record a later shortage as a new immutable outbound movement."""
+    return _adjustment_operation(
+        movement_type=MovementType.SHORTAGE, product=product, warehouse=warehouse,
+        quantity=quantity, movement_date=movement_date, reference=reference,
+        description=description, user=user, idempotency_key=idempotency_key,
+        acknowledge_negative=acknowledge_negative, unit_cost=temporary_unit_cost,
+        currency=temporary_currency, rate=temporary_rate, rate_date=temporary_rate_date,
+        reason_label="Warehouse shortage",
+    )
+
+
+def settle_shortage(*, shortage, settlement_date, actual_sales_rate,
+                    currency, rate=None, rate_date=None, reference,
+                    user=None, idempotency_key=None):
+    """Store manual actual-sales-rate compensation without changing stock."""
+    actor = _require_actor(user, "settle shortage")
+    if not isinstance(shortage, StockMovement):
+        try:
+            shortage = StockMovement.objects.get(pk=shortage)
+        except (StockMovement.DoesNotExist, ValueError, TypeError):
+            raise InventoryValidationError("Shortage movement does not exist.") from None
+    if shortage.movement_type != MovementType.SHORTAGE:
+        raise InventoryValidationError("Settlement must reference a shortage movement.")
+    day = _coerce_day(settlement_date)
+    assert_posting_date_open(day)
+    clean_ref = _clean_reference(reference)
+    cur = resolve_currency(currency)
+    _require_active_masters(shortage.product, shortage.warehouse, cur)
+    rate_value = _coerce_rate(cur, rate)
+    rate_day_value = _coerce_rate_date(cur, rate_date, day)
+    manual = _coerce_unit_cost(actual_sales_rate)
+    amount = quantize_half_up(manual * abs(shortage.quantity), 4)
+    fingerprint = hashlib.sha256("|".join(map(str, [shortage.pk, day, manual, cur.code,
+        rate_value, rate_day_value, clean_ref, actor.pk if actor else None])).encode()).hexdigest()
+    if idempotency_key is None:
+        with transaction.atomic():
+            record = ShortageSettlement.objects.create(
+                shortage=shortage, settlement_date=day, unit_rate=manual,
+                currency=cur, rate=rate_value, rate_date=rate_day_value,
+                compensation_amount=amount, reference=clean_ref,
+            )
+            record._compensation_amount = amount
+            record._reference = clean_ref
+            record_audit_event(user=actor, action=AuditAction.CREATE,
+                entity="ShortageSettlement", entity_id=record.id, reference=clean_ref,
+                previous_state=None, new_state={"shortage_id": shortage.pk,
+                "settlement_date": day.isoformat(), "actual_sales_rate": str(manual),
+                "currency": cur.code, "compensation_amount": str(amount)},
+                reason="Manual actual sales rate; no reference price used")
+            return record
+    try:
+        with idempotent_operation(key=idempotency_key, operation=SHORTAGE_SETTLEMENT_OPERATION) as idem:
+            with transaction.atomic():
+                record = ShortageSettlement.objects.create(
+                    shortage=shortage, settlement_date=day, unit_rate=manual,
+                    currency=cur, rate=rate_value, rate_date=rate_day_value,
+                    idempotency_key=idempotency_key)
+                idem.response_body = {"settlement_id": record.id, "fingerprint": fingerprint,
+                                      "compensation_amount": str(amount)}
+                idem.save(update_fields=["response_body"])
+                record_audit_event(user=actor, action=AuditAction.CREATE,
+                    entity="ShortageSettlement", entity_id=record.id, reference=clean_ref,
+                    previous_state=None, new_state={"shortage_id": shortage.pk,
+                    "settlement_date": day.isoformat(), "actual_sales_rate": str(manual),
+                    "currency": cur.code, "compensation_amount": str(amount)},
+                    reason="Manual actual sales rate; no reference price used")
+                return record
+    except DuplicateOperationError:
+        stored = IdempotencyRecord.objects.get(key=idempotency_key)
+        body = stored.response_body or {}
+        if body.get("fingerprint") != fingerprint:
+            raise InventoryValidationError("This idempotency key was already used for a different operation.")
+        return ShortageSettlement.objects.get(pk=body["settlement_id"])

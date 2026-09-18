@@ -48,6 +48,7 @@ from .services import (
     issue_stock,
     open_stock,
     receive_stock,
+    adjust_stock_in, adjust_stock_out, receive_with_waste, record_shortage, settle_shortage,
     resolve_warehouse_account,
     transfer_stock,
 )
@@ -1225,3 +1226,102 @@ class TransferImmutabilityAuditTests(TransferFixture, TestCase):
         event = AuditEvent.objects.get(
             entity="StockMovement", entity_id=str(out.id))
         self.assertIn("Negative stock acknowledged", event.reason)
+
+
+class Stage64Tests(InventoryFixture, TestCase):
+    """Focused Stage 6.4 contract tests."""
+
+    def _adjust_in(self, quantity=5, cost="12", **kwargs):
+        return adjust_stock_in(product=self.product, warehouse=self.warehouse,
+            quantity=quantity, unit_cost=cost, currency=self.afn,
+            movement_date=self.day, reference=self._number("ADJ"),
+            description="Physical count correction", user=self.user,
+            **kwargs)
+
+    def test_positive_adjustment_stock_cost_and_audit(self):
+        m = self._adjust_in()
+        self.assertEqual(stock_for(self.product, self.warehouse), 5)
+        self.assertEqual(m.movement_type, MovementType.ADJUSTMENT_IN)
+        self.assertTrue(AuditEvent.objects.filter(entity="StockMovement", entity_id=m.id).exists())
+
+    def test_adjustment_integer_and_reason_rules(self):
+        with self.assertRaises(InventoryValidationError):
+            self._adjust_in(quantity=1.5)
+        with self.assertRaises(InventoryValidationError):
+            adjust_stock_in(product=self.product, warehouse=self.warehouse, quantity=1,
+                unit_cost="1", currency=self.afn, movement_date=self.day,
+                reference="ADJ-X", description="", user=self.user)
+
+    def test_negative_adjustment_reuses_ack_and_temporary_cost(self):
+        self._adjust_in(quantity=2, cost="10")
+        with self.assertRaises(InventoryValidationError):
+            adjust_stock_out(product=self.product, warehouse=self.warehouse, quantity=3,
+                movement_date=self.day, reference="ADJ-OUT", description="count",
+                user=self.user)
+        m = adjust_stock_out(product=self.product, warehouse=self.warehouse, quantity=3,
+            movement_date=self.day, reference="ADJ-OUT", description="count",
+            user=self.user, acknowledge_negative=True, unit_cost="11", currency=self.afn)
+        self.assertTrue(m.is_temporary_cost)
+        self.assertEqual(stock_for(self.product, self.warehouse), -1)
+
+    def test_waste_allocates_total_cost_over_usable_and_is_traceable(self):
+        m = receive_with_waste(product=self.product, warehouse=self.warehouse,
+            gross_quantity=2000, waste_quantity=3, total_cost="370000", currency=self.usd,
+            rate="1", rate_date=self.day, movement_date=self.day, reference="RCV-W",
+            description="Unloading receipt; three waste", user=self.user)
+        self.assertEqual(m.quantity, 1997)
+        self.assertEqual(m.gross_quantity, 2000)
+        self.assertEqual(m.waste_quantity, 3)
+        self.assertEqual(m.unit_cost, Decimal("185.2779"))
+        self.assertEqual(stock_for(self.product, self.warehouse), 1997)
+        self.assertEqual(StockMovement.objects.filter(product=self.product).count(), 1)
+
+    def test_shortage_is_new_event_and_settlement_uses_manual_rate(self):
+        receipt = self._receive(quantity=1997, unit_cost="20", reference="RCV-S")
+        shortage = record_shortage(product=self.product, warehouse=self.warehouse,
+            quantity=7, movement_date=date(2026, 2, 1), reference="SH-1",
+            description="Later count shortage", user=self.user)
+        self.assertEqual(stock_for(self.product, self.warehouse), 1990)
+        receipt.refresh_from_db()
+        self.assertEqual(receipt.quantity, 1997)
+        self.assertEqual(receipt.unit_cost, Decimal("20.0000"))
+        settlement = settle_shortage(shortage=shortage, settlement_date=date(2026, 2, 2),
+            actual_sales_rate="125", currency=self.usd, rate="1", rate_date=date(2026, 2, 2),
+            reference="SET-1", user=self.user)
+        self.assertEqual(settlement.unit_rate, Decimal("125.0000"))
+        self.assertEqual(stock_for(self.product, self.warehouse), 1990)
+        self.assertFalse(JournalEntry.objects.filter(description__icontains="SET-1").exists())
+
+    def test_zero_reset_and_later_receipt(self):
+        self._receive(quantity=5, unit_cost="10")
+        adjust_stock_out(product=self.product, warehouse=self.warehouse, quantity=5,
+            movement_date=self.day, reference="ADJ-Z", description="zero count", user=self.user)
+        self.assertIsNone(avco_for(self.product, self.warehouse))
+        self._receive(quantity=2, unit_cost="30", reference="RCV-NEW")
+        self.assertEqual(avco_for(self.product, self.warehouse), Decimal("30.0000"))
+
+    def test_adjustment_exact_retry_and_mismatch(self):
+        kwargs = dict(product=self.product, warehouse=self.warehouse, quantity=2,
+            unit_cost="10", currency=self.afn, movement_date=self.day, reference="ADJ-I",
+            description="same", user=self.user, idempotency_key="adj-idem")
+        first = adjust_stock_in(**kwargs)
+        second = adjust_stock_in(**kwargs)
+        self.assertEqual(first.pk, second.pk)
+        self.assertEqual(StockMovement.objects.filter(idempotency_key="adj-idem").count(), 1)
+        with self.assertRaises(InventoryValidationError):
+            adjust_stock_in(**{**kwargs, "quantity": 3})
+
+    def test_posted_adjustment_and_settlement_are_immutable(self):
+        m = self._adjust_in()
+        with self.assertRaises(PostedImmutabilityError):
+            m.description = "changed"
+            m.save()
+        with self.assertRaises(PostedImmutabilityError):
+            m.delete()
+        shortage = record_shortage(product=self.product, warehouse=self.warehouse,
+            quantity=1, movement_date=self.day, reference="SH-I", description="later",
+            user=self.user, acknowledge_negative=True, temporary_unit_cost="2", temporary_currency=self.afn)
+        settlement = settle_shortage(shortage=shortage, settlement_date=self.day,
+            actual_sales_rate="9", currency=self.afn, reference="SET-I", user=self.user)
+        with self.assertRaises(PostedImmutabilityError):
+            settlement.delete()
