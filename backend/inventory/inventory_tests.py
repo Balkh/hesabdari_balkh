@@ -11,10 +11,12 @@ from datetime import date
 from decimal import Decimal
 from itertools import count
 from unittest import mock
+import threading
 
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import AnonymousUser
-from django.db import IntegrityError, transaction
+from django.db import IntegrityError, transaction, connection, close_old_connections
+from django.db.models import Sum
 from django.test import TestCase
 
 from accounting.coa import seed_chart_of_accounts
@@ -1700,3 +1702,95 @@ class Stage66DispatchTests(InventoryFixture, TestCase):
         self.assertEqual(returned.return_movement.quantity, 5)
         self.assertEqual(returned.return_movement.unit_cost, Decimal("12.0000"))
         self.assertEqual(stock_for(self.product, self.warehouse), 85)
+
+class Stage6ConcurrencyTests(InventoryFixture, TransactionTestCase):
+    """PostgreSQL concurrency regression tests for stock identity locking."""
+
+    reset_sequences = True
+
+    def test_concurrent_issues_cannot_both_validate_against_same_stock(self):
+        if connection.vendor != "postgresql":
+            self.skipTest("Requires PostgreSQL row-level locking semantics")
+        self._receive(quantity=100, unit_cost="10", reference="RCV-CONC")
+        results = []
+        barrier = threading.Barrier(3)
+
+        def worker(index):
+            close_old_connections()
+            try:
+                barrier.wait(timeout=5)
+                movement = issue_stock(
+                    product=self.product, warehouse=self.warehouse,
+                    quantity=80, movement_date=self.day,
+                    reference=f"CONC-ISS-{index}", description="concurrency test",
+                    user=self.user,
+                )
+                results.append((index, "ok", movement.quantity))
+            except Exception as exc:  # noqa: BLE001 - capture worker outcome
+                results.append((index, "error", type(exc).__name__, str(exc)))
+            finally:
+                close_old_connections()
+
+        threads = [threading.Thread(target=worker, args=(i,)) for i in (1, 2)]
+        for thread in threads:
+            thread.start()
+        barrier.wait(timeout=5)
+        for thread in threads:
+            thread.join(timeout=10)
+            self.assertFalse(thread.is_alive(), "concurrent worker did not finish")
+
+        successes = [row for row in results if row[1] == "ok"]
+        errors = [row for row in results if row[1] == "error"]
+        self.assertEqual(len(successes), 1, results)
+        self.assertEqual(len(errors), 1, results)
+        self.assertEqual(errors[0][2], "InventoryValidationError")
+        self.assertEqual(stock_for(self.product, self.warehouse), 20)
+        self.assertEqual(
+            StockMovement.objects.filter(movement_type=MovementType.SALES_ISSUE).count(),
+            1,
+        )
+
+    def test_concurrent_returns_cannot_over_return_source(self):
+        if connection.vendor != "postgresql":
+            self.skipTest("Requires PostgreSQL row-level locking semantics")
+        from parties.models import Party
+        supplier = Party.objects.create(name="Concurrent Supplier", is_supplier=True)
+        source = self._receive(quantity=50, unit_cost="10", reference="PI-CONC",
+                               party=supplier)
+        results = []
+        barrier = threading.Barrier(3)
+
+        def worker(index):
+            close_old_connections()
+            try:
+                barrier.wait(timeout=5)
+                result = purchase_return(
+                    product=self.product, warehouse=self.warehouse,
+                    supplier=supplier, source_movement=source, quantity=40,
+                    source_document="PI-CONC", movement_date=self.day,
+                    description=f"concurrent return {index}", user=self.user,
+                )
+                results.append((index, "ok", result.id))
+            except Exception as exc:  # noqa: BLE001 - capture worker outcome
+                results.append((index, "error", type(exc).__name__, str(exc)))
+            finally:
+                close_old_connections()
+
+        threads = [threading.Thread(target=worker, args=(i,)) for i in (1, 2)]
+        for thread in threads:
+            thread.start()
+        barrier.wait(timeout=5)
+        for thread in threads:
+            thread.join(timeout=10)
+            self.assertFalse(thread.is_alive(), "concurrent worker did not finish")
+
+        successes = [row for row in results if row[1] == "ok"]
+        errors = [row for row in results if row[1] == "error"]
+        self.assertEqual(len(successes), 1, results)
+        self.assertEqual(len(errors), 1, results)
+        self.assertEqual(errors[0][2], "InventoryValidationError")
+        self.assertEqual(
+            InventoryReturn.objects.filter(source_movement=source).aggregate(total=Sum("quantity"))["total"],
+            40,
+        )
+        self.assertEqual(stock_for(self.product, self.warehouse), 10)
