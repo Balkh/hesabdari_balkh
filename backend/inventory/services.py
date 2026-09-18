@@ -625,6 +625,7 @@ def _jalali_year(value):
     return int(gregorian_to_jalali(value).split("/")[0])
 
 
+@transaction.atomic
 def open_stock(*, product, warehouse, quantity, unit_cost, currency,
                rate=None, rate_date=None, posting_date, reference,
                description="", user=None, number=None,
@@ -643,6 +644,9 @@ def open_stock(*, product, warehouse, quantity, unit_cost, currency,
     resolved_currency = resolve_currency(currency)
     _require_active_masters(
         resolved_product, resolved_warehouse, resolved_currency)
+    resolved_product, resolved_warehouse = _lock_stock_identity(
+        resolved_product, resolved_warehouse
+    )
     units = _coerce_units(quantity, what="Opening quantity")
     clean_cost = _coerce_unit_cost(unit_cost)
     clean_rate = _coerce_rate(resolved_currency, rate)
