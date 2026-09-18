@@ -17,7 +17,7 @@ from django.contrib.auth import get_user_model
 from django.contrib.auth.models import AnonymousUser
 from django.db import IntegrityError, transaction, connection, close_old_connections
 from django.db.models import Sum
-from django.test import TestCase
+from django.test import TestCase, TransactionTestCase
 
 from accounting.coa import seed_chart_of_accounts
 from accounting.models import (
