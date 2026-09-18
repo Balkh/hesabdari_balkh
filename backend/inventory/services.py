@@ -36,6 +36,9 @@ from decimal import Decimal, InvalidOperation
 from django.db import transaction
 from django.db.models import Sum
 
+from products.models import Product
+from warehouses.models import Warehouse
+
 from accounting.models import Account
 from accounting.services import _as_date, post_journal
 from core.dates import gregorian_to_jalali
@@ -73,6 +76,27 @@ from .stock import avco_for, stock_for
 
 class InventoryValidationError(ValueError):
     """Deterministic inventory rejection (service-error convention)."""
+
+
+def _lock_stock_identity(product, warehouse):
+    """Serialize stock mutations for one Product+Warehouse identity."""
+    locked_product = Product.objects.select_for_update().get(pk=product.pk)
+    locked_warehouse = Warehouse.objects.select_for_update().get(pk=warehouse.pk)
+    return locked_product, locked_warehouse
+
+
+def _lock_stock_identities(product, *warehouses):
+    """Lock one product and multiple warehouses in deterministic order."""
+    locked_product = Product.objects.select_for_update().get(pk=product.pk)
+    ids = sorted({warehouse.pk for warehouse in warehouses})
+    locked = list(
+        Warehouse.objects.select_for_update().filter(pk__in=ids).order_by("pk")
+    )
+    if len(locked) != len(ids):
+        raise InventoryValidationError("Warehouse does not exist.")
+    by_id = {warehouse.pk: warehouse for warehouse in locked}
+    return locked_product, [by_id[warehouse.pk] for warehouse in warehouses]
+
 
 
 def _require_actor(user, action):
@@ -359,6 +383,7 @@ def _create_movement(*, movement_type, product, warehouse, signed_quantity,
                      rate_day, reference, description, actor, journal_entry,
                      is_temporary_cost, idempotency_key, audit_reason,
                      gross_quantity=None, waste_quantity=None, source_party=None):
+    product, warehouse = _lock_stock_identity(product, warehouse)
     before = stock_for(product, warehouse)
     after = before + signed_quantity
     movement = StockMovement.objects.create(
@@ -515,6 +540,7 @@ def receive_stock(*, product, warehouse, quantity, unit_cost, currency,
     )
 
 
+@transaction.atomic
 def issue_stock(*, product, warehouse, quantity, movement_date, reference,
                 description="", user=None, idempotency_key=None,
                 acknowledge_negative=False,
@@ -537,6 +563,9 @@ def issue_stock(*, product, warehouse, quantity, movement_date, reference,
     day = _coerce_day(movement_date)
     clean_reference = _clean_reference(reference)
     clean_description = _clean_description(description)
+    resolved_product, resolved_warehouse = _lock_stock_identity(
+        resolved_product, resolved_warehouse
+    )
     current = stock_for(resolved_product, resolved_warehouse)
     resulting = current - units
     if resulting < 0:
@@ -596,6 +625,7 @@ def _jalali_year(value):
     return int(gregorian_to_jalali(value).split("/")[0])
 
 
+@transaction.atomic
 def open_stock(*, product, warehouse, quantity, unit_cost, currency,
                rate=None, rate_date=None, posting_date, reference,
                description="", user=None, number=None,
@@ -614,6 +644,9 @@ def open_stock(*, product, warehouse, quantity, unit_cost, currency,
     resolved_currency = resolve_currency(currency)
     _require_active_masters(
         resolved_product, resolved_warehouse, resolved_currency)
+    resolved_product, resolved_warehouse = _lock_stock_identity(
+        resolved_product, resolved_warehouse
+    )
     units = _coerce_units(quantity, what="Opening quantity")
     clean_cost = _coerce_unit_cost(unit_cost)
     clean_rate = _coerce_rate(resolved_currency, rate)
@@ -775,6 +808,7 @@ def _execute_transfer(*, product, source, dest, units, day, currency,
     return out_movement, in_movement, entry
 
 
+@transaction.atomic
 def transfer_stock(*, product, source_warehouse, destination_warehouse,
                    quantity, movement_date, reference, description,
                    user=None, idempotency_key=None,
@@ -823,6 +857,10 @@ def transfer_stock(*, product, source_warehouse, destination_warehouse,
     # Cost basis mirrors the issue_stock rule exactly (positive stock ->
     # running AVCO; otherwise manual temp + ack). issue_stock itself is
     # not called: it posts SALES_ISSUE rows, which is the wrong type.
+    resolved_product, locked_warehouses = _lock_stock_identities(
+        resolved_product, resolved_source, resolved_dest
+    )
+    resolved_source, resolved_dest = locked_warehouses
     current = stock_for(resolved_product, resolved_source)
     resulting = current - units
     if resulting < 0:
@@ -918,6 +956,7 @@ def transfer_stock(*, product, source_warehouse, destination_warehouse,
 # Stage 6.4 — adjustments, receiving waste, and later shortage
 # ---------------------------------------------------------------------------
 
+@transaction.atomic
 def _adjustment_operation(*, movement_type, product, warehouse, quantity,
                           movement_date, reference, description, user,
                           idempotency_key=None, acknowledge_negative=False,
@@ -933,6 +972,9 @@ def _adjustment_operation(*, movement_type, product, warehouse, quantity,
     clean_description = _clean_description(description)
     if not clean_description:
         raise InventoryValidationError("A reason/description is required.")
+    resolved_product, resolved_warehouse = _lock_stock_identity(
+        resolved_product, resolved_warehouse
+    )
     if movement_type == MovementType.ADJUSTMENT_IN:
         resolved_currency = resolve_currency(currency)
         _require_active_masters(resolved_product, resolved_warehouse, resolved_currency)
@@ -1190,6 +1232,10 @@ def _post_return(*, return_type, source_type, movement_type, party_role,
         raise InventoryValidationError("Purchase return party must be a supplier.")
     if source.movement_type == MovementType.SALES_ISSUE and not resolved_party.is_customer:
         raise InventoryValidationError("Sales return party must be a customer.")
+    source = StockMovement.objects.select_for_update().get(pk=source.pk)
+    resolved_product, resolved_warehouse = _lock_stock_identity(
+        resolved_product, resolved_warehouse
+    )
     if units > source.quantity.__abs__():
         raise InventoryValidationError("Return quantity exceeds the source quantity.")
     already = InventoryReturn.objects.filter(source_movement=source).aggregate(
