@@ -51,7 +51,7 @@ from .services import (
     open_stock,
     receive_stock,
     adjust_stock_in, adjust_stock_out, receive_with_waste, record_shortage, settle_shortage,
-    purchase_return, sales_return,
+    purchase_return, sales_return, customer_dispatch,
     resolve_warehouse_account,
     transfer_stock,
 )
@@ -1567,3 +1567,136 @@ class Stage65ReturnTests(InventoryFixture, TestCase):
             purchase_return(product=self.product, warehouse=self.warehouse,
                 supplier=self.supplier, source_movement=source, quantity=1,
                 source_document="PI-65", movement_date=self.day, description="closed", user=self.user)
+
+
+class Stage66DispatchTests(InventoryFixture, TestCase):
+    """Focused Stage 6.6 customer-dispatch foundation tests."""
+
+    def setUp(self):
+        super().setUp()
+        from parties.models import Party
+        self.customer = Party.objects.create(name="Customer 66", is_customer=True)
+        self.supplier = Party.objects.create(name="Supplier 66", is_supplier=True)
+
+    def _receipt(self, warehouse=None, quantity=100, cost="10"):
+        return self._receive(quantity=quantity, unit_cost=cost,
+            warehouse=warehouse or self.warehouse, reference="RCV-66",
+            party=None)
+
+    def test_basic_dispatch_is_customer_attributed_stock_out(self):
+        self._receipt()
+        movement = customer_dispatch(product=self.product, warehouse=self.warehouse,
+            customer=self.customer, quantity=20, movement_date=self.day,
+            reference="DISP-66", description="Customer dispatch", user=self.user)
+        self.assertEqual(movement.movement_type, MovementType.SALES_ISSUE)
+        self.assertEqual(movement.quantity, -20)
+        self.assertEqual(movement.qty_before, 100)
+        self.assertEqual(movement.qty_after, 80)
+        self.assertEqual(movement.source_party_id, self.customer.id)
+        event = AuditEvent.objects.get(entity="StockMovement", entity_id=movement.id)
+        self.assertEqual(event.new_state["source_party_id"], self.customer.id)
+        self.assertEqual(event.new_state["quantity"], -20)
+        self.assertEqual(event.new_state["qty_before"], 100)
+        self.assertEqual(event.new_state["qty_after"], 80)
+        self.assertEqual(stock_for(self.product, self.warehouse), 80)
+
+    def test_dispatch_customer_role_and_description_are_required(self):
+        self._receipt()
+        with self.assertRaises(InventoryValidationError):
+            customer_dispatch(product=self.product, warehouse=self.warehouse,
+                customer=self.supplier, quantity=1, movement_date=self.day,
+                reference="DISP-BAD", description="bad", user=self.user)
+        with self.assertRaises(InventoryValidationError):
+            customer_dispatch(product=self.product, warehouse=self.warehouse,
+                customer=self.customer, quantity=1, movement_date=self.day,
+                reference="DISP-BLANK", description=" ", user=self.user)
+        self.assertEqual(StockMovement.objects.filter(reference="DISP-BAD").count(), 0)
+
+    def test_dispatch_warehouse_isolation_and_existing_cost(self):
+        other = create_warehouse(name="Other Warehouse 66", user=self.user)
+        self._receipt(self.warehouse, quantity=100, cost="10")
+        self._receive(warehouse=other, quantity=100, unit_cost="30", reference="RCV-66-OTHER")
+        self.product.ref_purchase_price = Decimal("999")
+        self.product.ref_sales_price = Decimal("888")
+        self.product.save(update_fields=["ref_purchase_price", "ref_sales_price"])
+        movement = customer_dispatch(product=self.product, warehouse=self.warehouse,
+            customer=self.customer, quantity=20, movement_date=self.day,
+            reference="DISP-ISO", description="Warehouse A dispatch", user=self.user)
+        self.assertEqual(movement.unit_cost, Decimal("10.0000"))
+        self.assertEqual(stock_for(self.product, self.warehouse), 80)
+        self.assertEqual(stock_for(self.product, other), 100)
+
+    def test_dispatch_exact_retry_and_payload_mismatch(self):
+        self._receipt()
+        params = dict(product=self.product, warehouse=self.warehouse,
+            customer=self.customer, quantity=20, movement_date=self.day,
+            reference="DISP-IDEM", description="same dispatch", user=self.user,
+            idempotency_key="DISP-KEY")
+        first = customer_dispatch(**params)
+        second = customer_dispatch(**params)
+        self.assertEqual(first.pk, second.pk)
+        self.assertEqual(StockMovement.objects.filter(reference="DISP-IDEM").count(), 1)
+        with self.assertRaises(InventoryValidationError):
+            customer_dispatch(**{**params, "quantity": 21})
+
+    def test_dispatch_late_audit_failure_rolls_back_everything(self):
+        self._receipt()
+        before = (StockMovement.objects.count(), AuditEvent.objects.count(),
+                  IdempotencyRecord.objects.count())
+        with mock.patch("inventory.services.record_audit_event",
+                        side_effect=RuntimeError("audit down")):
+            with self.assertRaises(RuntimeError):
+                customer_dispatch(product=self.product, warehouse=self.warehouse,
+                    customer=self.customer, quantity=20, movement_date=self.day,
+                    reference="DISP-ROLLBACK", description="late failure", user=self.user,
+                    idempotency_key="DISP-ROLLBACK-KEY")
+        self.assertEqual((StockMovement.objects.count(), AuditEvent.objects.count(),
+                          IdempotencyRecord.objects.count()), before)
+
+    def test_dispatch_movement_is_immutable(self):
+        self._receipt()
+        movement = customer_dispatch(product=self.product, warehouse=self.warehouse,
+            customer=self.customer, quantity=20, movement_date=self.day,
+            reference="DISP-IMM", description="immutable dispatch", user=self.user)
+        with self.assertRaises(PostedImmutabilityError):
+            movement.quantity = -1
+            movement.save()
+        with self.assertRaises(PostedImmutabilityError):
+            movement.delete()
+
+    def test_dispatch_closed_period_rejected(self):
+        self._receipt()
+        period = create_period(name="FY66", start_date=date(2026, 1, 1),
+            end_date=date(2026, 12, 31), user=self.user)
+        close_period(period, user=self.user, reason="year end")
+        before = StockMovement.objects.count()
+        with self.assertRaises(PeriodValidationError):
+            customer_dispatch(product=self.product, warehouse=self.warehouse,
+                customer=self.customer, quantity=1, movement_date=self.day,
+                reference="DISP-CLOSED", description="closed", user=self.user)
+        self.assertEqual(StockMovement.objects.count(), before)
+
+    def test_dispatch_negative_stock_reuses_existing_ack_and_temporary_cost(self):
+        with self.assertRaises(InventoryValidationError):
+            customer_dispatch(product=self.product, warehouse=self.warehouse,
+                customer=self.customer, quantity=10, movement_date=self.day,
+                reference="DISP-NEG", description="negative", user=self.user)
+        movement = customer_dispatch(product=self.product, warehouse=self.warehouse,
+            customer=self.customer, quantity=10, movement_date=self.day,
+            reference="DISP-NEG", description="negative acknowledged", user=self.user,
+            acknowledge_negative=True, temporary_unit_cost="7")
+        self.assertTrue(movement.is_temporary_cost)
+        self.assertEqual(stock_for(self.product, self.warehouse), -10)
+
+    def test_sales_return_compatibility_uses_dispatch_source_cost(self):
+        self._receive(quantity=100, unit_cost="12", reference="RCV-DISP-RET")
+        dispatch = customer_dispatch(product=self.product, warehouse=self.warehouse,
+            customer=self.customer, quantity=20, movement_date=self.day,
+            reference="DISP-RET", description="dispatch for return test", user=self.user)
+        returned = sales_return(product=self.product, warehouse=self.warehouse,
+            customer=self.customer, source_movement=dispatch, quantity=5,
+            source_document="DISP-RET", movement_date=date(2026, 2, 1),
+            description="Customer return after dispatch", user=self.user)
+        self.assertEqual(returned.return_movement.quantity, 5)
+        self.assertEqual(returned.return_movement.unit_cost, Decimal("12.0000"))
+        self.assertEqual(stock_for(self.product, self.warehouse), 85)

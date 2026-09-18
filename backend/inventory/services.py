@@ -1327,3 +1327,36 @@ def sales_return(*, product, warehouse, customer, source_movement,
         description=description, user=user, idempotency_key=idempotency_key,
         acknowledge_negative=True,
     )
+
+# ---------------------------------------------------------------------------
+# Stage 6.6 — customer dispatch / sales issue foundation
+# ---------------------------------------------------------------------------
+
+def customer_dispatch(*, product, warehouse, customer, quantity,
+                      movement_date, reference, description, user=None,
+                      idempotency_key=None, acknowledge_negative=False,
+                      temporary_unit_cost=None, temporary_currency=None,
+                      temporary_rate=None, temporary_rate_date=None):
+    """Post a customer-attributed SALES_ISSUE through the existing primitive.
+
+    This is inventory-side dispatch context only. It deliberately does not
+    create a Sales Invoice, price, receivable, revenue, COGS, or payment
+    workflow. The existing issue_stock() remains the sole cost/stock engine.
+    """
+    resolved_customer = _resolve_party(customer, role="is_customer")
+    assert_posting_date_open(_coerce_day(movement_date))
+    clean_description = _clean_description(description)
+    if not clean_description:
+        raise InventoryValidationError("A dispatch reason/description is required.")
+    return issue_stock(
+        product=product, warehouse=warehouse, quantity=quantity,
+        movement_date=movement_date, reference=reference,
+        description=clean_description, user=user,
+        idempotency_key=idempotency_key,
+        acknowledge_negative=acknowledge_negative,
+        temporary_unit_cost=temporary_unit_cost,
+        temporary_currency=temporary_currency,
+        temporary_rate=temporary_rate,
+        temporary_rate_date=temporary_rate_date,
+        party=resolved_customer,
+    )
