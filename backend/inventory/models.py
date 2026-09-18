@@ -100,6 +100,7 @@ class StockMovement(models.Model):
     qty_before = models.IntegerField()
     qty_after = models.IntegerField()
     reference = models.CharField(max_length=200)
+    description = models.CharField(max_length=500, blank=True, default="")
     journal_entry = models.ForeignKey(
         "accounting.JournalEntry",
         null=True,

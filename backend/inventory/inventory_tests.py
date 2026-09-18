@@ -25,6 +25,12 @@ from accounting.models import (
 )
 from accounting.services import JournalValidationError
 from categories.services import create_category
+from core.models import IdempotencyRecord
+from fiscal_periods.services import (
+    PeriodValidationError,
+    close_period,
+    create_period,
+)
 from currencies.models import Currency
 from products.services import create_product
 from security.models import AuditAction, AuditEvent
@@ -658,3 +664,121 @@ class ImmutabilityAuditTests(InventoryFixture, TestCase):
             entity="StockMovement", entity_id=str(movement.id))
         self.assertIn("Negative stock acknowledged", event.reason)
         self.assertTrue(event.new_state["is_temporary_cost"])
+
+
+class DescriptionTests(InventoryFixture, TestCase):
+    def test_receive_description_stored_and_audited(self):
+        movement = self._receive(
+            reference="RCV-D1", description="  Supplier packing list 42  ")
+        self.assertEqual(movement.description, "Supplier packing list 42")
+        event = AuditEvent.objects.get(
+            entity="StockMovement", entity_id=str(movement.id))
+        self.assertEqual(
+            event.new_state["description"], "Supplier packing list 42")
+
+    def test_description_defaults_to_blank(self):
+        movement = self._receive(reference="RCV-D0")
+        self.assertEqual(movement.description, "")
+
+    def test_issue_description_stored(self):
+        self._receive(quantity=100, reference="RCV-D2")
+        movement = self._issue(
+            quantity=10, reference="ISS-D1", description="Shop delivery")
+        self.assertEqual(movement.description, "Shop delivery")
+
+    def test_opening_description_on_movement(self):
+        explicit = self._open(reference="OP-D1", description="Go-live count")
+        self.assertEqual(explicit.description, "Go-live count")
+        defaulted = self._open(reference="OP-D2")
+        self.assertEqual(
+            defaulted.description,
+            "Opening stock: OIL-10L x 500 @ Omar Rahimi")
+
+    def test_description_too_long_rejected(self):
+        long_text = "x" * 501
+        with self.assertRaises(InventoryValidationError):
+            self._receive(reference="RCV-DL", description=long_text)
+        with self.assertRaises(InventoryValidationError):
+            self._issue(quantity=1, reference="ISS-DL",
+                        description=long_text,
+                        acknowledge_negative=True,
+                        temporary_unit_cost="1")
+        self.assertEqual(StockMovement.objects.count(), 0)
+
+    def test_description_must_be_text(self):
+        with self.assertRaises(InventoryValidationError):
+            self._receive(reference="RCV-DT", description=123)
+
+    def test_retry_description_mismatch_rejected(self):
+        key = self._key()
+        self._receive(
+            reference="RCV-DM", description="first",
+            idempotency_key=key)
+        with self.assertRaises(InventoryValidationError):
+            self._receive(
+                reference="RCV-DM", description="second",
+                idempotency_key=key)
+        self.assertEqual(StockMovement.objects.count(), 1)
+
+
+class FiscalPeriodTests(InventoryFixture, TestCase):
+    def _period(self):
+        return create_period(
+            name="FY26", start_date=date(2026, 1, 1),
+            end_date=date(2026, 12, 31), user=self.user)
+
+    def test_open_period_posting_allowed(self):
+        self._period()
+        movement = self._open()
+        self.assertIsNotNone(movement.journal_entry_id)
+
+    def test_closed_period_posting_rejected(self):
+        period = self._period()
+        close_period(period, user=self.user, reason="year-end")
+        with self.assertRaises(PeriodValidationError):
+            self._open()
+        self.assertEqual(StockMovement.objects.count(), 0)
+        self.assertEqual(JournalEntry.objects.count(), 0)
+        self.assertEqual(
+            AuditEvent.objects.filter(entity="StockMovement").count(), 0)
+
+
+class AtomicityChronologyTests(InventoryFixture, TestCase):
+    def test_audit_failure_rolls_back_movement(self):
+        movements_before = StockMovement.objects.count()
+        audits_before = AuditEvent.objects.count()
+        keys_before = IdempotencyRecord.objects.count()
+        with mock.patch(
+            "inventory.services.record_audit_event",
+            side_effect=RuntimeError("audit store down")
+        ):
+            with self.assertRaises(RuntimeError):
+                self._receive(
+                    reference="RCV-AF", idempotency_key=self._key())
+        self.assertEqual(StockMovement.objects.count(), movements_before)
+        self.assertEqual(AuditEvent.objects.count(), audits_before)
+        self.assertEqual(IdempotencyRecord.objects.count(), keys_before)
+
+    def test_backdated_receipt_replays_in_date_order(self):
+        receive_stock(
+            product=self.product, warehouse=self.warehouse, quantity=100,
+            unit_cost="10", currency=self.afn,
+            movement_date=date(2026, 1, 10), reference="RCV-C1",
+            user=self.user)
+        issue_stock(
+            product=self.product, warehouse=self.warehouse, quantity=60,
+            movement_date=date(2026, 1, 20), reference="ISS-C1",
+            user=self.user)
+        receive_stock(
+            product=self.product, warehouse=self.warehouse, quantity=60,
+            unit_cost="20", currency=self.afn,
+            movement_date=date(2026, 1, 15), reference="RCV-C2",
+            user=self.user)
+        rows = list(movements_for(self.product, self.warehouse))
+        self.assertEqual(
+            [m.reference for m in rows], ["RCV-C1", "RCV-C2", "ISS-C1"])
+        self.assertEqual(stock_for(self.product, self.warehouse), 100)
+        self.assertEqual(
+            avco_for(self.product, self.warehouse), Decimal("13.7500"))
+        issued = StockMovement.objects.get(reference="ISS-C1")
+        self.assertEqual(issued.unit_cost, Decimal("10.0000"))

@@ -272,6 +272,22 @@ def _clean_reference(reference):
     return reference.strip()
 
 
+# Free-form transaction annotation (Stage 6.2 §7/§11). The service
+# enforces the length so SQLite and PostgreSQL behave identically.
+DESCRIPTION_MAX_LENGTH = 500
+
+
+def _clean_description(description):
+    if not isinstance(description, str):
+        raise InventoryValidationError("Description must be text.")
+    clean = description.strip()
+    if len(clean) > DESCRIPTION_MAX_LENGTH:
+        raise InventoryValidationError(
+            "Description must be at most 500 characters."
+        )
+    return clean
+
+
 def _coerce_day(value):
     if isinstance(value, date_class):
         return value
@@ -280,12 +296,13 @@ def _coerce_day(value):
 
 def _movement_fingerprint(*, movement_type, product_id, warehouse_id,
                           signed_quantity, movement_day, currency_code,
-                          unit_cost, rate, rate_day, reference,
+                          unit_cost, rate, rate_day, reference, description,
                           is_temporary_cost, journal_entry_id, actor_id):
     canonical = "|".join([
         str(movement_type), str(product_id), str(warehouse_id),
         str(signed_quantity), movement_day.isoformat(), currency_code,
         str(unit_cost), str(rate), rate_day.isoformat(), reference,
+        description,
         str(is_temporary_cost), str(journal_entry_id), str(actor_id),
     ])
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
@@ -309,12 +326,13 @@ def _snapshot(movement):
         "is_temporary_cost": movement.is_temporary_cost,
         "journal_entry_id": movement.journal_entry_id,
         "reference": movement.reference,
+        "description": movement.description,
     }
 
 
 def _create_movement(*, movement_type, product, warehouse, signed_quantity,
                      movement_day, currency, unit_cost, rate_value,
-                     rate_day, reference, actor, journal_entry,
+                     rate_day, reference, description, actor, journal_entry,
                      is_temporary_cost, idempotency_key, audit_reason):
     before = stock_for(product, warehouse)
     after = before + signed_quantity
@@ -333,6 +351,7 @@ def _create_movement(*, movement_type, product, warehouse, signed_quantity,
         qty_before=before,
         qty_after=after,
         reference=reference,
+        description=description,
         journal_entry=journal_entry,
         idempotency_key=idempotency_key,
     )
@@ -367,7 +386,7 @@ def _resolve_movement_retry(idempotency_key, fingerprint):
 
 def _post_movement(*, movement_type, product, warehouse, signed_quantity,
                    movement_day, currency, unit_cost, rate_value, rate_day,
-                   reference, actor, journal_entry=None,
+                   reference, description, actor, journal_entry=None,
                    is_temporary_cost=False, idempotency_key=None,
                    audit_reason=""):
     """Create one movement + its audit atomically, idempotently on retry."""
@@ -381,7 +400,8 @@ def _post_movement(*, movement_type, product, warehouse, signed_quantity,
         movement_type=movement_type, product=product, warehouse=warehouse,
         signed_quantity=signed_quantity, movement_day=movement_day,
         currency=currency, unit_cost=unit_cost, rate_value=rate_value,
-        rate_day=rate_day, reference=reference, actor=actor,
+        rate_day=rate_day, reference=reference, description=description,
+        actor=actor,
         journal_entry=journal_entry, is_temporary_cost=is_temporary_cost,
         idempotency_key=idempotency_key, audit_reason=audit_reason,
     )
@@ -393,7 +413,8 @@ def _post_movement(*, movement_type, product, warehouse, signed_quantity,
         warehouse_id=warehouse.pk, signed_quantity=signed_quantity,
         movement_day=movement_day, currency_code=currency.code,
         unit_cost=unit_cost, rate=rate_value, rate_day=rate_day,
-        reference=reference, is_temporary_cost=is_temporary_cost,
+        reference=reference, description=description,
+        is_temporary_cost=is_temporary_cost,
         journal_entry_id=journal_entry.pk if journal_entry else None,
         actor_id=actor.pk if actor else None,
     )
@@ -428,7 +449,7 @@ def _require_active_masters(product, warehouse, currency):
 
 def receive_stock(*, product, warehouse, quantity, unit_cost, currency,
                   rate=None, rate_date=None, movement_date, reference,
-                  user=None, idempotency_key=None):
+                  description="", user=None, idempotency_key=None):
     """Post one movement-only receipt at a caller-supplied unit cost (§12).
 
     No journal is posted: the future Purchase domain owns cost aggregation
@@ -445,6 +466,7 @@ def receive_stock(*, product, warehouse, quantity, unit_cost, currency,
     clean_rate = _coerce_rate(resolved_currency, rate)
     day = _coerce_day(movement_date)
     clean_reference = _clean_reference(reference)
+    clean_description = _clean_description(description)
     return _post_movement(
         movement_type=MovementType.PURCHASE_RECEIPT,
         product=resolved_product, warehouse=resolved_warehouse,
@@ -452,13 +474,14 @@ def receive_stock(*, product, warehouse, quantity, unit_cost, currency,
         currency=resolved_currency, unit_cost=clean_cost,
         rate_value=clean_rate,
         rate_day=_coerce_rate_date(resolved_currency, rate_date, day),
-        reference=clean_reference, actor=actor,
-        idempotency_key=idempotency_key,
+        reference=clean_reference, description=clean_description,
+        actor=actor, idempotency_key=idempotency_key,
     )
 
 
 def issue_stock(*, product, warehouse, quantity, movement_date, reference,
-                user=None, idempotency_key=None, acknowledge_negative=False,
+                description="", user=None, idempotency_key=None,
+                acknowledge_negative=False,
                 temporary_unit_cost=None, temporary_currency=None,
                 temporary_rate=None, temporary_rate_date=None):
     """Post one movement-only issue at AVCO — or at manual temp cost (§18).
@@ -477,6 +500,7 @@ def issue_stock(*, product, warehouse, quantity, movement_date, reference,
     units = _coerce_units(quantity, what="Issue quantity")
     day = _coerce_day(movement_date)
     clean_reference = _clean_reference(reference)
+    clean_description = _clean_description(description)
     current = stock_for(resolved_product, resolved_warehouse)
     resulting = current - units
     if resulting < 0:
@@ -525,9 +549,9 @@ def issue_stock(*, product, warehouse, quantity, movement_date, reference,
         signed_quantity=-units, movement_day=day,
         currency=temp_currency, unit_cost=clean_cost,
         rate_value=clean_rate, rate_day=clean_rate_day,
-        reference=clean_reference, actor=actor,
-        is_temporary_cost=temporary, idempotency_key=idempotency_key,
-        audit_reason=reason,
+        reference=clean_reference, description=clean_description,
+        actor=actor, is_temporary_cost=temporary,
+        idempotency_key=idempotency_key, audit_reason=reason,
     )
 
 
@@ -606,6 +630,7 @@ def open_stock(*, product, warehouse, quantity, unit_cost, currency,
                 or existing.unit_cost != clean_cost
                 or existing.rate != clean_rate
                 or existing.reference != clean_reference
+                or existing.description != line_description
             ):
                 raise InventoryValidationError(
                     "This idempotency key was already used for a "
@@ -619,7 +644,7 @@ def open_stock(*, product, warehouse, quantity, unit_cost, currency,
             currency=resolved_currency, unit_cost=clean_cost,
             rate_value=clean_rate,
             rate_day=_coerce_rate_date(resolved_currency, rate_date, day),
-            reference=clean_reference, actor=actor,
-            journal_entry=entry, is_temporary_cost=False,
+            reference=clean_reference, description=line_description,
+            actor=actor, journal_entry=entry, is_temporary_cost=False,
             idempotency_key=idempotency_key, audit_reason="",
         )
