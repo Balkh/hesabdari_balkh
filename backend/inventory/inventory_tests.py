@@ -1708,6 +1708,26 @@ class Stage6ConcurrencyTests(InventoryFixture, TransactionTestCase):
 
     reset_sequences = True
 
+    def setUp(self):
+        # TransactionTestCase does not invoke InventoryFixture.setUpTestData().
+        seed_chart_of_accounts()
+        self.afn = Currency.objects.create(
+            code="AFN",
+            name="Afghani",
+            is_base=True,
+        )
+        self.usd = Currency.objects.create(
+            code="USD",
+            name="US Dollar",
+        )
+        self.user = get_user_model().objects.create_user(
+            "inv6concurrencyuser",
+            password="x",
+        )
+        # InventoryFixture.setUp() creates category, UOM, product,
+        # warehouse, and test date using the initialized user.
+        super().setUp()
+
     def test_concurrent_issues_cannot_both_validate_against_same_stock(self):
         if connection.vendor != "postgresql":
             self.skipTest("Requires PostgreSQL row-level locking semantics")
