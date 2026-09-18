@@ -1,6 +1,6 @@
 """Inventory foundation services (Phase 6.1).
 
-Three posting primitives only (§1/§12/§15/§18):
+Posting primitives (6.1 §1/§12/§15/§18; transfer added Stage 6.3):
 
 - ``receive_stock``: movement-only receipt at an authoritative unit cost
   supplied by the caller (the future Purchase domain owns cost
@@ -13,6 +13,9 @@ Three posting primitives only (§1/§12/§15/§18):
 - ``open_stock``: opening movement + its Dr Inventory / Cr 3900 journal
   through the frozen pipeline, atomically (mirror of
   ``open_party_balance``).
+- ``transfer_stock`` (Stage 6.3): TRANSFER_OUT + TRANSFER_IN pair at the
+  preserved cost basis plus the neutral Dr-dest/Cr-source reclass
+  journal, atomically and idempotently as one operation.
 
 Plus the explicit Warehouse → Inventory GL mapping (§19):
 ``assign_warehouse_account`` / ``resolve_warehouse_account``.
@@ -44,9 +47,11 @@ from warehouses.services import resolve_warehouse as _resolve_warehouse_frozen
 
 from .models import (
     INVENTORY_MOVEMENT_OPERATION,
+    INVENTORY_TRANSFER_OPERATION,
     INVENTORY_ROOT_CODE,
     OPENING_EQUITY_ACCOUNT,
     OPENING_SOURCE_TYPE,
+    TRANSFER_SOURCE_TYPE,
     MovementType,
     StockMovement,
     WarehouseInventoryAccount,
@@ -648,3 +653,231 @@ def open_stock(*, product, warehouse, quantity, unit_cost, currency,
             actor=actor, journal_entry=entry, is_temporary_cost=False,
             idempotency_key=idempotency_key, audit_reason="",
         )
+
+
+# ---------------------------------------------------------------------------
+# Warehouse transfer (Stage 6.3)
+# ---------------------------------------------------------------------------
+
+def _transfer_fingerprint(*, product_id, source_id, dest_id, units,
+                          movement_day, currency_code, unit_cost, rate,
+                          rate_day, reference, description,
+                          is_temporary_cost, actor_id):
+    canonical = "|".join([
+        "transfer", str(product_id), str(source_id), str(dest_id),
+        str(units), movement_day.isoformat(), currency_code,
+        str(unit_cost), str(rate), rate_day.isoformat(), reference,
+        description, str(is_temporary_cost), str(actor_id),
+    ])
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _resolve_transfer_retry(idempotency_key, fingerprint):
+    stored = IdempotencyRecord.objects.get(key=idempotency_key)
+    body = stored.response_body or {}
+    if body.get("fingerprint") != fingerprint:
+        raise InventoryValidationError(
+            "This idempotency key was already used for a different operation."
+        )
+    out_id = body.get("out_movement_id")
+    in_id = body.get("in_movement_id")
+    if out_id is None or in_id is None:
+        raise DuplicateOperationError(
+            "Original submission is still in progress; retry."
+        )
+    try:
+        return (
+            StockMovement.objects.get(pk=out_id),
+            StockMovement.objects.get(pk=in_id),
+        )
+    except StockMovement.DoesNotExist:
+        raise DuplicateOperationError(
+            "Original submission is still in progress; retry."
+        ) from None
+
+
+def _execute_transfer(*, product, source, dest, units, day, currency,
+                      unit_cost, rate_value, rate_day, reference,
+                      description, actor, src_account, dst_account,
+                      is_temporary_cost, idempotency_key, audit_reason):
+    """Post the reclass journal + both legs inside the caller's atomic block."""
+    number = next_document_number("JE", _jalali_year(day))
+    amount = line_total(units, unit_cost)
+    journal_description = (
+        f"Transfer {reference}: {product.code} x {units} "
+        f"({source.name} -> {dest.name})"
+    )
+    dest_leg = {
+        "account": dst_account, "debit": amount,
+        "description": journal_description, "reference": reference,
+    }
+    source_leg = {
+        "account": src_account, "credit": amount,
+        "description": journal_description, "reference": reference,
+    }
+    entry = post_journal(
+        number=number, posting_date=day, description=journal_description,
+        lines=[dest_leg, source_leg],
+        source_type=TRANSFER_SOURCE_TYPE, source_id=reference,
+        currency=currency, rate=rate_value, rate_date=rate_day,
+        created_by=actor, idempotency_key=None,
+    )
+    out_movement = _create_movement(
+        movement_type=MovementType.TRANSFER_OUT,
+        product=product, warehouse=source, signed_quantity=-units,
+        movement_day=day, currency=currency, unit_cost=unit_cost,
+        rate_value=rate_value, rate_day=rate_day, reference=reference,
+        description=description, actor=actor, journal_entry=entry,
+        is_temporary_cost=is_temporary_cost,
+        idempotency_key=idempotency_key, audit_reason=audit_reason,
+    )
+    in_movement = _create_movement(
+        movement_type=MovementType.TRANSFER_IN,
+        product=product, warehouse=dest, signed_quantity=units,
+        movement_day=day, currency=currency, unit_cost=unit_cost,
+        rate_value=rate_value, rate_day=rate_day, reference=reference,
+        description=description, actor=actor, journal_entry=entry,
+        is_temporary_cost=is_temporary_cost,
+        idempotency_key=idempotency_key, audit_reason="",
+    )
+    return out_movement, in_movement, entry
+
+
+def transfer_stock(*, product, source_warehouse, destination_warehouse,
+                   quantity, movement_date, reference, description,
+                   user=None, idempotency_key=None,
+                   acknowledge_negative=False, temporary_unit_cost=None,
+                   temporary_currency=None, temporary_rate=None,
+                   temporary_rate_date=None):
+    """Move stock between two warehouses, atomically (Stage 6.3).
+
+    Posts one TRANSFER_OUT leg (source, at the existing cost-basis rule
+    mirrored from ``issue_stock``) plus one TRANSFER_IN leg (destination,
+    same basis — no FX, no new cost) plus the P&L-neutral reclass journal
+    Dr destination-account / Cr source-account through ``post_journal``.
+    Both legs share reference, description, cost context, and journal, so
+    the pair is traceable as one business operation with no new entity or
+    numbering. The transfer idempotency key lives on the operation record
+    (one key per operation); legs keep idempotency_key NULL because that
+    column is unique per movement row. The journal number is always
+    system-assigned; callers identify the transfer by idempotency key /
+    reference. Same-account mappings post a balanced wash journal (uniform
+    rule, complete trail). Returns (out_movement, in_movement).
+    """
+    actor = _require_actor(user, "transfer stock")
+    if idempotency_key is not None and (
+        not isinstance(idempotency_key, str)
+        or not idempotency_key
+        or len(idempotency_key) > 128
+    ):
+        raise InventoryValidationError("A valid idempotency key is required.")
+    resolved_product = resolve_product(product)
+    resolved_source = resolve_warehouse(source_warehouse)
+    resolved_dest = resolve_warehouse(destination_warehouse)
+    if resolved_source.pk == resolved_dest.pk:
+        raise InventoryValidationError(
+            "Source and destination warehouses must differ."
+        )
+    units = _coerce_units(quantity, what="Transfer quantity")
+    day = _coerce_day(movement_date)
+    clean_reference = _clean_reference(reference)
+    clean_description = _clean_description(description)
+    if not clean_description:
+        raise InventoryValidationError(
+            "A transfer description/reason is required."
+        )
+    src_account = resolve_warehouse_account(resolved_source)
+    dst_account = resolve_warehouse_account(resolved_dest)
+    # Cost basis mirrors the issue_stock rule exactly (positive stock ->
+    # running AVCO; otherwise manual temp + ack). issue_stock itself is
+    # not called: it posts SALES_ISSUE rows, which is the wrong type.
+    current = stock_for(resolved_product, resolved_source)
+    resulting = current - units
+    if resulting < 0:
+        if not acknowledge_negative:
+            raise InventoryValidationError(
+                "WARNING: this transfer drives source stock negative "
+                f"({current} -> {resulting}); explicit acknowledgement "
+                "is required."
+            )
+        if temporary_unit_cost is None:
+            raise InventoryValidationError(
+                "A manually entered temporary unit cost is required when "
+                "source stock is negative or insufficient."
+            )
+        if temporary_currency is None:
+            basis_currency = _base_currency()
+        else:
+            basis_currency = resolve_currency(temporary_currency)
+        _require_active_masters(
+            resolved_product, resolved_source, basis_currency)
+        _require_active_masters(
+            resolved_product, resolved_dest, basis_currency)
+        clean_cost = _coerce_unit_cost(temporary_unit_cost)
+        clean_rate = _coerce_rate(basis_currency, temporary_rate)
+        clean_rate_day = _coerce_rate_date(
+            basis_currency, temporary_rate_date, day)
+        temporary = True
+        reason = (
+            f"Negative stock acknowledged: {current} -> {resulting}; "
+            "temporary cost entered manually."
+        )
+    else:
+        basis_currency = _base_currency()
+        _require_active_masters(
+            resolved_product, resolved_source, basis_currency)
+        _require_active_masters(
+            resolved_product, resolved_dest, basis_currency)
+        average = avco_for(resolved_product, resolved_source)
+        if average is None:  # pragma: no cover - defensive; qty > 0 here
+            raise InventoryValidationError(
+                "No cost basis is available for this transfer."
+            )
+        clean_cost = average
+        clean_rate = Decimal("1.0000")
+        clean_rate_day = day
+        temporary = False
+        reason = ""
+    execute_kwargs = dict(
+        product=resolved_product, source=resolved_source,
+        dest=resolved_dest, units=units, day=day, currency=basis_currency,
+        unit_cost=clean_cost, rate_value=clean_rate, rate_day=clean_rate_day,
+        reference=clean_reference, description=clean_description,
+        actor=actor, src_account=src_account, dst_account=dst_account,
+        is_temporary_cost=temporary, idempotency_key=None,
+        audit_reason=reason,
+    )
+    if idempotency_key is None:
+        with transaction.atomic():
+            out_movement, in_movement, _entry = _execute_transfer(
+                **execute_kwargs)
+            return out_movement, in_movement
+    fingerprint = _transfer_fingerprint(
+        product_id=resolved_product.pk, source_id=resolved_source.pk,
+        dest_id=resolved_dest.pk, units=units, movement_day=day,
+        currency_code=basis_currency.code, unit_cost=clean_cost,
+        rate=clean_rate, rate_day=clean_rate_day,
+        reference=clean_reference, description=clean_description,
+        is_temporary_cost=temporary, actor_id=actor.pk if actor else None,
+    )
+    try:
+        with idempotent_operation(
+            key=idempotency_key, operation=INVENTORY_TRANSFER_OPERATION
+        ) as record:
+            with transaction.atomic():
+                out_movement, in_movement, entry = _execute_transfer(
+                    **execute_kwargs)
+                record.response_body = {
+                    "out_movement_id": out_movement.id,
+                    "in_movement_id": in_movement.id,
+                    "journal_entry_id": entry.id,
+                    "fingerprint": fingerprint,
+                }
+                record.save(update_fields=["response_body"])
+            return out_movement, in_movement
+    except DuplicateOperationError as dup:
+        # Same post_journal pattern: only a genuinely reserved key means
+        # "retry"; otherwise re-raise the real cause.
+        if IdempotencyRecord.objects.filter(key=idempotency_key).exists():
+            return _resolve_transfer_retry(idempotency_key, fingerprint)
+        raise dup.__cause__ if dup.__cause__ is not None else dup

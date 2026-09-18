@@ -49,6 +49,7 @@ from .services import (
     open_stock,
     receive_stock,
     resolve_warehouse_account,
+    transfer_stock,
 )
 from .stock import avco_for, movements_for, stock_for
 
@@ -782,3 +783,445 @@ class AtomicityChronologyTests(InventoryFixture, TestCase):
             avco_for(self.product, self.warehouse), Decimal("13.7500"))
         issued = StockMovement.objects.get(reference="ISS-C1")
         self.assertEqual(issued.unit_cost, Decimal("10.0000"))
+
+
+class TransferFixture(InventoryFixture):
+    def setUp(self):
+        super().setUp()
+        self.source = create_warehouse(name="Mohib", user=self.user)
+        self.dest = create_warehouse(name="Omar Rahimi", user=self.user)
+
+    def _map_pair(self, source_code="1410", dest_code="1420",
+                  source=None, dest=None):
+        self._map(warehouse=source or self.source, code=source_code)
+        self._map(warehouse=dest or self.dest, code=dest_code)
+
+    def _transfer(self, quantity=100, reference="TRF-1",
+                  description="Restock Omar Rahimi", source=None,
+                  dest=None, **kwargs):
+        return transfer_stock(
+            product=self.product, source_warehouse=source or self.source,
+            destination_warehouse=dest or self.dest, quantity=quantity,
+            movement_date=self.day, reference=reference,
+            description=description, user=self.user, **kwargs)
+
+    def _stock_source(self, quantity=500, unit_cost="10", reference="RCV-S"):
+        return self._receive(
+            quantity=quantity, unit_cost=unit_cost, reference=reference,
+            warehouse=self.source)
+
+
+class TransferBasicTests(TransferFixture, TestCase):
+    def test_transfer_moves_stock(self):
+        self._map_pair()
+        self._stock_source()
+        out, inn = self._transfer()
+        self.assertEqual(out.movement_type, MovementType.TRANSFER_OUT)
+        self.assertEqual(inn.movement_type, MovementType.TRANSFER_IN)
+        self.assertEqual(out.quantity, -100)
+        self.assertEqual(inn.quantity, 100)
+        self.assertEqual(stock_for(self.product, self.source), 400)
+        self.assertEqual(stock_for(self.product, self.dest), 100)
+        self.assertEqual(
+            stock_for(self.product, self.source)
+            + stock_for(self.product, self.dest), 500)
+
+    def test_same_warehouse_rejected(self):
+        self._map_pair()
+        self._stock_source()
+        with self.assertRaises(InventoryValidationError):
+            self._transfer(source=self.source, dest=self.source)
+        self.assertEqual(StockMovement.objects.count(), 1)
+
+    def test_zero_quantity_rejected(self):
+        self._map_pair()
+        with self.assertRaises(InventoryValidationError):
+            self._transfer(quantity=0)
+
+    def test_negative_quantity_rejected(self):
+        self._map_pair()
+        with self.assertRaises(InventoryValidationError):
+            self._transfer(quantity=-5)
+
+    def test_non_integer_quantity_rejected(self):
+        self._map_pair()
+        for bad in (1.5, True, "100", None):
+            with self.assertRaises(InventoryValidationError, msg=repr(bad)):
+                self._transfer(quantity=bad)
+
+    def test_blank_description_rejected(self):
+        self._map_pair()
+        self._stock_source()
+        with self.assertRaises(InventoryValidationError):
+            self._transfer(description="   ")
+        self.assertEqual(
+            StockMovement.objects.filter(
+                movement_type__in=(MovementType.TRANSFER_OUT,
+                                   MovementType.TRANSFER_IN)).count(), 0)
+
+    def test_description_stored_and_trimmed_on_both_legs(self):
+        self._map_pair()
+        self._stock_source()
+        out, inn = self._transfer(description="  Monthly rebalance  ")
+        self.assertEqual(out.description, "Monthly rebalance")
+        self.assertEqual(inn.description, "Monthly rebalance")
+
+    def test_legs_linked_as_one_operation(self):
+        self._map_pair()
+        self._stock_source()
+        key = self._key()
+        out, inn = self._transfer(reference="TRF-LINK", idempotency_key=key)
+        self.assertEqual(out.journal_entry_id, inn.journal_entry_id)
+        self.assertIsNotNone(out.journal_entry_id)
+        self.assertEqual(out.reference, "TRF-LINK")
+        self.assertEqual(inn.reference, "TRF-LINK")
+        self.assertIsNone(out.idempotency_key)
+        self.assertIsNone(inn.idempotency_key)
+        record = IdempotencyRecord.objects.get(key=key)
+        self.assertEqual(record.operation, "inventory.transfer")
+        self.assertEqual(record.response_body["out_movement_id"], out.pk)
+        self.assertEqual(record.response_body["in_movement_id"], inn.pk)
+        legs = set(out.journal_entry.stock_movements.values_list(
+            "movement_type", flat=True))
+        self.assertEqual(
+            legs, {MovementType.TRANSFER_OUT, MovementType.TRANSFER_IN})
+
+    def test_warehouses_stay_independent(self):
+        self._map_pair()
+        self._stock_source()
+        third = create_warehouse(name="Mal Hassan", user=self.user)
+        self._receive(quantity=7, reference="RCV-THIRD", warehouse=third)
+        self._transfer(quantity=100)
+        self.assertEqual(stock_for(self.product, self.source), 400)
+        self.assertEqual(stock_for(self.product, self.dest), 100)
+        self.assertEqual(stock_for(self.product, third), 7)
+
+
+class TransferCostTests(TransferFixture, TestCase):
+    def test_cost_basis_preserved(self):
+        self._map_pair()
+        self._receive(
+            quantity=100, unit_cost="10", reference="RCV-C1",
+            warehouse=self.source)
+        self._receive(
+            quantity=50, unit_cost="20", reference="RCV-C2",
+            warehouse=self.source)
+        out, inn = self._transfer(quantity=50, reference="TRF-COST")
+        self.assertEqual(out.unit_cost, Decimal("13.3333"))
+        self.assertEqual(inn.unit_cost, Decimal("13.3333"))
+        self.assertEqual(out.unit_cost_afn, Decimal("13.3333"))
+        self.assertEqual(inn.unit_cost_afn, Decimal("13.3333"))
+        self.assertEqual(inn.currency.code, "AFN")
+        self.assertFalse(out.is_temporary_cost)
+        self.assertFalse(inn.is_temporary_cost)
+        self.assertEqual(
+            avco_for(self.product, self.dest), Decimal("13.3333"))
+        # Source relief at rounded AVCO leaves honest dust, documented.
+        self.assertEqual(
+            avco_for(self.product, self.source), Decimal("13.3334"))
+
+    def test_no_reference_price_used(self):
+        self.product.ref_purchase_price = Decimal("999")
+        self.product.ref_sales_price = Decimal("888")
+        self.product.save(
+            update_fields=["ref_purchase_price", "ref_sales_price"])
+        self._map_pair()
+        self._stock_source(quantity=100, unit_cost="10")
+        out, inn = self._transfer(quantity=40, reference="TRF-NOREF")
+        self.assertEqual(out.unit_cost, Decimal("10.0000"))
+        self.assertEqual(inn.unit_cost, Decimal("10.0000"))
+
+    def test_later_receipt_preserves_transfer_cost(self):
+        self._map_pair()
+        self._receive(
+            quantity=100, unit_cost="10", reference="RCV-H1",
+            warehouse=self.source)
+        out, inn = self._transfer(quantity=60, reference="TRF-HIST")
+        self._receive(
+            quantity=100, unit_cost="999", reference="RCV-H2",
+            warehouse=self.source)
+        self._receive(
+            quantity=100, unit_cost="888", reference="RCV-H3",
+            warehouse=self.dest)
+        out.refresh_from_db()
+        inn.refresh_from_db()
+        self.assertEqual(out.unit_cost, Decimal("10.0000"))
+        self.assertEqual(inn.unit_cost, Decimal("10.0000"))
+        first = avco_for(self.product, self.source)
+        self.assertEqual(first, avco_for(self.product, self.source))
+        self.assertEqual(
+            stock_for(self.product, self.source)
+            + stock_for(self.product, self.dest), 300)
+
+    def test_backdated_transfer_deterministic(self):
+        self._map_pair()
+        receive_stock(
+            product=self.product, warehouse=self.source, quantity=100,
+            unit_cost="10", currency=self.afn,
+            movement_date=date(2026, 1, 10), reference="RCV-B1",
+            user=self.user)
+        transfer_stock(
+            product=self.product, source_warehouse=self.source,
+            destination_warehouse=self.dest, quantity=40,
+            movement_date=date(2026, 1, 5), reference="TRF-BACK",
+            description="Backdated correction", user=self.user)
+        rows = list(movements_for(self.product, self.source))
+        self.assertEqual(
+            [m.reference for m in rows], ["TRF-BACK", "RCV-B1"])
+        out = StockMovement.objects.get(
+            reference="TRF-BACK",
+            movement_type=MovementType.TRANSFER_OUT)
+        # Basis is post-time AVCO (100@10 existed at posting); replay is by
+        # date. Semantics match issue_stock; documented, deterministic.
+        self.assertEqual(out.unit_cost, Decimal("10.0000"))
+        self.assertEqual(stock_for(self.product, self.source), 60)
+        self.assertEqual(stock_for(self.product, self.dest), 40)
+
+    def test_transfer_after_zero_reset(self):
+        self._map_pair()
+        self._receive(
+            quantity=100, unit_cost="10", reference="RCV-Z1",
+            warehouse=self.source)
+        issue_stock(
+            product=self.product, warehouse=self.source, quantity=100,
+            movement_date=self.day, reference="ISS-Z1", user=self.user)
+        self.assertIsNone(avco_for(self.product, self.source))
+        self._receive(
+            quantity=50, unit_cost="20", reference="RCV-Z2",
+            warehouse=self.source)
+        out, inn = self._transfer(quantity=30, reference="TRF-ZR")
+        self.assertEqual(out.unit_cost, Decimal("20.0000"))
+        self.assertEqual(inn.unit_cost, Decimal("20.0000"))
+
+
+class TransferNegativeTests(TransferFixture, TestCase):
+    def test_negative_source_requires_ack_and_temp(self):
+        self._map_pair()
+        with self.assertRaisesRegex(InventoryValidationError, "WARNING"):
+            self._transfer(quantity=10, reference="TRF-N1")
+        with self.assertRaises(InventoryValidationError):
+            self._transfer(
+                quantity=10, reference="TRF-N1",
+                acknowledge_negative=True)
+        out, inn = self._transfer(
+            quantity=10, reference="TRF-N1", acknowledge_negative=True,
+            temporary_unit_cost="5")
+        self.assertEqual(stock_for(self.product, self.source), -10)
+        self.assertEqual(stock_for(self.product, self.dest), 10)
+        self.assertTrue(out.is_temporary_cost)
+        self.assertTrue(inn.is_temporary_cost)
+        self.assertEqual(out.unit_cost, Decimal("5.0000"))
+        self.assertEqual(inn.unit_cost, Decimal("5.0000"))
+
+    def test_no_ref_price_as_temp(self):
+        self.product.ref_purchase_price = Decimal("999")
+        self.product.save(update_fields=["ref_purchase_price"])
+        self._map_pair()
+        out, _inn = self._transfer(
+            quantity=10, reference="TRF-NT", acknowledge_negative=True,
+            temporary_unit_cost="7")
+        self.assertEqual(out.unit_cost, Decimal("7.0000"))
+
+    def test_insufficient_source_uses_temp_for_whole_leg(self):
+        self._map_pair()
+        self._stock_source(quantity=50, unit_cost="10")
+        out, inn = self._transfer(
+            quantity=80, reference="TRF-PART", acknowledge_negative=True,
+            temporary_unit_cost="12")
+        self.assertEqual(stock_for(self.product, self.source), -30)
+        self.assertEqual(out.unit_cost, Decimal("12.0000"))
+        self.assertEqual(inn.unit_cost, Decimal("12.0000"))
+
+
+class TransferAccountingTests(TransferFixture, TestCase):
+    def test_reclass_journal_balanced_and_mapped(self):
+        self._map_pair()
+        self._stock_source(quantity=100, unit_cost="110")
+        _out, inn = self._transfer(quantity=100, reference="TRF-JE")
+        entry = inn.journal_entry
+        self.assertIsNotNone(entry)
+        self.assertEqual(entry.status, "POSTED")
+        self.assertEqual(entry.source_type, "TRANSFER")
+        self.assertEqual(entry.source_id, "TRF-JE")
+        legs = {line.account.code: line for line in entry.lines.all()}
+        self.assertEqual(set(legs), {"1420", "1410"})
+        self.assertEqual(legs["1420"].debit, Decimal("11000.00"))
+        self.assertEqual(legs["1420"].credit, Decimal("0.00"))
+        self.assertEqual(legs["1410"].credit, Decimal("11000.00"))
+        self.assertTrue(entry.number.startswith("JE-"))
+
+    def test_no_pnl_cogs_or_fx(self):
+        self._map_pair()
+        self._stock_source(quantity=100, unit_cost="110")
+        _out, inn = self._transfer(quantity=100, reference="TRF-PNL")
+        for line in inn.journal_entry.lines.all():
+            self.assertEqual(line.account.account_type, "ASSET")
+            self.assertNotEqual(line.account.code, "5100")
+
+    def test_unmapped_warehouses_rejected(self):
+        self._stock_source()
+        with self.assertRaisesRegex(
+                InventoryValidationError, "No inventory GL account"):
+            self._transfer(reference="TRF-NOMAP")
+        self._map(warehouse=self.source, code="1410")
+        with self.assertRaisesRegex(
+                InventoryValidationError, "No inventory GL account"):
+            self._transfer(reference="TRF-NOMAP2")
+        self.assertEqual(
+            StockMovement.objects.filter(
+                movement_type__in=(MovementType.TRANSFER_OUT,
+                                   MovementType.TRANSFER_IN)).count(), 0)
+        self.assertEqual(JournalEntry.objects.count(), 0)
+
+    def test_same_account_wash_journal(self):
+        self._map_pair(source_code="1410", dest_code="1410")
+        self._stock_source(quantity=100, unit_cost="10")
+        _out, inn = self._transfer(quantity=100, reference="TRF-WASH")
+        legs = list(inn.journal_entry.lines.all())
+        self.assertEqual(
+            [line.account.code for line in legs], ["1410", "1410"])
+        self.assertEqual(legs[0].debit, Decimal("1000.00"))
+        self.assertEqual(legs[1].credit, Decimal("1000.00"))
+        self.assertEqual(stock_for(self.product, self.dest), 100)
+
+    def test_closed_period_rejected(self):
+        period = create_period(
+            name="FY26", start_date=date(2026, 1, 1),
+            end_date=date(2026, 12, 31), user=self.user)
+        close_period(period, user=self.user, reason="year-end")
+        self._map_pair()
+        self._stock_source()
+        with self.assertRaises(PeriodValidationError):
+            self._transfer(reference="TRF-CLOSED")
+        self.assertEqual(
+            StockMovement.objects.filter(
+                movement_type__in=(MovementType.TRANSFER_OUT,
+                                   MovementType.TRANSFER_IN)).count(), 0)
+        self.assertEqual(JournalEntry.objects.count(), 0)
+
+
+class TransferAtomicityIdempotencyTests(TransferFixture, TestCase):
+    def test_journal_failure_rolls_back_everything(self):
+        self._map_pair()
+        self._stock_source()
+        movements_before = StockMovement.objects.count()
+        journals_before = JournalEntry.objects.count()
+        audits_before = AuditEvent.objects.count()
+        keys_before = IdempotencyRecord.objects.count()
+        with mock.patch(
+            "inventory.services.post_journal",
+            side_effect=JournalValidationError("boom")
+        ):
+            with self.assertRaises(JournalValidationError):
+                self._transfer(
+                    reference="TRF-FAIL", idempotency_key=self._key())
+        self.assertEqual(StockMovement.objects.count(), movements_before)
+        self.assertEqual(JournalEntry.objects.count(), journals_before)
+        self.assertEqual(AuditEvent.objects.count(), audits_before)
+        self.assertEqual(IdempotencyRecord.objects.count(), keys_before)
+
+    def test_leg_failure_rolls_back_journal(self):
+        self._map_pair()
+        self._stock_source()
+        real_create = StockMovement.objects.create
+        calls = []
+        def flaky_create(*args, **kwargs):
+            calls.append(1)
+            if len(calls) == 2:
+                raise RuntimeError("second leg down")
+            return real_create(*args, **kwargs)
+        with mock.patch.object(
+            StockMovement.objects, "create", side_effect=flaky_create
+        ):
+            with self.assertRaises(RuntimeError):
+                self._transfer(reference="TRF-LEGFAIL")
+        self.assertEqual(
+            StockMovement.objects.filter(reference="TRF-LEGFAIL").count(),
+            0)
+        self.assertEqual(JournalEntry.objects.count(), 0)
+        self.assertEqual(
+            AuditEvent.objects.filter(reference="TRF-LEGFAIL").count(), 0)
+
+    def test_retry_returns_original_pair(self):
+        self._map_pair()
+        self._stock_source()
+        key = self._key()
+        first_out, first_in = self._transfer(
+            reference="TRF-IDEM", idempotency_key=key)
+        audits_before = AuditEvent.objects.count()
+        second_out, second_in = self._transfer(
+            reference="TRF-IDEM", idempotency_key=key)
+        self.assertEqual(first_out.pk, second_out.pk)
+        self.assertEqual(first_in.pk, second_in.pk)
+        self.assertEqual(
+            StockMovement.objects.filter(reference="TRF-IDEM").count(), 2)
+        self.assertEqual(JournalEntry.objects.count(), 1)
+        self.assertEqual(AuditEvent.objects.count(), audits_before)
+
+    def test_retry_mismatch_rejected(self):
+        self._map_pair()
+        self._stock_source()
+        key = self._key()
+        self._transfer(
+            quantity=100, reference="TRF-MM", idempotency_key=key)
+        with self.assertRaises(InventoryValidationError):
+            self._transfer(
+                quantity=150, reference="TRF-MM", idempotency_key=key)
+        other = create_warehouse(name="Mal Hassan", user=self.user)
+        self._map(warehouse=other, code="1420")
+        with self.assertRaises(InventoryValidationError):
+            transfer_stock(
+                product=self.product, source_warehouse=self.source,
+                destination_warehouse=other, quantity=100,
+                movement_date=self.day, reference="TRF-MM",
+                description="Restock Omar Rahimi", user=self.user,
+                idempotency_key=key)
+        self.assertEqual(JournalEntry.objects.count(), 1)
+
+
+class TransferImmutabilityAuditTests(TransferFixture, TestCase):
+    def test_legs_immutable(self):
+        self._map_pair()
+        self._stock_source()
+        out, inn = self._transfer()
+        out.quantity = 1
+        with self.assertRaises(PostedImmutabilityError):
+            out.save()
+        with self.assertRaises(PostedImmutabilityError):
+            inn.delete()
+
+    def test_audit_evidence(self):
+        self._map_pair()
+        self._stock_source()
+        out, inn = self._transfer(
+            quantity=100, reference="TRF-AU",
+            description="Monthly rebalance")
+        out_event = AuditEvent.objects.get(
+            entity="StockMovement", entity_id=str(out.id))
+        in_event = AuditEvent.objects.get(
+            entity="StockMovement", entity_id=str(inn.id))
+        self.assertEqual(out_event.action, AuditAction.CREATE)
+        state = out_event.new_state
+        self.assertEqual(state["movement_type"], "TRANSFER_OUT")
+        self.assertEqual(state["warehouse_id"], self.source.pk)
+        self.assertEqual(state["quantity"], -100)
+        self.assertEqual(state["qty_before"], 500)
+        self.assertEqual(state["qty_after"], 400)
+        self.assertEqual(state["description"], "Monthly rebalance")
+        self.assertEqual(
+            state["journal_entry_id"], out.journal_entry_id)
+        self.assertEqual(
+            in_event.new_state["warehouse_id"], self.dest.pk)
+        post_event = AuditEvent.objects.get(
+            entity="JournalEntry",
+            entity_id=str(out.journal_entry_id))
+        self.assertEqual(post_event.action, AuditAction.POST)
+
+    def test_negative_acknowledgement_audited(self):
+        self._map_pair()
+        out, _inn = self._transfer(
+            quantity=10, reference="TRF-AN", acknowledge_negative=True,
+            temporary_unit_cost="5")
+        event = AuditEvent.objects.get(
+            entity="StockMovement", entity_id=str(out.id))
+        self.assertIn("Negative stock acknowledged", event.reason)
