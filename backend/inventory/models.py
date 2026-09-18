@@ -66,6 +66,8 @@ INVENTORY_MOVEMENT_OPERATION = "inventory.movement"
 TRANSFER_SOURCE_TYPE = "TRANSFER"
 INVENTORY_TRANSFER_OPERATION = "inventory.transfer"
 SHORTAGE_SETTLEMENT_OPERATION = "inventory.shortage_settlement"
+PURCHASE_RETURN_OPERATION = "inventory.purchase_return"
+SALES_RETURN_OPERATION = "inventory.sales_return"
 
 
 class StockMovement(models.Model):
@@ -106,6 +108,10 @@ class StockMovement(models.Model):
     qty_after = models.IntegerField()
     reference = models.CharField(max_length=200)
     description = models.CharField(max_length=500, blank=True, default="")
+    source_party = models.ForeignKey(
+        "parties.Party", null=True, blank=True, on_delete=models.PROTECT,
+        related_name="source_stock_movements",
+    )
     gross_quantity = models.IntegerField(null=True, blank=True)
     waste_quantity = models.IntegerField(null=True, blank=True)
     journal_entry = models.ForeignKey(
@@ -262,3 +268,55 @@ class ShortageSettlement(models.Model):
 
     def __str__(self):
         return f"settlement for shortage={self.shortage_id}"
+
+
+class InventoryReturnType(models.TextChoices):
+    PURCHASE = "PURCHASE_RETURN", "Purchase Return"
+    SALES = "SALES_RETURN", "Sales Return"
+
+
+class InventoryReturn(models.Model):
+    """Immutable return business record linked to one source movement.
+
+    This is traceability/business identity only; StockMovement remains the
+    canonical stock truth. Purchase/Sales invoice models are not present in
+    this repository, so the source invoice/receipt identity is the immutable
+    source movement reference supplied by the future document domain.
+    """
+
+    return_type = models.CharField(max_length=20, choices=InventoryReturnType.choices)
+    source_movement = models.ForeignKey(
+        StockMovement, on_delete=models.PROTECT, related_name="returns"
+    )
+    return_movement = models.OneToOneField(
+        StockMovement, on_delete=models.PROTECT, related_name="return_record"
+    )
+    party = models.ForeignKey(
+        "parties.Party", on_delete=models.PROTECT, related_name="inventory_returns"
+    )
+    product = models.ForeignKey(
+        "products.Product", on_delete=models.PROTECT, related_name="inventory_returns"
+    )
+    warehouse = models.ForeignKey(
+        "warehouses.Warehouse", on_delete=models.PROTECT, related_name="inventory_returns"
+    )
+    source_document = models.CharField(max_length=200)
+    quantity = models.IntegerField()
+    description = models.CharField(max_length=500)
+    idempotency_key = models.CharField(max_length=128, unique=True, null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["created_at", "id"]
+        constraints = [
+            models.CheckConstraint(condition=models.Q(quantity__gt=0), name="inv_return_qty_gt0"),
+            models.CheckConstraint(condition=~models.Q(source_document=""), name="inv_return_source_nonblank"),
+        ]
+
+    def save(self, *args, **kwargs):
+        if self.pk is not None:
+            raise PostedImmutabilityError("Posted inventory returns are immutable")
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise PostedImmutabilityError("Posted inventory returns cannot be deleted")

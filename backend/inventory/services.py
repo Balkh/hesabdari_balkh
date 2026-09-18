@@ -34,6 +34,7 @@ from datetime import date as date_class
 from decimal import Decimal, InvalidOperation
 
 from django.db import transaction
+from django.db.models import Sum
 
 from accounting.models import Account
 from accounting.services import _as_date, post_journal
@@ -55,12 +56,15 @@ from .models import (
     INVENTORY_MOVEMENT_OPERATION,
     INVENTORY_TRANSFER_OPERATION,
     SHORTAGE_SETTLEMENT_OPERATION,
+    PURCHASE_RETURN_OPERATION,
+    SALES_RETURN_OPERATION,
     INVENTORY_ROOT_CODE,
     OPENING_EQUITY_ACCOUNT,
     OPENING_SOURCE_TYPE,
     TRANSFER_SOURCE_TYPE,
     MovementType,
     ShortageSettlement,
+    InventoryReturn,
     StockMovement,
     WarehouseInventoryAccount,
 )
@@ -312,13 +316,14 @@ def _movement_fingerprint(*, movement_type, product_id, warehouse_id,
                           signed_quantity, movement_day, currency_code,
                           unit_cost, rate, rate_day, reference, description,
                           is_temporary_cost, journal_entry_id, actor_id,
-                          gross_quantity=None, waste_quantity=None):
+                          gross_quantity=None, waste_quantity=None,
+                          source_party_id=None):
     canonical = "|".join([
         str(movement_type), str(product_id), str(warehouse_id),
         str(signed_quantity), movement_day.isoformat(), currency_code,
         str(unit_cost), str(rate), rate_day.isoformat(), reference,
         description,
-        str(gross_quantity), str(waste_quantity),
+        str(gross_quantity), str(waste_quantity), str(source_party_id),
         str(is_temporary_cost), str(journal_entry_id), str(actor_id),
     ])
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
@@ -343,6 +348,7 @@ def _snapshot(movement):
         "journal_entry_id": movement.journal_entry_id,
         "reference": movement.reference,
         "description": movement.description,
+        "source_party_id": movement.source_party_id,
         "gross_quantity": movement.gross_quantity,
         "waste_quantity": movement.waste_quantity,
     }
@@ -352,7 +358,7 @@ def _create_movement(*, movement_type, product, warehouse, signed_quantity,
                      movement_day, currency, unit_cost, rate_value,
                      rate_day, reference, description, actor, journal_entry,
                      is_temporary_cost, idempotency_key, audit_reason,
-                     gross_quantity=None, waste_quantity=None):
+                     gross_quantity=None, waste_quantity=None, source_party=None):
     before = stock_for(product, warehouse)
     after = before + signed_quantity
     movement = StockMovement.objects.create(
@@ -371,6 +377,7 @@ def _create_movement(*, movement_type, product, warehouse, signed_quantity,
         qty_after=after,
         reference=reference,
         description=description,
+        source_party=source_party,
         gross_quantity=gross_quantity,
         waste_quantity=waste_quantity,
         journal_entry=journal_entry,
@@ -410,7 +417,7 @@ def _post_movement(*, movement_type, product, warehouse, signed_quantity,
                    reference, description, actor, journal_entry=None,
                    is_temporary_cost=False, idempotency_key=None,
                    audit_reason="", gross_quantity=None,
-                   waste_quantity=None):
+                   waste_quantity=None, source_party=None):
     """Create one movement + its audit atomically, idempotently on retry."""
     if idempotency_key is not None and (
         not isinstance(idempotency_key, str)
@@ -427,6 +434,7 @@ def _post_movement(*, movement_type, product, warehouse, signed_quantity,
         journal_entry=journal_entry, is_temporary_cost=is_temporary_cost,
         idempotency_key=idempotency_key, audit_reason=audit_reason,
         gross_quantity=gross_quantity, waste_quantity=waste_quantity,
+        source_party=source_party,
     )
     if idempotency_key is None:
         with transaction.atomic():
@@ -438,6 +446,7 @@ def _post_movement(*, movement_type, product, warehouse, signed_quantity,
         unit_cost=unit_cost, rate=rate_value, rate_day=rate_day,
         reference=reference, description=description,
         gross_quantity=gross_quantity, waste_quantity=waste_quantity,
+        source_party_id=source_party.pk if source_party else None,
         is_temporary_cost=is_temporary_cost,
         journal_entry_id=journal_entry.pk if journal_entry else None,
         actor_id=actor.pk if actor else None,
@@ -474,7 +483,7 @@ def _require_active_masters(product, warehouse, currency):
 def receive_stock(*, product, warehouse, quantity, unit_cost, currency,
                   rate=None, rate_date=None, movement_date, reference,
                   description="", user=None, idempotency_key=None,
-                  gross_quantity=None, waste_quantity=None):
+                  gross_quantity=None, waste_quantity=None, party=None):
     """Post one movement-only receipt at a caller-supplied unit cost (§12).
 
     No journal is posted: the future Purchase domain owns cost aggregation
@@ -502,6 +511,7 @@ def receive_stock(*, product, warehouse, quantity, unit_cost, currency,
         reference=clean_reference, description=clean_description,
         actor=actor, idempotency_key=idempotency_key,
         gross_quantity=gross_quantity, waste_quantity=waste_quantity,
+        source_party=party,
     )
 
 
@@ -509,7 +519,7 @@ def issue_stock(*, product, warehouse, quantity, movement_date, reference,
                 description="", user=None, idempotency_key=None,
                 acknowledge_negative=False,
                 temporary_unit_cost=None, temporary_currency=None,
-                temporary_rate=None, temporary_rate_date=None):
+                temporary_rate=None, temporary_rate_date=None, party=None):
     """Post one movement-only issue at AVCO — or at manual temp cost (§18).
 
     When the issue keeps stock at/above zero, the running AVCO is the
@@ -578,6 +588,7 @@ def issue_stock(*, product, warehouse, quantity, movement_date, reference,
         reference=clean_reference, description=clean_description,
         actor=actor, is_temporary_cost=temporary,
         idempotency_key=idempotency_key, audit_reason=reason,
+        source_party=party,
     )
 
 
@@ -1095,3 +1106,224 @@ def settle_shortage(*, shortage, settlement_date, actual_sales_rate,
         if body.get("fingerprint") != fingerprint:
             raise InventoryValidationError("This idempotency key was already used for a different operation.")
         return ShortageSettlement.objects.get(pk=body["settlement_id"])
+
+# ---------------------------------------------------------------------------
+# Stage 6.5 — purchase and sales returns
+# ---------------------------------------------------------------------------
+
+def _resolve_party(ref, *, role):
+    from parties.models import Party
+    if isinstance(ref, Party):
+        party = ref
+    else:
+        try:
+            party = Party.objects.get(pk=ref)
+        except (Party.DoesNotExist, ValueError, TypeError):
+            raise InventoryValidationError("Party does not exist.") from None
+    if not party.is_active:
+        raise InventoryValidationError("Party is not active.")
+    if not getattr(party, role):
+        raise InventoryValidationError(f"Party is not a {role[3:]}.")
+    return party
+
+
+def _resolve_source_movement(ref):
+    if isinstance(ref, StockMovement):
+        if ref.pk is None:
+            raise InventoryValidationError("Source movement does not exist.")
+        return ref
+    try:
+        return StockMovement.objects.get(pk=ref)
+    except (StockMovement.DoesNotExist, ValueError, TypeError):
+        raise InventoryValidationError("Source movement does not exist.") from None
+
+
+def _return_fingerprint(*, return_type, source_id, party_id, product_id,
+                        warehouse_id, quantity, source_document, movement_day,
+                        description, actor_id):
+    canonical = "|".join([
+        return_type, str(source_id), str(party_id), str(product_id),
+        str(warehouse_id), str(quantity), source_document,
+        movement_day.isoformat(), description, str(actor_id),
+    ])
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _resolve_return_retry(idempotency_key, fingerprint):
+    stored = IdempotencyRecord.objects.get(key=idempotency_key)
+    body = stored.response_body or {}
+    if body.get("fingerprint") != fingerprint:
+        raise InventoryValidationError(
+            "This idempotency key was already used for a different operation."
+        )
+    return InventoryReturn.objects.get(pk=body["return_id"])
+
+
+def _post_return(*, return_type, source_type, movement_type, party_role,
+                 source_movement, party, product, warehouse, quantity,
+                 source_document, movement_date, description, actor,
+                 idempotency_key, acknowledge_negative):
+    day = _coerce_day(movement_date)
+    assert_posting_date_open(day)
+    units = _coerce_units(quantity, what="Return quantity")
+    clean_document = _clean_reference(source_document)
+    clean_description = _clean_description(description)
+    if not clean_description:
+        raise InventoryValidationError("A return reason/description is required.")
+    source = _resolve_source_movement(source_movement)
+    resolved_party = _resolve_party(party, role=party_role)
+    resolved_product = resolve_product(product)
+    resolved_warehouse = resolve_warehouse(warehouse)
+    if source.movement_type != source_type:
+        raise InventoryValidationError("Source movement type is invalid for this return.")
+    if source.reference != clean_document:
+        raise InventoryValidationError(
+            "Source document must match the original source movement reference."
+        )
+    if source.product_id != resolved_product.pk:
+        raise InventoryValidationError("Return product does not match the source movement.")
+    if source.warehouse_id != resolved_warehouse.pk:
+        raise InventoryValidationError("Return warehouse does not match the source movement.")
+    if source.source_party_id != resolved_party.pk:
+        raise InventoryValidationError("Return party does not match the source movement.")
+    if source.movement_type == MovementType.PURCHASE_RECEIPT and not resolved_party.is_supplier:
+        raise InventoryValidationError("Purchase return party must be a supplier.")
+    if source.movement_type == MovementType.SALES_ISSUE and not resolved_party.is_customer:
+        raise InventoryValidationError("Sales return party must be a customer.")
+    if units > source.quantity.__abs__():
+        raise InventoryValidationError("Return quantity exceeds the source quantity.")
+    already = InventoryReturn.objects.filter(source_movement=source).aggregate(
+        total=Sum("quantity")
+    )["total"] or 0
+    remaining = abs(source.quantity) - int(already)
+    if units > remaining:
+        raise InventoryValidationError(
+            f"Return quantity exceeds remaining returnable quantity ({remaining})."
+        )
+    _require_active_masters(resolved_product, resolved_warehouse, source.currency)
+    resulting = stock_for(resolved_product, resolved_warehouse) + (
+        units if movement_type == MovementType.SALES_RETURN else -units
+    )
+    if resulting < 0 and not acknowledge_negative:
+        raise InventoryValidationError(
+            f"WARNING: this return drives stock negative; explicit acknowledgement is required."
+        )
+    signed = units if movement_type == MovementType.SALES_RETURN else -units
+    movement = _create_movement(
+        movement_type=movement_type, product=resolved_product,
+        warehouse=resolved_warehouse, signed_quantity=signed, movement_day=day,
+        currency=source.currency, unit_cost=source.unit_cost,
+        rate_value=source.rate, rate_day=source.rate_date,
+        reference=clean_document, description=clean_description, actor=actor,
+        journal_entry=None, is_temporary_cost=source.is_temporary_cost,
+        idempotency_key=None,
+        audit_reason=("Purchase return" if return_type == "PURCHASE_RETURN"
+                      else "Sales return"),
+    )
+    record = InventoryReturn.objects.create(
+        return_type=return_type, source_movement=source,
+        return_movement=movement, party=resolved_party,
+        product=resolved_product, warehouse=resolved_warehouse,
+        source_document=clean_document, quantity=units,
+        description=clean_description, idempotency_key=None,
+    )
+    record_audit_event(
+        user=actor, action=AuditAction.CREATE, entity="InventoryReturn",
+        entity_id=record.id, reference=clean_document,
+        previous_state=None,
+        new_state={
+            "return_type": return_type, "source_movement_id": source.id,
+            "return_movement_id": movement.id, "party_id": resolved_party.id,
+            "product_id": resolved_product.id, "warehouse_id": resolved_warehouse.id,
+            "quantity": units, "original_unit_cost": str(source.unit_cost),
+            "currency": source.currency.code, "rate": str(source.rate),
+            "qty_before": movement.qty_before, "qty_after": movement.qty_after,
+            "description": clean_description,
+        },
+        reason="Immutable inventory return posted",
+    )
+    return record
+
+
+def _return_operation(*, return_type, source_type, movement_type, party_role,
+                      product, warehouse, party, source_movement, quantity,
+                      source_document, movement_date, description, user,
+                      idempotency_key, acknowledge_negative):
+    actor = _require_actor(user, "post inventory return")
+    if idempotency_key is not None and (
+        not isinstance(idempotency_key, str) or not idempotency_key
+        or len(idempotency_key) > 128
+    ):
+        raise InventoryValidationError("A valid idempotency key is required.")
+    day = _coerce_day(movement_date)
+    source = _resolve_source_movement(source_movement)
+    resolved_party = _resolve_party(party, role=party_role)
+    resolved_product = resolve_product(product)
+    resolved_warehouse = resolve_warehouse(warehouse)
+    clean_document = _clean_reference(source_document)
+    clean_description = _clean_description(description)
+    units = _coerce_units(quantity, what="Return quantity")
+    fingerprint = _return_fingerprint(
+        return_type=return_type, source_id=source.pk, party_id=resolved_party.pk,
+        product_id=resolved_product.pk, warehouse_id=resolved_warehouse.pk,
+        quantity=units, source_document=clean_document, movement_day=day,
+        description=clean_description, actor_id=actor.pk if actor else None,
+    )
+    kwargs = dict(
+        return_type=return_type, source_type=source_type,
+        movement_type=movement_type, party_role=party_role,
+        source_movement=source, party=resolved_party, product=resolved_product,
+        warehouse=resolved_warehouse, quantity=units,
+        source_document=clean_document, movement_date=day,
+        description=clean_description, actor=actor,
+        idempotency_key=None, acknowledge_negative=acknowledge_negative,
+    )
+    operation = (PURCHASE_RETURN_OPERATION if return_type == "PURCHASE_RETURN"
+                 else SALES_RETURN_OPERATION)
+    if idempotency_key is None:
+        with transaction.atomic():
+            return _post_return(**kwargs)
+    try:
+        with idempotent_operation(key=idempotency_key, operation=operation) as idem:
+            with transaction.atomic():
+                # Lock the source and derive returnable quantity from records
+                # inside the same transaction, preventing concurrent over-return.
+                kwargs["source_movement"] = StockMovement.objects.select_for_update().get(pk=source.pk)
+                kwargs["idempotency_key"] = idempotency_key
+                record = _post_return(**kwargs)
+                idem.response_body = {"return_id": record.id, "fingerprint": fingerprint}
+                idem.save(update_fields=["response_body"])
+            return record
+    except DuplicateOperationError as dup:
+        if IdempotencyRecord.objects.filter(key=idempotency_key).exists():
+            return _resolve_return_retry(idempotency_key, fingerprint)
+        raise dup.__cause__ if dup.__cause__ is not None else dup
+
+
+def purchase_return(*, product, warehouse, supplier, source_movement,
+                    quantity, source_document, movement_date, description,
+                    user=None, idempotency_key=None,
+                    acknowledge_negative=False):
+    return _return_operation(
+        return_type="PURCHASE_RETURN", source_type=MovementType.PURCHASE_RECEIPT,
+        movement_type=MovementType.PURCHASE_RETURN, party_role="is_supplier",
+        product=product, warehouse=warehouse, party=supplier,
+        source_movement=source_movement, quantity=quantity,
+        source_document=source_document, movement_date=movement_date,
+        description=description, user=user, idempotency_key=idempotency_key,
+        acknowledge_negative=acknowledge_negative,
+    )
+
+
+def sales_return(*, product, warehouse, customer, source_movement,
+                 quantity, source_document, movement_date, description,
+                 user=None, idempotency_key=None):
+    return _return_operation(
+        return_type="SALES_RETURN", source_type=MovementType.SALES_ISSUE,
+        movement_type=MovementType.SALES_RETURN, party_role="is_customer",
+        product=product, warehouse=warehouse, party=customer,
+        source_movement=source_movement, quantity=quantity,
+        source_document=source_document, movement_date=movement_date,
+        description=description, user=user, idempotency_key=idempotency_key,
+        acknowledge_negative=True,
+    )
