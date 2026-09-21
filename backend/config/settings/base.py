@@ -10,7 +10,7 @@ INSTALLED_APPS = [
     "django.contrib.admin", "django.contrib.auth", "django.contrib.contenttypes",
     "django.contrib.sessions", "django.contrib.messages", "django.contrib.staticfiles",
     "rest_framework", "core", "currencies", "documents", "accounting", "security",
-    "fiscal_periods", "categories", "uom", "products", "parties", "warehouses", "cash_accounts", "exchange_houses", "party_ledger", "inventory",
+    "fiscal_periods", "categories", "uom", "products", "parties", "warehouses", "cash_accounts", "exchange_houses", "party_ledger", "inventory", "purchases",
 ]
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware", "core.middleware.RequestTimingMiddleware",
