@@ -411,6 +411,10 @@ def _post_effects(purchase, actor, idempotency_key):
                                  idempotency_key=f"{purchase.document_number}:line:{line.pk}")
         movement_ids.append(movement.pk)
         movement_references.append(movement.reference)
+        # Sales owns negative-stock COGS correction; Purchase supplies the
+        # authoritative receipt cost without duplicating inventory valuation.
+        from sales.services import resolve_negative_obligations
+        resolve_negative_obligations(receipt_movement=movement)
     previous = _snapshot(purchase)
     purchase.status = PurchaseStatus.POSTED
     purchase.posted_at = timezone.now()
