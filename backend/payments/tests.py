@@ -4,12 +4,12 @@ from decimal import Decimal
 import pytest
 from django.contrib.auth import get_user_model
 
-from accounting.models import Account, JournalStatus
 from accounting.balances import account_balance
+from accounting.coa import seed_chart_of_accounts
+from accounting.models import Account, JournalStatus
 from core.idempotency import IdempotencyRecord
 from currencies.models import Currency
 from parties.models import Party
-from party_ledger.models import BalanceType
 
 from .models import Payment, PaymentPurpose
 from .services import PaymentValidationError, create_payment, reverse_payment
@@ -19,10 +19,8 @@ from .services import PaymentValidationError, create_payment, reverse_payment
 def setup_payment(db):
     user = get_user_model().objects.create_user(username="payment-user")
     afn = Currency.objects.create(code="AFN", name="Afghani", is_base=True)
+    seed_chart_of_accounts()
     customer = Party.objects.create(name="Ahmad", is_customer=True)
-    Account.objects.create(code="1110", name="Cash", account_type="ASSET")
-    Account.objects.create(code="1310", name="Trade Receivables", account_type="ASSET")
-    Account.objects.create(code="2200", name="Customer Credit", account_type="LIABILITY")
     return user, afn, customer
 
 
