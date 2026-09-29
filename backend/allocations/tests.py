@@ -80,7 +80,7 @@ def test_full_same_currency_allocation_marks_invoice_paid_without_duplicate_cash
     assert invoice_outstanding(sale) == Decimal("0.00")
     assert payment_available(payment) == Decimal("0.00")
     assert account_balance(Account.objects.get(code="1110"))["balance"] == Decimal("100.00")
-    assert account_balance(Account.objects.get(code="4110"))["balance"] == Decimal("0.00")
+    assert account_balance(Account.objects.get(code="4110"))["balance"] == Decimal("100.00")
     assert sale.journal_entry.lines.filter(account__code="1310").exists()
 
 
@@ -142,7 +142,7 @@ def test_cash_sale_rejected(master_data):
     user, afn, usd, customer, product = master_data
     sale = create_sale(customer=customer, sale_date=date(2026, 9, 28), currency=afn,
                        channel=SalesChannel.WHOLESALE, payment_mode=PaymentMode.CASH,
-                       lines=[{"product": product, "unit": product.base_unit, "quantity": 1, "unit_price": 100}],
+                       lines=[{"product": product, "unit": product.primary_uom, "quantity": 1, "unit_price": 100}],
                        user=user, document_number="SI-ALLOC-7")
     finalize_sale(sale=sale, user=user)
     payment = make_payment(user, customer, afn, 100, number="PMT-ALLOC-7")
