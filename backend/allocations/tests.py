@@ -49,7 +49,7 @@ def master_data(allocation_setup):
     from uom.models import UnitOfMeasure
     category = Category.objects.create(name="Oil")
     unit = UnitOfMeasure.objects.create(name="Piece")
-    product = Product.objects.create(name="Oil", category=category, base_unit=unit)
+    product = Product.objects.create(code="OIL-001", name="Oil", name_fa="روغن", category=category, primary_uom=unit)
     return user, afn, usd, customer, product
 
 
@@ -57,7 +57,7 @@ def make_sale(user, customer, currency, product, total=Decimal("100.00"), number
     sale = create_sale(
         customer=customer, sale_date=date(2026, 9, 28), currency=currency,
         channel=SalesChannel.WHOLESALE, payment_mode=PaymentMode.CREDIT,
-        lines=[{"product": product, "unit": product.base_unit, "quantity": 1, "unit_price": total}],
+        lines=[{"product": product, "unit": product.primary_uom, "quantity": 1, "unit_price": total}],
         rate=None if currency.is_base else "70.0000", rate_date=None if currency.is_base else date(2026, 9, 28),
         user=user, document_number=number,
     )
