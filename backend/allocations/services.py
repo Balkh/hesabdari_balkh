@@ -1,5 +1,6 @@
 from datetime import date as date_class
-from decimal import Decimal, InvalidOperation\nimport hashlib
+from decimal import Decimal, InvalidOperation
+import hashlib
 
 from django.db import models, transaction
 from django.utils import timezone
