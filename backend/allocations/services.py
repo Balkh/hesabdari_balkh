@@ -126,8 +126,9 @@ def _post_customer_reclass(*, payment, amount, posting_date, user, source_id, id
     credit = Account.objects.get(code=credit_code)
     if not debit.is_active or not debit.is_posting or not credit.is_active or not credit.is_posting:
         raise AllocationValidationError("Allocation accounts are not usable for posting")
+    journal_number = f"JE-AL-{hashlib.sha256(source_id.encode('utf-8')).hexdigest()[:20]}"
     entry = post_journal(
-        number=f"JE-ALLOC-{source_id}", posting_date=posting_date, description=description,
+        number=journal_number, posting_date=posting_date, description=description,
         lines=[
             {"account": debit, "debit": amount, "reference": source_id},
             {"account": credit, "credit": amount, "reference": source_id},
