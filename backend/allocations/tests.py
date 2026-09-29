@@ -81,7 +81,8 @@ def test_full_same_currency_allocation_marks_invoice_paid_without_duplicate_cash
     assert payment_available(payment) == Decimal("0.00")
     assert account_balance(Account.objects.get(code="1110"))["balance"] == Decimal("100.00")
     assert account_balance(Account.objects.get(code="4110"))["balance"] == Decimal("100.00")
-    sale.refresh_from_db()\n    assert sale.journal_entry.lines.filter(account__code="1310").exists()
+    sale.refresh_from_db()
+    assert sale.journal_entry.lines.filter(account__code="1310").exists()
 
 
 def test_partial_allocation_leaves_true_remainder(master_data):
