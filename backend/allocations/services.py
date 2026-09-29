@@ -232,7 +232,7 @@ def reverse_allocation(allocation, *, reason, user=None, idempotency_key=None):
     try:
         allocation_id = getattr(allocation, "pk", allocation)
         allocation = CustomerAllocation.objects.select_for_update().select_related(
-            "payment__journal_entry", "payment__party", "payment__currency", "sale", "currency", "journal_entry"
+            "payment__journal_entry", "payment__party", "payment__currency", "sale", "currency"
         ).get(pk=allocation_id)
     except CustomerAllocation.DoesNotExist as exc:
         raise AllocationValidationError("Allocation does not exist") from exc
