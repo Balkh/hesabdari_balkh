@@ -42,6 +42,9 @@ class SalesReturn(models.Model):
     entitlement_journal = models.ForeignKey(
         "accounting.JournalEntry", on_delete=models.PROTECT, related_name="sales_return_entitlements"
     )
+    cogs_journal = models.ForeignKey(
+        "accounting.JournalEntry", on_delete=models.PROTECT, related_name="sales_return_cogs"
+    )
     status = models.CharField(max_length=10, choices=SalesReturnStatus.choices, default=SalesReturnStatus.POSTED)
     reason = models.CharField(max_length=500)
     created_by = models.ForeignKey(
