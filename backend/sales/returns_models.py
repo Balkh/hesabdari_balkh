@@ -7,6 +7,7 @@ from decimal import Decimal, InvalidOperation
 
 from django.conf import settings
 from django.db import models
+from django.db.models import F
 
 from accounting.models import PostedImmutabilityError
 
