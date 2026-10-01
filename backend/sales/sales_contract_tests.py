@@ -283,7 +283,7 @@ def test_foreign_credit_sale_does_not_require_invoice_rate():
     customer = Party.objects.create(name="Ahmad", is_customer=True)
     category = Category.objects.create(name="Oil")
     unit = UnitOfMeasure.objects.create(name="Piece")
-    product = Product.objects.create(code="OIL-CCS", name="Oil", category=category, primary_uom=unit)
+    product = Product.objects.create(code="OIL-CCS", name="Oil", name_fa="روغن", category=category, primary_uom=unit)
     sale = create_sale(
         customer=customer, sale_date=date(2026, 9, 28), currency=usd,
         channel=SalesChannel.WHOLESALE, payment_mode=PaymentMode.CREDIT,
