@@ -380,6 +380,12 @@ def create_refund(*, sales_return, refund_date, refund_currency, entitlement_amo
         if ret.status != SalesReturnStatus.POSTED:
             raise ReturnValidationError("Only a posted Sales Return can be refunded")
         assert_posting_date_open(day)
+        if idempotency_key:
+            existing = Refund.objects.filter(idempotency_key=idempotency_key).first()
+            if existing:
+                if existing.sales_return_id != ret.pk:
+                    raise ReturnValidationError("This idempotency key was used for a different refund")
+                return existing
         entitlement_currency = ret.entitlement_currency
         refund_currency = _currency(refund_currency)
         amount = _positive_amount(entitlement_amount, "Refund entitlement amount")
@@ -406,8 +412,7 @@ def create_refund(*, sales_return, refund_date, refund_currency, entitlement_amo
 
         if entitlement_currency.pk == refund_currency.pk:
             entry = _same_currency_refund_journal(refund=refund, actor=actor)
-            refund.journal_entry = entry
-            refund.save(update_fields=["journal_entry"])
+            Refund.objects.filter(pk=refund.pk).update(journal_entry=entry)
         else:
             clearing = _usable(CLEARING_ACCOUNT)
             credit = _usable(CUSTOMER_CREDIT_ACCOUNT)
@@ -452,8 +457,7 @@ def create_refund(*, sales_return, refund_date, refund_currency, entitlement_amo
                 idempotency_key=f"refund:{document_number}:cash",
                 allow_unvalued_foreign=not refund_currency.is_base,
             )
-            refund.journal_entry = cash_entry
-            refund.save(update_fields=["journal_entry"])
+            Refund.objects.filter(pk=refund.pk).update(journal_entry=cash_entry)
             CrossCurrencyRefund.objects.create(
                 refund=refund, entitlement_currency=entitlement_currency,
                 entitlement_amount=amount, refund_currency=refund_currency,
