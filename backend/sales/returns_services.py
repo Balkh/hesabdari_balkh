@@ -280,7 +280,7 @@ def create_sales_return(*, sale_line, warehouse, quantity, return_date,
         if SalesReturn.objects.filter(document_number=document_number).exists():
             raise ReturnValidationError("Sales return document number already exists")
 
-        entry = _post_entitlement_journal(
+        entry, receivable_amount, refundable_amount = _post_entitlement_journal(
             sale=sale, customer=sale.customer, amount=amount,
             posting_day=day, reference=document_number, actor=actor
         )
@@ -288,7 +288,7 @@ def create_sales_return(*, sale_line, warehouse, quantity, return_date,
             document_number=document_number, sale=sale, sale_line=line,
             inventory_return=inv, warehouse=warehouse_obj, return_date=day,
             quantity=quantity, entitlement_currency=sale.currency,
-            entitlement_amount=amount, entitlement_journal=entry,
+            entitlement_amount=amount, refundable_amount=refundable_amount, entitlement_journal=entry,
             status=SalesReturnStatus.POSTED, reason=reason, created_by=actor,
             idempotency_key=idempotency_key or f"sales-return:{document_number}",
         )
@@ -297,7 +297,7 @@ def create_sales_return(*, sale_line, warehouse, quantity, return_date,
             entity_id=record.pk, reference=document_number,
             previous_state=None,
             new_state={"sale_id": sale.pk, "sale_line_id": line.pk, "quantity": quantity,
-                       "entitlement_amount": str(amount), "currency": sale.currency.code,
+                       "entitlement_amount": str(amount), "refundable_amount": str(refundable_amount), "currency": sale.currency.code,
                        "inventory_return_id": inv.pk, "journal_entry_id": entry.pk},
             reason=reason,
         )
@@ -336,7 +336,7 @@ def _refund_amount(entitlement_amount, entitlement_currency, refund_currency, ra
 
 def _remaining_refundable(sales_return):
     used = sales_return.refunds.filter(status=RefundStatus.POSTED).aggregate(v=Sum("entitlement_amount"))["v"] or Decimal("0")
-    return quantize_half_up(sales_return.entitlement_amount - used, 2)
+    return quantize_half_up(sales_return.refundable_amount - used, 2)
 
 
 def _same_currency_refund_journal(*, refund, actor):
