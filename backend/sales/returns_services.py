@@ -24,6 +24,7 @@ from documents.services import next_document_number
 from fiscal_periods.services import assert_posting_date_open
 from inventory.models import InventoryReturn, MovementType, StockMovement
 from inventory.services import sales_return as inventory_sales_return
+from warehouses.services import resolve_warehouse
 from party_ledger.models import BalanceType, PartyLedgerAttribution, PARTY_LEDGER_ACCOUNTS
 from party_ledger.services import attribute_journal_line
 from security.models import AuditAction
@@ -196,7 +197,7 @@ def _post_entitlement_journal(*, sale, customer, amount, posting_day, reference,
     for code in (RECEIVABLE_ACCOUNT, CUSTOMER_CREDIT_ACCOUNT):
         if any(line.account.code == code for line in entry.lines.all()):
             attribute_journal_line(entry.lines.get(account__code=code), party=customer, user=actor)
-    return entry
+    return entry, receivable_amount, credit_amount
 
 
 def create_sales_return(*, sale_line, warehouse, quantity, return_date,
@@ -211,6 +212,7 @@ def create_sales_return(*, sale_line, warehouse, quantity, return_date,
         raise ReturnValidationError("Return quantity must be a positive integer")
 
     with transaction.atomic():
+        warehouse = resolve_warehouse(warehouse)
         line = sale_line.__class__.objects.select_for_update().select_related(
             "sale", "product", "unit", "sale__customer", "sale__currency"
         ).get(pk=getattr(sale_line, "pk", sale_line))
@@ -243,7 +245,7 @@ def create_sales_return(*, sale_line, warehouse, quantity, return_date,
                 movement_type=MovementType.SALES_ISSUE,
                 product=line.product,
                 source_party=sale.customer,
-                warehouse__in=[warehouse] if getattr(warehouse, "pk", None) else [],
+                warehouse=warehouse,
                 warehouse_checks__sale_line=line,
                 warehouse_checks__status="FINALIZED",
             ).order_by("id")
