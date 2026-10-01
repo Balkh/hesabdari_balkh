@@ -145,3 +145,7 @@ class COGSAdjustment(models.Model):
     difference = models.DecimalField(max_digits=20, decimal_places=2)
     journal_entry = models.OneToOneField("accounting.JournalEntry", on_delete=models.PROTECT, related_name="cogs_adjustment")
     created_at = models.DateTimeField(auto_now_add=True)
+
+
+# Phase 11 models live in a separate module to keep the existing Sales models readable.
+from .returns_models import CrossCurrencyRefund, CrossCurrencyRefundStatus, Refund, RefundStatus, SalesReturn, SalesReturnStatus
