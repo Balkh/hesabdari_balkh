@@ -2,6 +2,7 @@ from datetime import date as date_class
 from decimal import Decimal, InvalidOperation
 
 from django.db import transaction
+from django.utils import timezone
 
 from accounting.models import Account
 from accounting.services import _as_date, post_journal, reverse_journal
@@ -14,10 +15,11 @@ from parties.models import Party
 from parties.services import PartyValidationError, resolve_party as resolve_party_frozen
 from party_ledger.services import attribute_journal_line
 from fiscal_periods.services import assert_posting_date_open
+from allocations.models import CustomerAllocation
 from security.models import AuditAction
 from security.services import record_audit_event
 
-from .models import Payment, PaymentPurpose
+from .models import Payment, PaymentPurpose, CrossCurrencySettlement, CrossCurrencySettlementStatus
 
 
 class PaymentValidationError(ValueError):
@@ -109,7 +111,8 @@ def _retry(key, fingerprint):
 @transaction.atomic
 def create_payment(*, party, payment_date, currency, amount, purpose=PaymentPurpose.RECEIVABLE,
                    description="", reference="", user=None, document_number=None,
-                   rate=None, rate_date=None, idempotency_key=None):
+                   rate=None, rate_date=None, idempotency_key=None,
+                   credit_account_code=None, allow_unvalued_foreign=False):
     """Record one customer cash receipt without invoice allocation.
 
     RECEIVABLE posts Dr 1110 / Cr 1310. CUSTOMER_CREDIT posts Dr 1110 / Cr 2200.
@@ -132,7 +135,12 @@ def create_payment(*, party, payment_date, currency, amount, purpose=PaymentPurp
         raise PaymentValidationError("Document number is required.")
     document_number = document_number.strip()
     cash = Account.objects.get(code=CASH_ACCOUNT)
-    obligation = Account.objects.get(code=PURPOSE_ACCOUNTS[purpose])
+    if credit_account_code is not None:
+        if purpose != PaymentPurpose.RECEIVABLE:
+            raise PaymentValidationError("Cross-currency settlement payments must use RECEIVABLE purpose.")
+        obligation = Account.objects.get(code=str(credit_account_code))
+    else:
+        obligation = Account.objects.get(code=PURPOSE_ACCOUNTS[purpose])
     if not cash.is_active or not cash.is_posting or not obligation.is_active or not obligation.is_posting:
         raise PaymentValidationError("Payment accounts are not usable for posting.")
 
@@ -153,9 +161,11 @@ def create_payment(*, party, payment_date, currency, amount, purpose=PaymentPurp
                         ], source_type="PAYMENT", source_id=document_number,
                         currency=currency, rate=rate, rate_date=rate_date,
                         created_by=actor, idempotency_key=f"{idempotency_key}:journal",
+                        allow_unvalued_foreign=allow_unvalued_foreign,
                     )
-                    party_line = entry.lines.get(account=obligation)
-                    attribute_journal_line(party_line, party=party, user=actor)
+                    if credit_account_code is None:
+                        party_line = entry.lines.get(account=obligation)
+                        attribute_journal_line(party_line, party=party, user=actor)
                     payment = Payment.objects.create(
                         document_number=document_number, party=party, payment_date=payment_day,
                         currency=currency, amount=amount, purpose=purpose, journal_entry=entry,
@@ -202,5 +212,191 @@ def reverse_payment(payment, *, reason, user=None):
             payment = Payment.objects.select_related("journal_entry").get(pk=payment)
         except Payment.DoesNotExist as exc:
             raise PaymentValidationError("Payment does not exist.") from exc
+    if hasattr(payment, "cross_currency_settlement"):
+        raise PaymentValidationError(
+            "A cross-currency settlement payment must be reversed through the settlement aggregate."
+        )
     reversal = reverse_journal(payment.journal_entry, reason, actor)
     return reversal
+
+
+CROSS_CURRENCY_CLEARING_ACCOUNT = "1910"
+CROSS_CURRENCY_OPERATION = "payment.cross_currency_settlement.create"
+CROSS_CURRENCY_REVERSAL_OPERATION = "payment.cross_currency_settlement.reverse"
+
+
+def _rate_8(value):
+    try:
+        rate_value = Decimal(str(value)).quantize(Decimal("0.00000001"))
+    except (InvalidOperation, TypeError, ValueError, ArithmeticError) as exc:
+        raise PaymentValidationError("Settlement rate must be a valid positive number.") from exc
+    if rate_value <= 0:
+        raise PaymentValidationError("Settlement rate must be greater than zero.")
+    return rate_value
+
+
+def _ccs_amount(value, field):
+    try:
+        amount = Decimal(str(value)).quantize(Decimal("0.01"))
+    except (InvalidOperation, TypeError, ValueError, ArithmeticError) as exc:
+        raise PaymentValidationError(f"{field} must be a valid positive number.") from exc
+    if amount <= 0:
+        raise PaymentValidationError(f"{field} must be greater than zero.")
+    return amount
+
+
+def _ccs_retry(key, fingerprint):
+    record = IdempotencyRecord.objects.get(key=key)
+    stored = record.response_body or {}
+    if stored.get("fingerprint") != fingerprint:
+        raise PaymentValidationError("This idempotency key was used for a different settlement.")
+    settlement_id = stored.get("settlement_id")
+    if not settlement_id:
+        raise DuplicateOperationError("Original settlement is still in progress; retry.")
+    return CrossCurrencySettlement.objects.select_related(
+        "payment", "party", "debt_currency", "payment_currency",
+        "cash_journal", "receivable_journal",
+    ).get(pk=settlement_id)
+
+
+@transaction.atomic
+def create_cross_currency_settlement(*, party, payment_date, payment_currency,
+                                      payment_amount, debt_currency, debt_amount,
+                                      agreed_rate, user=None, document_number=None,
+                                      description="", reference="", idempotency_key=None):
+    """Record one payment whose currency differs from the customer's debt currency."""
+    actor = _actor(user)
+    if not isinstance(idempotency_key, str) or not idempotency_key or len(idempotency_key) > 128:
+        raise PaymentValidationError("A valid idempotency key is required.")
+    party = _resolve_party(party)
+    payment_currency = _resolve_currency(payment_currency)
+    debt_currency = _resolve_currency(debt_currency)
+    if payment_currency.pk == debt_currency.pk:
+        raise PaymentValidationError("Cross-currency settlement requires different currencies.")
+    payment_amount = _ccs_amount(payment_amount, "payment_amount")
+    debt_amount = _ccs_amount(debt_amount, "debt_amount")
+    rate = _rate_8(agreed_rate)
+    expected_payment = (debt_amount * rate).quantize(Decimal("0.01"))
+    if expected_payment != payment_amount:
+        raise PaymentValidationError(
+            "payment_amount must equal debt_amount multiplied by agreed_rate, rounded to 2 decimals."
+        )
+    payment_day = _as_date(payment_date, "payment_date") if not isinstance(payment_date, date_class) else payment_date
+    fingerprint = "|".join([
+        str(party.pk), str(payment_day), str(payment_currency.pk), str(payment_amount),
+        str(debt_currency.pk), str(debt_amount), str(rate), str(document_number or ""),
+        str(description).strip(), str(reference).strip(),
+    ])
+    try:
+        with idempotent_operation(key=idempotency_key, operation=CROSS_CURRENCY_OPERATION) as record:
+            with transaction.atomic():
+                payment = create_payment(
+                    party=party, payment_date=payment_day, currency=payment_currency,
+                    amount=payment_amount, purpose=PaymentPurpose.RECEIVABLE,
+                    description=description, reference=reference, user=actor,
+                    document_number=document_number,
+                    rate=None, rate_date=None,
+                    idempotency_key=f"{idempotency_key}:payment",
+                    credit_account_code=CROSS_CURRENCY_CLEARING_ACCOUNT,
+                    allow_unvalued_foreign=True,
+                )
+                receivable = Account.objects.get(code=PURPOSE_ACCOUNTS[PaymentPurpose.RECEIVABLE])
+                clearing = Account.objects.get(code=CROSS_CURRENCY_CLEARING_ACCOUNT)
+                if not receivable.is_active or not receivable.is_posting or not clearing.is_active or not clearing.is_posting:
+                    raise PaymentValidationError("Cross-currency settlement accounts are not usable for posting.")
+                receivable_journal = post_journal(
+                    number=next_document_number("JE", int(gregorian_to_jalali(payment_day).split("/")[0])),
+                    posting_date=payment_day,
+                    description=f"Cross-currency settlement {payment.document_number}",
+                    lines=[
+                        {"account": clearing, "debit": debt_amount, "description": "Cross-currency technical clearing", "reference": payment.document_number},
+                        {"account": receivable, "credit": debt_amount, "description": "Customer receivable settlement", "reference": payment.document_number},
+                    ],
+                    source_type="CROSS_CURRENCY_SETTLEMENT",
+                    source_id=idempotency_key,
+                    currency=debt_currency,
+                    rate=None, rate_date=None, created_by=actor,
+                    idempotency_key=f"{idempotency_key}:receivable",
+                    allow_unvalued_foreign=True,
+                )
+                attribute_journal_line(
+                    receivable_journal.lines.get(account=receivable),
+                    party=party, user=actor,
+                )
+                settlement = CrossCurrencySettlement.objects.create(
+                    payment=payment, party=party,
+                    debt_currency=debt_currency, debt_amount=debt_amount,
+                    payment_currency=payment_currency, payment_amount=payment_amount,
+                    agreed_rate=rate,
+                    rate_direction=f"{payment_currency.code} per {debt_currency.code}",
+                    settled_at=timezone.now(),
+                    status=CrossCurrencySettlementStatus.POSTED,
+                    idempotency_key=idempotency_key,
+                    cash_journal=payment.journal_entry,
+                    receivable_journal=receivable_journal,
+                )
+                record.response_body = {"settlement_id": settlement.pk, "fingerprint": fingerprint}
+                record.save(update_fields=["response_body"])
+                record_audit_event(
+                    user=actor, action=AuditAction.CREATE, entity="CrossCurrencySettlement",
+                    entity_id=settlement.pk, reference=idempotency_key,
+                    previous_state=None,
+                    new_state={"payment_id": payment.pk, "debt_currency": debt_currency.code,
+                               "debt_amount": str(debt_amount), "payment_currency": payment_currency.code,
+                               "payment_amount": str(payment_amount), "agreed_rate": str(rate)},
+                    reason="",
+                )
+                return settlement
+    except DuplicateOperationError:
+        if IdempotencyRecord.objects.filter(key=idempotency_key).exists():
+            return _ccs_retry(idempotency_key, fingerprint)
+        raise
+
+
+@transaction.atomic
+def reverse_cross_currency_settlement(settlement, *, reason, user=None, idempotency_key=None):
+    """Atomically reverse both settlement journal legs; never one leg alone."""
+    actor = _actor(user)
+    if not isinstance(reason, str) or not reason.strip():
+        raise PaymentValidationError("A reversal reason is required.")
+    if not isinstance(idempotency_key, str) or not idempotency_key or len(idempotency_key) > 128:
+        raise PaymentValidationError("A valid idempotency key is required.")
+    settlement_id = getattr(settlement, "pk", settlement)
+    try:
+        settlement = CrossCurrencySettlement.objects.select_for_update().select_related(
+            "payment", "cash_journal", "receivable_journal", "party"
+        ).get(pk=settlement_id)
+    except CrossCurrencySettlement.DoesNotExist as exc:
+        raise PaymentValidationError("Cross-currency settlement does not exist.") from exc
+    if settlement.status == CrossCurrencySettlementStatus.REVERSED:
+        raise PaymentValidationError("Cross-currency settlement has already been reversed.")
+    if CustomerAllocation.objects.filter(settlement=settlement).exclude(reversal__isnull=False).exists():
+        raise PaymentValidationError("Reverse active customer allocations before reversing the settlement.")
+    fingerprint = f"{settlement.pk}|{reason.strip()}"
+    try:
+        with idempotent_operation(key=idempotency_key, operation=CROSS_CURRENCY_REVERSAL_OPERATION) as record:
+            with transaction.atomic():
+                cash_reversal = reverse_journal(settlement.cash_journal, reason.strip(), actor, _allow_cross_currency_settlement=True)
+                receivable_reversal = reverse_journal(settlement.receivable_journal, reason.strip(), actor, _allow_cross_currency_settlement=True)
+                CrossCurrencySettlement.objects.filter(pk=settlement.pk).update(status=CrossCurrencySettlementStatus.REVERSED)
+                settlement.status = CrossCurrencySettlementStatus.REVERSED
+                record.response_body = {"settlement_id": settlement.pk,
+                                        "cash_reversal_id": cash_reversal.pk,
+                                        "receivable_reversal_id": receivable_reversal.pk,
+                                        "fingerprint": fingerprint}
+                record.save(update_fields=["response_body"])
+                record_audit_event(
+                    user=actor, action=AuditAction.REVERSE, entity="CrossCurrencySettlement",
+                    entity_id=settlement.pk, reference=settlement.idempotency_key,
+                    previous_state={"status": CrossCurrencySettlementStatus.POSTED},
+                    new_state={"status": CrossCurrencySettlementStatus.REVERSED,
+                               "cash_reversal_id": cash_reversal.pk,
+                               "receivable_reversal_id": receivable_reversal.pk},
+                    reason=reason.strip(),
+                )
+                return settlement
+    except DuplicateOperationError:
+        record = IdempotencyRecord.objects.filter(key=idempotency_key).first()
+        if record is not None and (record.response_body or {}).get("fingerprint") == fingerprint:
+            return CrossCurrencySettlement.objects.get(pk=settlement.pk)
+        raise

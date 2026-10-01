@@ -10,6 +10,8 @@ deliberately separate from ``sales_tests.py`` so that no file in the
 from datetime import date
 from decimal import Decimal
 
+import pytest
+
 from django.test import TestCase
 
 from accounting.balances import account_balance
@@ -258,3 +260,39 @@ class ResolvedContractTests(TestCase):
         self.assertEqual(finalize_sale(sale=sale).status, SaleStatus.FINALIZED)
         self.assertEqual(JournalEntry.objects.filter(source_type="SALE").count(), 1)
         self.assertEqual(JournalEntry.objects.filter(source_type="SALES_COGS").count(), 0)
+
+
+@pytest.mark.django_db
+def test_foreign_credit_sale_does_not_require_invoice_rate():
+    from datetime import date
+    from decimal import Decimal
+    from django.contrib.auth import get_user_model
+    from accounting.coa import seed_chart_of_accounts
+    from currencies.models import Currency
+    from parties.models import Party
+    from categories.models import Category
+    from products.models import Product
+    from uom.models import UnitOfMeasure
+    from .models import PaymentMode, SalesChannel
+    from .services import create_sale, finalize_sale
+
+    user = get_user_model().objects.create_user(username="sale-ccs-rate")
+    afn = Currency.objects.create(code="AFN", name="Afghani", is_base=True)
+    usd = Currency.objects.create(code="USD", name="US Dollar", is_base=False)
+    seed_chart_of_accounts()
+    customer = Party.objects.create(name="Ahmad", is_customer=True)
+    category = Category.objects.create(name="Oil")
+    unit = UnitOfMeasure.objects.create(name="Piece")
+    product = Product.objects.create(code="OIL-CCS", name="Oil", name_fa="روغن", category=category, primary_uom=unit)
+    sale = create_sale(
+        customer=customer, sale_date=date(2026, 9, 28), currency=usd,
+        channel=SalesChannel.WHOLESALE, payment_mode=PaymentMode.CREDIT,
+        lines=[{"product": product, "unit": unit, "quantity": 1, "unit_price": Decimal("5000")}],
+        rate=None, rate_date=None, user=user, document_number="SI-CCS-RATE-1",
+    )
+    assert sale.exchange_rate is None
+    assert sale.rate_date is None
+    finalized = finalize_sale(sale=sale, user=user)
+    assert finalized.journal_entry.currency_id == usd.id
+    assert finalized.journal_entry.rate is None
+    assert finalized.journal_entry.afn_total is None

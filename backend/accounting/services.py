@@ -150,12 +150,17 @@ def _resolve_idempotent_retry(key, fingerprint):
 
 
 def post_journal(*, number, posting_date, description, lines, source_type="", source_id="",
-                 currency=None, rate=None, rate_date=None, created_by=None, idempotency_key=None):
+                 currency=None, rate=None, rate_date=None, created_by=None, idempotency_key=None,
+                 allow_unvalued_foreign=False):
     """Create and atomically post one balanced journal entry.
 
     Stage 2.2 contract: transaction currency is required; the rate snapshot
     (rate + rate date + direction) is resolved and stored; totals and the AFN
     equivalent are computed once and stored; each line may carry a reference.
+
+    ``allow_unvalued_foreign`` is an explicit workflow opt-in for transactions
+    that intentionally carry no invoice-time functional-currency valuation;
+    ordinary foreign-currency journals continue to require rate + rate date.
 
     Stage 2.3 contract: every post writes a POST audit event in the same
     transaction; when ``idempotency_key`` is given, an exact retry returns the
@@ -193,15 +198,21 @@ def post_journal(*, number, posting_date, description, lines, source_type="", so
         if base is None:
             raise JournalValidationError("No base currency is configured")
         if rate is None:
-            raise JournalValidationError("A rate is required for a foreign-currency journal")
-        rate_value = _coerce_rate(rate)
-        if rate_value <= 0:
-            raise JournalValidationError("rate must be positive")
-        if rate_date is None:
-            raise JournalValidationError("rate_date is required for a foreign-currency journal")
-        rate_date_value = _as_date(rate_date, "rate_date")
-        direction = f"{currency.code}->{base.code}"
-        afn_total = fx_equivalent(debit_total, rate_value)
+            if not allow_unvalued_foreign:
+                raise JournalValidationError("A rate is required for a foreign-currency journal")
+            rate_value = None
+            rate_date_value = None
+            direction = f"{currency.code}->{base.code}"
+            afn_total = None
+        else:
+            rate_value = _coerce_rate(rate)
+            if rate_value <= 0:
+                raise JournalValidationError("rate must be positive")
+            if rate_date is None:
+                raise JournalValidationError("rate_date is required for a foreign-currency journal")
+            rate_date_value = _as_date(rate_date, "rate_date")
+            direction = f"{currency.code}->{base.code}"
+            afn_total = fx_equivalent(debit_total, rate_value)
 
     persist_kwargs = dict(
         number=number, posting_date=posting_date, description=description, lines=lines,
@@ -244,7 +255,7 @@ def _jalali_year(value):
     return int(gregorian_to_jalali(_as_date(value, "posting_date")).split("/")[0])
 
 
-def reverse_journal(entry, reason, user):
+def reverse_journal(entry, reason, user, *, _allow_cross_currency_settlement=False):
     """Reverse a POSTED entry with a balanced mirror entry (Stage 2.3, §1.9/G4).
 
     The original keeps every financial field and line byte-identical; only its
@@ -261,6 +272,15 @@ def reverse_journal(entry, reason, user):
     with transaction.atomic():
         try:
             original = JournalEntry.objects.select_for_update().get(pk=entry.pk)
+            if (not _allow_cross_currency_settlement) and (hasattr(original, "cross_currency_cash_settlement") or hasattr(original, "cross_currency_receivable_settlement")):
+                raise JournalValidationError(
+                    "Cross-currency settlement journal legs must be reversed through the settlement aggregate."
+                )
+            payment_document = getattr(original, "payment_document", None)
+            if (not _allow_cross_currency_settlement) and payment_document is not None and hasattr(payment_document, "cross_currency_settlement"):
+                raise JournalValidationError(
+                    "Cross-currency settlement payment journal must be reversed through the settlement aggregate."
+                )
         except JournalEntry.DoesNotExist:
             raise JournalValidationError("Journal entry does not exist") from None
         if original.status == JournalStatus.DRAFT:

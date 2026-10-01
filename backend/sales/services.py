@@ -60,8 +60,10 @@ def _rate(currency, value, rate_date, sale_date):
         if value is not None and normalize_rate(value) != Decimal("1.0000"):
             raise SalesValidationError("Base currency rate must be 1.0000")
         return Decimal("1.0000"), sale_date
+    if value is None and rate_date is None:
+        return None, None
     if value is None or rate_date is None:
-        raise SalesValidationError("Foreign sales require rate and rate_date")
+        raise SalesValidationError("rate and rate_date must be supplied together")
     return normalize_rate(value), _date(rate_date)
 
 
@@ -153,6 +155,7 @@ def finalize_sale(*, sale, user=None, idempotency_key=None):
             source_type="SALE", source_id=sale.document_number, currency=sale.currency,
             rate=sale.exchange_rate, rate_date=sale.rate_date, created_by=actor,
             idempotency_key=idempotency_key or f"sale:{sale.pk}:journal",
+            allow_unvalued_foreign=(not sale.currency.is_base and sale.exchange_rate is None),
         )
         if sale.payment_mode == PaymentMode.CREDIT:
             attribute_journal_line(journal.lines.get(account__code=RECEIVABLE_ACCOUNT), party=sale.customer, user=actor)

@@ -922,7 +922,7 @@ class HistoricalIntegrityTests(GoldenFixture, TestCase):
         self.assertEqual(len(new_lines), 6)
         self.assertEqual(sorted(a["action"] for a in new_audits), ["POST", "REVERSE"])
         # Stage 2.1 / 2.2 / 2.4 frozen facts
-        self.assertEqual(Account.objects.count(), 38)
+        self.assertEqual(Account.objects.count(), 39)
         self.assertFalse(Account.objects.get(code="2400").is_active)
         self.assertIsNone(JournalEntry.objects.get(number="JE-LEGACY-1").currency)
         self.assertTrue(self._source_index_present())
