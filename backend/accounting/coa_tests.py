@@ -39,6 +39,7 @@ EXPECTED_COA = (
     ("1420", "Secondary Warehouse", "گدام فرعی", "ASSET", "1400", True, True),
     ("1500", "Supplier Advances", "پیش‌پرداخت به تأمین‌کنندگان", "ASSET", "1000", True, True),
     ("1900", "Other Assets", "سایر دارایی‌ها", "ASSET", "1000", True, True),
+    ("1910", "Cross-Currency Settlement Clearing", "حساب تسویه فنی چندارزی", "ASSET", "1900", True, True),
     ("2000", "Liabilities", "بدهی‌ها", "LIABILITY", None, False, True),
     ("2100", "Accounts Payable", "حسابات پرداختنی", "LIABILITY", "2000", False, True),
     ("2110", "Trade Payables", "پرداختنی‌های تجاری", "LIABILITY", "2100", True, True),
@@ -75,7 +76,7 @@ GROUP_CODES = (
 
 # Handoff §10 — exact posting list (25).
 POSTING_CODES = (
-    "1110", "1120", "1210", "1220", "1310", "1410", "1420", "1500", "1900",
+    "1110", "1120", "1210", "1220", "1310", "1410", "1420", "1500", "1900", "1910",
     "2110", "2200", "2900", "3100", "3900", "3950", "4110", "4120", "4200",
     "5100", "5200", "6100", "6200", "6300", "8100", "8200",
 )
@@ -105,9 +106,9 @@ class SeedIdempotencyTests(TestCase):
         second = seed_chart_of_accounts()
         snapshot_after = _db_snapshot()
 
-        self.assertEqual(first, {"created": 38, "updated": 0, "total_canonical": 38})
+        self.assertEqual(first, {"created": 39, "updated": 0, "total_canonical": 39})
         self.assertEqual(second, {"created": 0, "updated": 0, "total_canonical": 38})
-        self.assertEqual(len(snapshot_before), 38)
+        self.assertEqual(len(snapshot_before), 39)
         self.assertEqual(snapshot_before, snapshot_after)
         codes = [row[0] for row in snapshot_after]
         self.assertEqual(len(codes), len(set(codes)))  # no duplicate codes
@@ -115,7 +116,7 @@ class SeedIdempotencyTests(TestCase):
     def test_seed_converges_stale_canonical_row(self):
         Account.objects.create(code="1100", name="Cash", account_type="ASSET")
         result = seed_chart_of_accounts()
-        self.assertEqual(result, {"created": 37, "updated": 1, "total_canonical": 38})
+        self.assertEqual(result, {"created": 38, "updated": 1, "total_canonical": 38})
         account = Account.objects.get(code="1100")
         self.assertEqual(account.name, "Cash & Bank")
         self.assertEqual(account.name_fa, "نقد و بانک")
@@ -133,7 +134,7 @@ class SeedIdempotencyTests(TestCase):
         self.assertEqual(custom.name_fa, "سفارشی")
         self.assertTrue(custom.is_posting)
         self.assertTrue(custom.is_active)
-        self.assertEqual(Account.objects.filter(code__in=EXPECTED_CODES).count(), 38)
+        self.assertEqual(Account.objects.filter(code__in=EXPECTED_CODES).count(), 39)
 
 
 class COAContractTests(TestCase):
@@ -143,8 +144,8 @@ class COAContractTests(TestCase):
     def setUpTestData(cls):
         seed_chart_of_accounts()
 
-    def test_canonical_count_is_38(self):
-        self.assertEqual(len(EXPECTED_COA), 38)
+    def test_canonical_count_is_39(self):
+        self.assertEqual(len(EXPECTED_COA), 39)
         self.assertEqual(Account.objects.filter(code__in=EXPECTED_CODES).count(), 38)
 
     def test_every_account_matches_contract(self):
