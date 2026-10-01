@@ -107,7 +107,7 @@ class SeedIdempotencyTests(TestCase):
         snapshot_after = _db_snapshot()
 
         self.assertEqual(first, {"created": 39, "updated": 0, "total_canonical": 39})
-        self.assertEqual(second, {"created": 0, "updated": 0, "total_canonical": 38})
+        self.assertEqual(second, {"created": 0, "updated": 0, "total_canonical": 39})
         self.assertEqual(len(snapshot_before), 39)
         self.assertEqual(snapshot_before, snapshot_after)
         codes = [row[0] for row in snapshot_after]
@@ -116,7 +116,7 @@ class SeedIdempotencyTests(TestCase):
     def test_seed_converges_stale_canonical_row(self):
         Account.objects.create(code="1100", name="Cash", account_type="ASSET")
         result = seed_chart_of_accounts()
-        self.assertEqual(result, {"created": 38, "updated": 1, "total_canonical": 38})
+        self.assertEqual(result, {"created": 38, "updated": 1, "total_canonical": 39})
         account = Account.objects.get(code="1100")
         self.assertEqual(account.name, "Cash & Bank")
         self.assertEqual(account.name_fa, "نقد و بانک")
@@ -146,7 +146,7 @@ class COAContractTests(TestCase):
 
     def test_canonical_count_is_39(self):
         self.assertEqual(len(EXPECTED_COA), 39)
-        self.assertEqual(Account.objects.filter(code__in=EXPECTED_CODES).count(), 38)
+        self.assertEqual(Account.objects.filter(code__in=EXPECTED_CODES).count(), 39)
 
     def test_every_account_matches_contract(self):
         for code, name_en, name_fa, type_, parent_code, is_posting, is_active in EXPECTED_COA:
