@@ -37,6 +37,7 @@ class SalesReturn(models.Model):
         "currencies.Currency", on_delete=models.PROTECT, related_name="sales_return_entitlements"
     )
     entitlement_amount = models.DecimalField(max_digits=20, decimal_places=2)
+    refundable_amount = models.DecimalField(max_digits=20, decimal_places=2, default=0)
     entitlement_journal = models.ForeignKey(
         "accounting.JournalEntry", on_delete=models.PROTECT, related_name="sales_return_entitlements"
     )
@@ -54,6 +55,8 @@ class SalesReturn(models.Model):
         constraints = [
             models.CheckConstraint(condition=models.Q(quantity__gt=0), name="sales_return_qty_gt0"),
             models.CheckConstraint(condition=models.Q(entitlement_amount__gt=0), name="sales_return_entitlement_gt0"),
+            models.CheckConstraint(condition=models.Q(refundable_amount__gte=0), name="sales_return_refundable_gte0"),
+            models.CheckConstraint(condition=models.Q(refundable_amount__lte=models.F("entitlement_amount")), name="sales_return_refundable_lte_entitlement"),
         ]
 
     def save(self, *args, **kwargs):
