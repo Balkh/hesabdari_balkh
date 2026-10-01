@@ -24,6 +24,7 @@ from documents.services import next_document_number
 from fiscal_periods.services import assert_posting_date_open
 from inventory.models import InventoryReturn, MovementType, StockMovement
 from inventory.services import sales_return as inventory_sales_return
+from inventory.services import resolve_warehouse_account
 from warehouses.services import resolve_warehouse
 from party_ledger.models import BalanceType, PartyLedgerAttribution, PARTY_LEDGER_ACCOUNTS
 from party_ledger.services import attribute_journal_line
@@ -286,11 +287,32 @@ def create_sales_return(*, sale_line, warehouse, quantity, return_date,
             sale=sale, customer=sale.customer, amount=amount,
             posting_day=day, reference=document_number, actor=actor
         )
+        base = Currency.objects.filter(is_base=True).first()
+        if base is None:
+            raise ReturnValidationError("No base currency is configured")
+        inventory_account = resolve_warehouse_account(warehouse_obj)
+        cogs_account = _usable("5100")
+        cogs_value = quantize_half_up(inv.return_movement.unit_cost_afn * Decimal(quantity), 2)
+        cogs_entry = post_journal(
+            number=next_document_number("JE", _jalali_year(day)),
+            posting_date=day,
+            description=f"COGS reversal for sales return {document_number}",
+            lines=[
+                {"account": inventory_account, "debit": cogs_value, "reference": document_number,
+                 "description": "Return inventory to warehouse"},
+                {"account": cogs_account, "credit": cogs_value, "reference": document_number,
+                 "description": "Reverse COGS for returned goods"},
+            ],
+            source_type="SALES_RETURN_COGS", source_id=document_number,
+            currency=base, rate=Decimal("1.0000"), rate_date=day,
+            created_by=actor, idempotency_key=f"sales-return:{document_number}:cogs",
+        )
         record = SalesReturn.objects.create(
             document_number=document_number, sale=sale, sale_line=line,
             inventory_return=inv, warehouse=warehouse_obj, return_date=day,
             quantity=quantity, entitlement_currency=sale.currency,
             entitlement_amount=amount, refundable_amount=refundable_amount, entitlement_journal=entry,
+            cogs_journal=cogs_entry,
             status=SalesReturnStatus.POSTED, reason=reason, created_by=actor,
             idempotency_key=idempotency_key or f"sales-return:{document_number}",
         )
