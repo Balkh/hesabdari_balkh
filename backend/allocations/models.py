@@ -10,10 +10,15 @@ class CustomerAllocation(models.Model):
     """Immutable application of a customer Payment to one finalized credit Sale."""
 
     payment = models.ForeignKey("payments.Payment", on_delete=models.PROTECT, related_name="allocations")
+    settlement = models.ForeignKey(
+        "payments.CrossCurrencySettlement", null=True, blank=True,
+        on_delete=models.PROTECT, related_name="allocations",
+    )
     sale = models.ForeignKey("sales.Sale", on_delete=models.PROTECT, related_name="customer_allocations")
     currency = models.ForeignKey("currencies.Currency", on_delete=models.PROTECT, related_name="customer_allocations")
     requested_amount = models.DecimalField(max_digits=20, decimal_places=2)
     amount = models.DecimalField(max_digits=20, decimal_places=2)
+    payment_amount = models.DecimalField(max_digits=20, decimal_places=2, default=Decimal("0.00"))
     credit_amount = models.DecimalField(max_digits=20, decimal_places=2, default=Decimal("0.00"))
     journal_entry = models.ForeignKey(
         "accounting.JournalEntry", null=True, blank=True, on_delete=models.PROTECT,
@@ -29,6 +34,7 @@ class CustomerAllocation(models.Model):
         constraints = [
             models.CheckConstraint(condition=models.Q(requested_amount__gt=0), name="allocation_requested_gt0"),
             models.CheckConstraint(condition=models.Q(amount__gt=0), name="allocation_amount_gt0"),
+            models.CheckConstraint(condition=models.Q(payment_amount__gte=0), name="allocation_payment_amount_gte0"),
             models.CheckConstraint(condition=models.Q(credit_amount__gte=0), name="allocation_credit_gte0"),
         ]
 

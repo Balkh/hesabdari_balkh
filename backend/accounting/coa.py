@@ -40,6 +40,7 @@ CANONICAL_COA = (
     ("1420", "Secondary Warehouse", "گدام فرعی", AccountType.ASSET, "1400", True, True),
     ("1500", "Supplier Advances", "پیش‌پرداخت به تأمین‌کنندگان", AccountType.ASSET, "1000", True, True),
     ("1900", "Other Assets", "سایر دارایی‌ها", AccountType.ASSET, "1000", True, True),
+    ("1910", "Cross-Currency Settlement Clearing", "حساب تسویه فنی چندارزی", AccountType.ASSET, "1900", True, True),
     # --- Liabilities ------------------------------------------------------
     ("2000", "Liabilities", "بدهی‌ها", AccountType.LIABILITY, None, False, True),
     ("2100", "Accounts Payable", "حسابات پرداختنی", AccountType.LIABILITY, "2000", False, True),

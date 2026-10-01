@@ -16,7 +16,7 @@ from party_ledger.services import attribute_journal_line
 from security.models import AuditAction
 from security.services import record_audit_event
 
-from payments.models import Payment, PaymentPurpose
+from payments.models import Payment, PaymentPurpose, CrossCurrencySettlement, CrossCurrencySettlementStatus
 from sales.models import PaymentMode, Sale, SaleStatus
 
 from .models import CustomerAllocation, CustomerAllocationReversal
@@ -68,7 +68,14 @@ def _active_allocations(payment):
 
 def payment_available(payment):
     """Remaining amount of a Payment that is still legally allocatable."""
-    used = _active_allocations(payment).aggregate(total=models.Sum("amount"), credit=models.Sum("credit_amount"))
+    active = _active_allocations(payment)
+    settlement = getattr(payment, "cross_currency_settlement", None)
+    if settlement is not None:
+        used = active.aggregate(total=models.Sum("payment_amount"), credit=models.Sum("credit_amount"))
+        return quantize_half_up(
+            settlement.payment_amount - (used["total"] or Decimal("0.00")) - (used["credit"] or Decimal("0.00")), 2
+        )
+    used = active.aggregate(total=models.Sum("amount"), credit=models.Sum("credit_amount"))
     return quantize_half_up(payment.amount - (used["total"] or Decimal("0.00")) - (used["credit"] or Decimal("0.00")), 2)
 
 
@@ -100,7 +107,9 @@ def _allocation_snapshot(allocation):
         "currency": allocation.currency.code,
         "requested_amount": str(allocation.requested_amount),
         "amount": str(allocation.amount),
+        "payment_amount": str(allocation.payment_amount),
         "credit_amount": str(allocation.credit_amount),
+        "settlement_id": allocation.settlement_id,
         "journal_entry_id": allocation.journal_entry_id,
         "idempotency_key": allocation.idempotency_key,
     }
@@ -143,7 +152,7 @@ def _post_customer_reclass(*, payment, amount, posting_date, user, source_id, id
 
 
 @transaction.atomic
-def allocate_payment(*, payment, sale, amount, user=None, idempotency_key=None):
+def allocate_payment(*, payment, sale, amount, user=None, idempotency_key=None, settlement=None):
     """Apply one same-currency Payment to one finalized CREDIT Sale.
 
     The Sale and Payment already carry their accounting truth. This operation
@@ -170,21 +179,51 @@ def allocate_payment(*, payment, sale, amount, user=None, idempotency_key=None):
                 raise AllocationValidationError("Cash Sales are already settled and cannot receive allocations")
             if payment.party_id != sale.customer_id:
                 raise AllocationValidationError("Payment customer must match the Sale customer")
-            _assert_same_currency(payment, sale)
+            if settlement is not None:
+                settlement = CrossCurrencySettlement.objects.select_for_update().select_related(
+                    "debt_currency", "payment_currency", "party"
+                ).get(pk=getattr(settlement, "pk", settlement))
+                if settlement.payment_id != payment.pk:
+                    raise AllocationValidationError("Settlement must belong to the Payment.")
+                if settlement.party_id != payment.party_id or settlement.party_id != sale.customer_id:
+                    raise AllocationValidationError("Settlement customer must match the Payment and Sale.")
+                if settlement.status != CrossCurrencySettlementStatus.POSTED:
+                    raise AllocationValidationError("Only a posted cross-currency Settlement can be allocated.")
+                if settlement.debt_currency_id != sale.currency_id or settlement.payment_currency_id != payment.currency_id:
+                    raise AllocationValidationError("Settlement currencies must match the Sale debt currency and Payment currency.")
+            else:
+                _assert_same_currency(payment, sale)
             assert_posting_date_open(sale.sale_date)
             assert_posting_date_open(payment.payment_date)
 
             available = payment_available(payment)
             outstanding = invoice_outstanding(sale)
+            settlement_debt_available = None
+            if settlement is not None:
+                used_debt = _active_allocations(payment).filter(settlement=settlement).aggregate(
+                    total=models.Sum("amount")
+                )["total"] or Decimal("0.00")
+                settlement_debt_available = quantize_half_up(settlement.debt_amount - used_debt, 2)
             if available <= 0:
                 raise AllocationValidationError("Payment has no remaining allocation capacity")
             if outstanding <= 0:
                 raise AllocationValidationError("Invoice is already fully allocated")
-            if requested > available:
-                raise AllocationValidationError("Allocation exceeds the Payment's remaining capacity")
-
-            applied = min(requested, outstanding)
-            excess = quantize_half_up(requested - applied, 2)
+            if settlement is not None:
+                if requested > settlement_debt_available:
+                    raise AllocationValidationError("Allocation exceeds the Settlement's remaining debt capacity.")
+                if requested > outstanding:
+                    raise AllocationValidationError("Cross-currency allocation cannot exceed the invoice outstanding amount.")
+                applied = requested
+                payment_amount_applied = quantize_half_up(applied * settlement.agreed_rate, 2)
+                if payment_amount_applied > available:
+                    raise AllocationValidationError("Settlement allocation exceeds the Payment's remaining capacity.")
+                excess = Decimal("0.00")
+            else:
+                if requested > available:
+                    raise AllocationValidationError("Allocation exceeds the Payment's remaining capacity")
+                applied = min(requested, outstanding)
+                payment_amount_applied = applied
+                excess = quantize_half_up(requested - applied, 2)
             credit_reclass = Decimal("0.00")
             journal = None
             if payment.purpose == PaymentPurpose.CUSTOMER_CREDIT:
@@ -205,8 +244,10 @@ def allocate_payment(*, payment, sale, amount, user=None, idempotency_key=None):
                     description=f"Customer payment overage {payment.document_number} after {sale.document_number}",
                 )
             allocation = CustomerAllocation.objects.create(
-                payment=payment, sale=sale, currency=payment.currency,
-                requested_amount=requested, amount=applied, credit_amount=credit_reclass,
+                payment=payment, settlement=settlement, sale=sale,
+                currency=sale.currency if settlement is not None else payment.currency,
+                requested_amount=requested, amount=applied, payment_amount=payment_amount_applied,
+                credit_amount=credit_reclass,
                 journal_entry=journal, idempotency_key=idempotency_key, created_by=actor,
             )
             record.response_body = {"allocation_id": allocation.pk, "fingerprint": fingerprint}

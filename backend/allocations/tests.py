@@ -216,3 +216,53 @@ def test_closed_period_rejects_allocation(master_data):
     close_period(period, user=user)
     with pytest.raises(Exception):
         allocate_payment(payment=payment, sale=sale, amount=100, user=user, idempotency_key="alloc-13")
+
+
+def test_cross_currency_allocation_reduces_debt_currency_and_tracks_payment_currency(master_data):
+    user, afn, usd, customer, product = master_data
+    from payments.services import create_cross_currency_settlement
+
+    sale = make_sale(
+        user, customer, usd, product, total=Decimal("3000.00"),
+        number="SI-CCS-ALLOC-1",
+    )
+    settlement = create_cross_currency_settlement(
+        party=customer, payment_date=date(2026, 9, 28),
+        payment_currency=afn, payment_amount=Decimal("216000.00"),
+        debt_currency=usd, debt_amount=Decimal("3000.00"),
+        agreed_rate=Decimal("72"), user=user,
+        document_number="PMT-CCS-ALLOC-1",
+        idempotency_key="ccs-alloc-1",
+    )
+    allocation = allocate_payment(
+        payment=settlement.payment, sale=sale, amount=Decimal("3000.00"),
+        settlement=settlement, user=user, idempotency_key="alloc-ccs-1",
+    )
+    assert allocation.currency_id == usd.id
+    assert allocation.amount == Decimal("3000.00")
+    assert allocation.payment_amount == Decimal("216000.00")
+    assert invoice_outstanding(sale) == Decimal("0.00")
+    assert payment_available(settlement.payment) == Decimal("0.00")
+
+
+def test_cross_currency_allocation_rejects_over_invoice_amount(master_data):
+    user, afn, usd, customer, product = master_data
+    from payments.services import create_cross_currency_settlement
+
+    sale = make_sale(
+        user, customer, usd, product, total=Decimal("3000.00"),
+        number="SI-CCS-ALLOC-2",
+    )
+    settlement = create_cross_currency_settlement(
+        party=customer, payment_date=date(2026, 9, 28),
+        payment_currency=afn, payment_amount=Decimal("360000.00"),
+        debt_currency=usd, debt_amount=Decimal("5000.00"),
+        agreed_rate=Decimal("72"), user=user,
+        document_number="PMT-CCS-ALLOC-2",
+        idempotency_key="ccs-alloc-2",
+    )
+    with pytest.raises(AllocationValidationError, match="invoice outstanding"):
+        allocate_payment(
+            payment=settlement.payment, sale=sale, amount=Decimal("4000.00"),
+            settlement=settlement, user=user, idempotency_key="alloc-ccs-2",
+        )
