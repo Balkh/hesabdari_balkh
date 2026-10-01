@@ -379,6 +379,7 @@ def reverse_cross_currency_settlement(settlement, *, reason, user=None, idempote
                 cash_reversal = reverse_journal(settlement.cash_journal, reason.strip(), actor, _allow_cross_currency_settlement=True)
                 receivable_reversal = reverse_journal(settlement.receivable_journal, reason.strip(), actor, _allow_cross_currency_settlement=True)
                 CrossCurrencySettlement.objects.filter(pk=settlement.pk).update(status=CrossCurrencySettlementStatus.REVERSED)
+                settlement.status = CrossCurrencySettlementStatus.REVERSED
                 record.response_body = {"settlement_id": settlement.pk,
                                         "cash_reversal_id": cash_reversal.pk,
                                         "receivable_reversal_id": receivable_reversal.pk,
