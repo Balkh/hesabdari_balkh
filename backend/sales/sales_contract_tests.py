@@ -10,6 +10,8 @@ deliberately separate from ``sales_tests.py`` so that no file in the
 from datetime import date
 from decimal import Decimal
 
+import pytest
+
 from django.test import TestCase
 
 from accounting.balances import account_balance
@@ -260,6 +262,7 @@ class ResolvedContractTests(TestCase):
         self.assertEqual(JournalEntry.objects.filter(source_type="SALES_COGS").count(), 0)
 
 
+@pytest.mark.django_db
 def test_foreign_credit_sale_does_not_require_invoice_rate():
     from datetime import date
     from decimal import Decimal
