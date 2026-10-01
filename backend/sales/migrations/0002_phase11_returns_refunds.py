@@ -38,6 +38,11 @@ class Migration(migrations.Migration):
             ],
             options={"ordering": ["return_date", "document_number"]},
         ),
+        migrations.AddField(
+            model_name="salesreturn",
+            name="cogs_journal",
+            field=models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name="sales_return_cogs", to="accounting.journalentry"),
+        ),
         migrations.CreateModel(
             name="Refund",
             fields=[
