@@ -491,12 +491,10 @@ def reverse_refund(refund, *, reason, user=None):
                 raise ReturnValidationError("Cross-currency Refund is already reversed")
             reverse_journal(cross.entitlement_journal, reason, actor, _allow_cross_currency_settlement=True)
             reverse_journal(cross.cash_journal, reason, actor, _allow_cross_currency_settlement=True)
-            cross.status = CrossCurrencyRefundStatus.REVERSED
-            cross.save(update_fields=["status"])
+            CrossCurrencyRefund.objects.filter(pk=cross.pk).update(status=CrossCurrencyRefundStatus.REVERSED)
         else:
             reverse_journal(obj.journal_entry, reason, actor)
-        obj.status = RefundStatus.REVERSED
-        obj.save(update_fields=["status"])
+        Refund.objects.filter(pk=obj.pk).update(status=RefundStatus.REVERSED)
         record_audit_event(
             user=actor, action=AuditAction.REVERSE, entity="Refund",
             entity_id=obj.pk, reference=obj.document_number,
