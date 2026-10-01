@@ -150,12 +150,17 @@ def _resolve_idempotent_retry(key, fingerprint):
 
 
 def post_journal(*, number, posting_date, description, lines, source_type="", source_id="",
-                 currency=None, rate=None, rate_date=None, created_by=None, idempotency_key=None):
+                 currency=None, rate=None, rate_date=None, created_by=None, idempotency_key=None,
+                 allow_unvalued_foreign=False):
     """Create and atomically post one balanced journal entry.
 
     Stage 2.2 contract: transaction currency is required; the rate snapshot
     (rate + rate date + direction) is resolved and stored; totals and the AFN
     equivalent are computed once and stored; each line may carry a reference.
+
+    ``allow_unvalued_foreign`` is an explicit workflow opt-in for transactions
+    that intentionally carry no invoice-time functional-currency valuation;
+    ordinary foreign-currency journals continue to require rate + rate date.
 
     Stage 2.3 contract: every post writes a POST audit event in the same
     transaction; when ``idempotency_key`` is given, an exact retry returns the
