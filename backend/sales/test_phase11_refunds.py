@@ -9,7 +9,7 @@ from accounting.models import Account
 from accounting.services import JournalValidationError
 from categories.services import create_category
 from currencies.models import Currency
-from inventory.services import assign_warehouse_account, issue_stock, receive_stock
+from inventory.services import InventoryValidationError, assign_warehouse_account, issue_stock, receive_stock
 from inventory.stock import stock_for
 from parties.services import create_party
 from products.services import create_product
@@ -211,7 +211,7 @@ class Phase11WorkflowTests(TestCase):
             movement_date=self.day, reference="P11-LATER-ISSUE",
             description="Subsequent dispatch consumes returned stock",
         )
-        with self.assertRaises(ReturnValidationError):
+        with self.assertRaises(InventoryValidationError):
             reverse_sales_return(
                 returned, reversal_date=self.day, reason="Cannot remove absent stock",
                 document_number="P11-SRV-STOCK-GUARD",
