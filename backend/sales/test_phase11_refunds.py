@@ -1,8 +1,10 @@
+import threading
 from datetime import date
 from decimal import Decimal
 from types import SimpleNamespace
 
-from django.test import SimpleTestCase, TestCase
+from django.db import close_old_connections, connection
+from django.test import SimpleTestCase, TestCase, TransactionTestCase
 
 from accounting.coa import seed_chart_of_accounts
 from accounting.models import Account
@@ -330,3 +332,90 @@ class Phase11WorkflowTests(TestCase):
         self.assertEqual(returned.status, SalesReturnStatus.REVERSED)
         self.assertEqual(reversal.sales_return_id, returned.pk)
         self.assertEqual(stock_for(self.product, self.warehouse), 10)
+
+
+class Phase11RefundConcurrencyTests(TransactionTestCase):
+    """PostgreSQL regression: concurrent refunds cannot exceed entitlement."""
+
+    reset_sequences = True
+
+    def setUp(self):
+        self.afn = Currency.objects.create(code="AFN", name="Afghani", is_base=True)
+        seed_chart_of_accounts()
+        category = create_category(name="Phase 11 Concurrent Category")
+        unit = create_uom(name="Phase 11 Concurrent Unit")
+        product = create_product(
+            code="P11-CONCURRENT", name="Phase 11 Concurrent Product",
+            name_fa="محصول همزمان فاز یازده", category=category, primary_uom=unit,
+        )
+        customer = create_party(name="Phase 11 Concurrent Customer", is_customer=True)
+        warehouse = create_warehouse(name="Phase 11 Concurrent Warehouse")
+        assign_warehouse_account(warehouse=warehouse, account="1410")
+        self.day = date(2026, 1, 10)
+        receive_stock(
+            product=product, warehouse=warehouse, quantity=20,
+            unit_cost="4", currency=self.afn, movement_date=self.day,
+            reference="P11-CONCURRENT-STOCK", description="Concurrency fixture",
+        )
+        sale = create_sale(
+            customer=customer, sale_date=self.day, currency=self.afn,
+            channel=SalesChannel.WHOLESALE, payment_mode=PaymentMode.CASH,
+            document_number="P11-CONCURRENT-SALE",
+            lines=[{"product": product, "unit": unit, "quantity": 10, "unit_price": "100"}],
+        )
+        finalize_sale(sale=sale)
+        line = sale.lines.get()
+        check = prepare_warehouse_check(
+            sale_line=line, warehouse=warehouse, quantity=10,
+            number="P11-CONCURRENT-CHECK",
+        )
+        finalize_warehouse_check(check=check)
+        self.returned = create_sales_return(
+            sale_line=line, warehouse=warehouse, quantity=2,
+            return_date=self.day, reason="Concurrency return",
+            document_number="P11-CONCURRENT-RETURN",
+            idempotency_key="p11-concurrent-return",
+        )
+
+    def test_concurrent_refunds_cannot_over_refund_one_return(self):
+        if connection.vendor != "postgresql":
+            self.skipTest("Requires PostgreSQL row-level locking semantics")
+        outcomes = []
+        barrier = threading.Barrier(3)
+
+        def worker(index):
+            close_old_connections()
+            try:
+                barrier.wait(timeout=5)
+                refund = create_refund(
+                    sales_return=self.returned.pk,
+                    refund_date=self.day,
+                    refund_currency="AFN",
+                    entitlement_amount="150",
+                    reason=f"Concurrent refund {index}",
+                    document_number=f"P11-CONCURRENT-REFUND-{index}",
+                    idempotency_key=f"p11-concurrent-refund-{index}",
+                )
+                outcomes.append((index, "ok", refund.pk))
+            except Exception as exc:  # noqa: BLE001 - capture worker outcome
+                outcomes.append((index, "error", type(exc).__name__, str(exc)))
+            finally:
+                close_old_connections()
+
+        workers = [threading.Thread(target=worker, args=(i,)) for i in (1, 2)]
+        for worker_thread in workers:
+            worker_thread.start()
+        barrier.wait(timeout=5)
+        for worker_thread in workers:
+            worker_thread.join(timeout=15)
+            self.assertFalse(worker_thread.is_alive(), "concurrent refund worker did not finish")
+
+        successes = [item for item in outcomes if item[1] == "ok"]
+        errors = [item for item in outcomes if item[1] == "error"]
+        self.assertEqual(len(successes), 1, outcomes)
+        self.assertEqual(len(errors), 1, outcomes)
+        self.assertEqual(errors[0][2], "ReturnValidationError")
+        refunds = self.returned.refunds.filter(status="POSTED")
+        self.assertEqual(refunds.count(), 1)
+        total = sum(refund.entitlement_amount for refund in refunds)
+        self.assertEqual(total, Decimal("150.00"))
