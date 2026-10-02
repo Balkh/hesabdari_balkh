@@ -162,3 +162,43 @@ class CrossCurrencyRefund(models.Model):
 
     def delete(self, *args, **kwargs):
         raise PostedImmutabilityError("Cross-currency refunds cannot be deleted")
+
+
+class SalesReturnReversal(models.Model):
+    """Immutable compensating event reversing one posted SalesReturn."""
+
+    document_number = models.CharField(max_length=30, unique=True)
+    sales_return = models.OneToOneField(
+        SalesReturn, on_delete=models.PROTECT, related_name="reversal"
+    )
+    reversal_date = models.DateField()
+    inventory_movement = models.OneToOneField(
+        "inventory.StockMovement", on_delete=models.PROTECT,
+        related_name="sales_return_reversal",
+    )
+    entitlement_reversal_journal = models.OneToOneField(
+        "accounting.JournalEntry", on_delete=models.PROTECT,
+        related_name="sales_return_entitlement_reversal",
+    )
+    cogs_reversal_journal = models.OneToOneField(
+        "accounting.JournalEntry", on_delete=models.PROTECT,
+        related_name="sales_return_cogs_reversal",
+    )
+    reason = models.CharField(max_length=500)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True,
+        on_delete=models.SET_NULL, related_name="sales_return_reversals_created",
+    )
+    idempotency_key = models.CharField(max_length=128, unique=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["reversal_date", "document_number"]
+
+    def save(self, *args, **kwargs):
+        if self.pk is not None:
+            raise PostedImmutabilityError("Sales return reversals are immutable")
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise PostedImmutabilityError("Sales return reversals cannot be deleted")
