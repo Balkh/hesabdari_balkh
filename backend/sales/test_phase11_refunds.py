@@ -152,6 +152,71 @@ class Phase11WorkflowTests(TestCase):
         self.assertEqual(cash_line.credit, Decimal("13000.00"))
         self.assertEqual(stock_for(self.product, self.warehouse), 12)
 
+    def test_same_currency_refund_reduces_the_actual_cash_currency(self):
+        _sale, line = self.make_sale(
+            currency=self.afn, payment_mode=PaymentMode.CASH,
+            document_number="P11-AFN-CASH",
+        )
+        returned = create_sales_return(
+            sale_line=line, warehouse=self.warehouse, quantity=2,
+            return_date=self.day, reason="AFN cash sale return",
+            document_number="P11-SR-AFN", idempotency_key="p11-sr-afn",
+        )
+        refund = create_refund(
+            sales_return=returned, refund_date=self.day,
+            refund_currency=self.afn, entitlement_amount="200",
+            reason="Refund in AFN", document_number="P11-RF-AFN",
+            idempotency_key="p11-rf-afn",
+        )
+        self.assertFalse(hasattr(refund, "cross_currency_refund"))
+        self.assertEqual(refund.journal_entry.currency, self.afn)
+        self.assertEqual(
+            refund.journal_entry.lines.get(account__code="1110").credit,
+            Decimal("200.00"),
+        )
+
+    def test_unpaid_credit_sale_return_reduces_receivable_without_refund(self):
+        _sale, line = self.make_sale(
+            currency=self.afn, payment_mode=PaymentMode.CREDIT,
+            document_number="P11-CREDIT",
+        )
+        returned = create_sales_return(
+            sale_line=line, warehouse=self.warehouse, quantity=2,
+            return_date=self.day, reason="Return against unpaid invoice",
+            document_number="P11-SR-CREDIT", idempotency_key="p11-sr-credit",
+        )
+        lines = {
+            row.account.code: row
+            for row in returned.entitlement_journal.lines.all()
+        }
+        self.assertEqual(lines["1310"].credit, Decimal("200.00"))
+        self.assertNotIn("2200", lines)
+        self.assertEqual(returned.refundable_amount, Decimal("0.00"))
+        self.assertEqual(returned.refunds.count(), 0)
+
+    def test_refund_idempotency_key_rejects_changed_amount(self):
+        _sale, line = self.make_sale(
+            currency=self.afn, payment_mode=PaymentMode.CASH,
+            document_number="P11-IDEM",
+        )
+        returned = create_sales_return(
+            sale_line=line, warehouse=self.warehouse, quantity=2,
+            return_date=self.day, reason="Idempotency test return",
+            document_number="P11-SR-IDEM", idempotency_key="p11-sr-idem",
+        )
+        create_refund(
+            sales_return=returned, refund_date=self.day,
+            refund_currency=self.afn, entitlement_amount="100",
+            reason="First partial refund", document_number="P11-RF-IDEM",
+            idempotency_key="p11-refund-conflict",
+        )
+        with self.assertRaises(ReturnValidationError):
+            create_refund(
+                sales_return=returned, refund_date=self.day,
+                refund_currency=self.afn, entitlement_amount="50",
+                reason="Changed amount", idempotency_key="p11-refund-conflict",
+            )
+
     def test_cross_currency_refund_requires_aggregate_reversal_and_return_can_then_reverse(self):
         _sale, line = self.make_sale(
             currency=self.usd, payment_mode=PaymentMode.CASH,
