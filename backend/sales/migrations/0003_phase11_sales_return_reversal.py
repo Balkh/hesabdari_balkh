@@ -5,7 +5,7 @@ import django.db.models.deletion
 
 class Migration(migrations.Migration):
     dependencies = [
-        ("sales", "0002_phase11_returns_refunds"),
+        ("sales", "0003_phase11_returns_refunds"),
     ]
 
     operations = [
