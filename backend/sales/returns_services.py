@@ -370,18 +370,24 @@ def create_sales_return(*, sale_line, warehouse, quantity, return_date,
 
 
 def _validate_rate(entitlement_currency, refund_currency, rate):
-    if entitlement_currency_id := getattr(entitlement_currency, "pk", None):
-        pass
     if entitlement_currency.pk == refund_currency.pk:
         if rate is not None and normalize_rate(Decimal(str(rate))) != Decimal("1.0000"):
             raise ReturnValidationError("Same-currency refund rate must be 1.0000")
-        return Decimal("1.0000"), f"{entitlement_currency.code}->{refund_currency.code}"
+        return Decimal("1.0000"), f"{entitlement_currency.code} per {refund_currency.code}"
     if rate is None:
         raise ReturnValidationError("An explicit rate is required for a cross-currency refund")
     value = normalize_rate(Decimal(str(rate)))
     if value <= 0:
         raise ReturnValidationError("Refund rate must be positive")
-    return value, f"{entitlement_currency.code}->{refund_currency.code}"
+    base = Currency.objects.filter(is_base=True).first()
+    if base and entitlement_currency.is_base != refund_currency.is_base:
+        foreign = refund_currency if entitlement_currency.is_base else entitlement_currency
+        # For AFN/USD refunds, persist the familiar market quote: base-currency
+        # units per one foreign-currency unit, regardless of refund direction.
+        direction = f"{base.code} per {foreign.code}"
+    else:
+        direction = f"{refund_currency.code} per {entitlement_currency.code}"
+    return value, direction
 
 
 def _refund_amount(entitlement_amount, entitlement_currency, refund_currency, rate):
