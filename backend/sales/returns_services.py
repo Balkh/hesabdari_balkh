@@ -526,6 +526,7 @@ def create_refund(*, sales_return, refund_date, refund_currency, entitlement_amo
         if entitlement_currency.pk == refund_currency.pk:
             entry = _same_currency_refund_journal(refund=refund, actor=actor)
             Refund.objects.filter(pk=refund.pk).update(journal_entry=entry)
+            refund.journal_entry = entry
         else:
             clearing = _usable(CLEARING_ACCOUNT)
             credit = _usable(CUSTOMER_CREDIT_ACCOUNT)
@@ -580,6 +581,7 @@ def create_refund(*, sales_return, refund_date, refund_currency, entitlement_amo
                 ),
             )
             Refund.objects.filter(pk=refund.pk).update(journal_entry=cash_entry)
+            refund.journal_entry = cash_entry
             CrossCurrencyRefund.objects.create(
                 refund=refund, entitlement_currency=entitlement_currency,
                 entitlement_amount=amount, refund_currency=refund_currency,
