@@ -176,6 +176,31 @@ class Phase11WorkflowTests(TestCase):
             Decimal("200.00"),
         )
 
+    def test_afn_return_refunded_in_usd_uses_agreed_rate_for_cash_valuation(self):
+        _sale, line = self.make_sale(
+            currency=self.afn, payment_mode=PaymentMode.CASH,
+            document_number="P11-AFN-USD",
+        )
+        returned = create_sales_return(
+            sale_line=line, warehouse=self.warehouse, quantity=2,
+            return_date=self.day, reason="AFN return refunded in USD",
+            document_number="P11-SR-AFN-USD", idempotency_key="p11-sr-afn-usd",
+        )
+        refund = create_refund(
+            sales_return=returned, refund_date=self.day,
+            refund_currency=self.usd, entitlement_amount="200",
+            rate="50", reason="Refund in USD",
+            document_number="P11-RF-AFN-USD", idempotency_key="p11-rf-afn-usd",
+        )
+        self.assertEqual(refund.refund_amount, Decimal("4.00"))
+        self.assertEqual(refund.journal_entry.currency, self.usd)
+        self.assertEqual(refund.journal_entry.rate, Decimal("50.0000"))
+        self.assertEqual(refund.journal_entry.afn_total, Decimal("200.00"))
+        self.assertEqual(
+            refund.journal_entry.lines.get(account__code="1110").credit,
+            Decimal("4.00"),
+        )
+
     def test_unpaid_credit_sale_return_reduces_receivable_without_refund(self):
         _sale, line = self.make_sale(
             currency=self.afn, payment_mode=PaymentMode.CREDIT,
@@ -289,6 +314,12 @@ class Phase11WorkflowTests(TestCase):
         cross = refund.cross_currency_refund
         with self.assertRaises(JournalValidationError):
             reverse_journal(cross.cash_journal, "Must use aggregate", None)
+        with self.assertRaises(ReturnValidationError):
+            reverse_sales_return(
+                returned, reversal_date=self.day, reason="Cannot reverse with active refund",
+                document_number="P11-SRV-ACTIVE-REFUND",
+                idempotency_key="p11-srv-active-refund",
+            )
         reverse_refund(refund, reason="Refund correction")
         reversal = reverse_sales_return(
             returned, reversal_date=self.day, reason="Return correction",
