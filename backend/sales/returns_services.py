@@ -578,8 +578,8 @@ def reverse_refund(refund, *, reason, user=None):
         if cross is not None:
             if cross.status != CrossCurrencyRefundStatus.POSTED:
                 raise ReturnValidationError("Cross-currency Refund is already reversed")
-            reverse_journal(cross.entitlement_journal, reason, actor, _allow_cross_currency_settlement=True)
-            reverse_journal(cross.cash_journal, reason, actor, _allow_cross_currency_settlement=True)
+            reverse_journal(cross.entitlement_journal, reason, actor, _allow_cross_currency_refund=True)
+            reverse_journal(cross.cash_journal, reason, actor, _allow_cross_currency_refund=True)
             CrossCurrencyRefund.objects.filter(pk=cross.pk).update(status=CrossCurrencyRefundStatus.REVERSED)
         else:
             reverse_journal(obj.journal_entry, reason, actor)
