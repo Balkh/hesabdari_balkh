@@ -87,6 +87,17 @@ def _positive_amount(value, label):
     return amount
 
 
+def _validate_idempotency_key(key, label):
+    if key is not None and (
+        not isinstance(key, str) or not key.strip() or len(key) > 128
+    ):
+        raise ReturnValidationError(f"A valid {label} idempotency key is required")
+
+
+def _child_idempotency_key(namespace, key):
+    return f"{namespace}:{hashlib.sha256(key.encode('utf-8')).hexdigest()}"
+
+
 def _usable(code):
     try:
         account = Account.objects.get(code=code)
@@ -251,6 +262,7 @@ def create_sales_return(*, sale_line, warehouse, quantity, return_date,
                         reason, user=None, document_number=None,
                         idempotency_key=None, acknowledge_negative=False):
     actor = _actor(user)
+    _validate_idempotency_key(idempotency_key, "sales return")
     day = _day(return_date)
     if not isinstance(reason, str) or not reason.strip():
         raise ReturnValidationError("A return reason is required")
@@ -318,7 +330,10 @@ def create_sales_return(*, sale_line, warehouse, quantity, return_date,
             )
 
         warehouse_obj = source.warehouse
-        inventory_key = f"{idempotency_key}:inventory" if idempotency_key else None
+        inventory_key = (
+            _child_idempotency_key("sales-return-inventory", idempotency_key)
+            if idempotency_key else None
+        )
         inv = inventory_sales_return(
             product=line.product,
             warehouse=warehouse_obj,
@@ -455,6 +470,7 @@ def create_refund(*, sales_return, refund_date, refund_currency, entitlement_amo
                   rate=None, reason="", user=None, document_number=None,
                   idempotency_key=None):
     actor = _actor(user)
+    _validate_idempotency_key(idempotency_key, "refund")
     day = _day(refund_date)
     if not isinstance(reason, str):
         raise ReturnValidationError("Refund reason must be text")
@@ -619,6 +635,7 @@ def reverse_sales_return(sales_return, *, reversal_date, reason, user=None,
     immutable. Any active refunds must be reversed before the return itself.
     """
     actor = _actor(user)
+    _validate_idempotency_key(idempotency_key, "sales return reversal")
     day = _day(reversal_date)
     if not isinstance(reason, str) or not reason.strip():
         raise ReturnValidationError("A return reversal reason is required")
@@ -672,9 +689,7 @@ def reverse_sales_return(sales_return, *, reversal_date, reason, user=None,
             raise ReturnValidationError("Return reversal document number already exists")
 
         key = idempotency_key or f"sales-return-reversal:{document_number}"
-        stock_key = "sales-return-reversal-stock:" + hashlib.sha256(
-            key.encode("utf-8")
-        ).hexdigest()
+        stock_key = _child_idempotency_key("sales-return-reversal-stock", key)
         movement = reverse_sales_return_stock(
             inventory_return=ret.inventory_return,
             movement_date=day,
