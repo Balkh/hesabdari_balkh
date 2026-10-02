@@ -606,7 +606,12 @@ def create_refund(*, sales_return, refund_date, refund_currency, entitlement_amo
 def reverse_refund(refund, *, reason, user=None):
     actor = _actor(user)
     with transaction.atomic():
-        obj = Refund.objects.select_for_update().select_related("sales_return", "journal_entry").get(pk=getattr(refund, "pk", refund))
+        # journal_entry is nullable for a newly created Refund; lock only
+        # the Refund row so PostgreSQL does not try to lock the nullable side
+        # of the LEFT OUTER JOIN introduced by select_related().
+        obj = Refund.objects.select_for_update(of=("self",)).select_related(
+            "sales_return", "journal_entry"
+        ).get(pk=getattr(refund, "pk", refund))
         if obj.status != RefundStatus.POSTED:
             raise ReturnValidationError("Only a posted Refund can be reversed")
         cross = getattr(obj, "cross_currency_refund", None)
