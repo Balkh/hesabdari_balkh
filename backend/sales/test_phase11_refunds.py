@@ -9,7 +9,7 @@ from accounting.models import Account
 from accounting.services import JournalValidationError
 from categories.services import create_category
 from currencies.models import Currency
-from inventory.services import assign_warehouse_account, receive_stock
+from inventory.services import assign_warehouse_account, issue_stock, receive_stock
 from inventory.stock import stock_for
 from parties.services import create_party
 from products.services import create_product
@@ -194,6 +194,29 @@ class Phase11WorkflowTests(TestCase):
         self.assertNotIn("2200", lines)
         self.assertEqual(returned.refundable_amount, Decimal("0.00"))
         self.assertEqual(returned.refunds.count(), 0)
+
+    def test_return_reversal_is_blocked_when_returned_quantity_is_no_longer_in_stock(self):
+        _sale, line = self.make_sale(
+            currency=self.afn, payment_mode=PaymentMode.CASH,
+            document_number="P11-STOCK-GUARD",
+        )
+        returned = create_sales_return(
+            sale_line=line, warehouse=self.warehouse, quantity=2,
+            return_date=self.day, reason="Return requiring stock guard",
+            document_number="P11-SR-STOCK-GUARD",
+            idempotency_key="p11-sr-stock-guard",
+        )
+        issue_stock(
+            product=self.product, warehouse=self.warehouse, quantity=11,
+            movement_date=self.day, reference="P11-LATER-ISSUE",
+            description="Subsequent dispatch consumes returned stock",
+        )
+        with self.assertRaises(ReturnValidationError):
+            reverse_sales_return(
+                returned, reversal_date=self.day, reason="Cannot remove absent stock",
+                document_number="P11-SRV-STOCK-GUARD",
+                idempotency_key="p11-srv-stock-guard",
+            )
 
     def test_refund_idempotency_key_rejects_changed_amount(self):
         _sale, line = self.make_sale(
