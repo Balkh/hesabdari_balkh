@@ -172,15 +172,26 @@ def _remaining_line_entitlement(sale_line):
 
 
 def _returned_entitlement_amount(sale_line, quantity):
-    remaining = _remaining_line_entitlement(sale_line)
-    if remaining <= 0:
+    prior = SalesReturn.objects.filter(
+        sale_line=sale_line, status=SalesReturnStatus.POSTED
+    ).aggregate(quantity=Sum("quantity"), amount=Sum("entitlement_amount"))
+    returned_quantity = int(prior["quantity"] or 0)
+    remaining_quantity = sale_line.quantity - returned_quantity
+    remaining_amount = quantize_half_up(
+        sale_line.net_total - (prior["amount"] or Decimal("0.00")), 2
+    )
+    if quantity > remaining_quantity:
+        raise ReturnValidationError("Return quantity exceeds the remaining Sale Line quantity")
+    if remaining_amount <= 0:
         raise ReturnValidationError("No financial entitlement remains for this Sale Line")
-    # Allocate the line's financial value proportionally; the final return
-    # receives the exact remainder, preventing rounding leakage.
+    # Proportional rounding is used for partial returns. The final return of
+    # the entire sold line receives the exact remainder, avoiding penny leakage.
+    if quantity == remaining_quantity:
+        return remaining_amount
     proportional = quantize_half_up(
         sale_line.net_total * Decimal(quantity) / Decimal(sale_line.quantity), 2
     )
-    return min(proportional, remaining)
+    return min(proportional, remaining_amount)
 
 
 def _post_entitlement_journal(*, sale, customer, amount, posting_day, reference, actor):
@@ -251,8 +262,13 @@ def create_sales_return(*, sale_line, warehouse, quantity, return_date,
             existing = SalesReturn.objects.filter(idempotency_key=idempotency_key).first()
             if existing:
                 if (
-                    existing.sale_line_id != line.pk or existing.quantity != quantity
-                    or existing.return_date != day or existing.reason != reason
+                    existing.sale_line_id != line.pk
+                    or existing.warehouse_id != warehouse.pk
+                    or existing.quantity != quantity
+                    or existing.return_date != day
+                    or existing.reason != reason
+                    or existing.created_by_id != (actor.pk if actor else None)
+                    or (document_number is not None and existing.document_number != document_number)
                 ):
                     raise ReturnValidationError("This idempotency key was used for a different return")
                 return existing
@@ -427,22 +443,33 @@ def create_refund(*, sales_return, refund_date, refund_currency, entitlement_amo
         if ret.status != SalesReturnStatus.POSTED:
             raise ReturnValidationError("Only a posted Sales Return can be refunded")
         assert_posting_date_open(day)
-        if idempotency_key:
-            existing = Refund.objects.filter(idempotency_key=idempotency_key).first()
-            if existing:
-                if existing.sales_return_id != ret.pk:
-                    raise ReturnValidationError("This idempotency key was used for a different refund")
-                return existing
         entitlement_currency = ret.entitlement_currency
         refund_currency = _currency(refund_currency)
         amount = _positive_amount(entitlement_amount, "Refund entitlement amount")
+        rate_value, direction = _validate_rate(entitlement_currency, refund_currency, rate)
+        refund_amount = _refund_amount(amount, entitlement_currency, refund_currency, rate_value)
+        if idempotency_key:
+            existing = Refund.objects.filter(idempotency_key=idempotency_key).first()
+            if existing:
+                if (
+                    existing.sales_return_id != ret.pk
+                    or existing.refund_date != day
+                    or existing.entitlement_amount != amount
+                    or existing.refund_currency_id != refund_currency.pk
+                    or existing.refund_amount != refund_amount
+                    or existing.agreed_rate != rate_value
+                    or existing.rate_direction != direction
+                    or existing.reason != reason
+                    or existing.created_by_id != (actor.pk if actor else None)
+                    or (document_number is not None and existing.document_number != document_number)
+                ):
+                    raise ReturnValidationError("This idempotency key was used for a different refund")
+                return existing
         remaining = _remaining_refundable(ret)
         if amount > remaining:
             raise ReturnValidationError(
                 f"Refund exceeds remaining refundable entitlement ({remaining})"
             )
-        rate_value, direction = _validate_rate(entitlement_currency, refund_currency, rate)
-        refund_amount = _refund_amount(amount, entitlement_currency, refund_currency, rate_value)
         if document_number is None:
             document_number = next_document_number("RF", _jalali_year(day))
         if Refund.objects.filter(document_number=document_number).exists():
@@ -498,11 +525,20 @@ def create_refund(*, sales_return, refund_date, refund_currency, entitlement_amo
                 source_type="REFUND_CROSS_CURRENCY",
                 source_id=document_number,
                 currency=refund_currency,
-                rate=Decimal("1.0000") if refund_currency.is_base else None,
-                rate_date=day if refund_currency.is_base else None,
+                rate=(
+                    Decimal("1.0000") if refund_currency.is_base
+                    else rate_value if entitlement_currency.is_base
+                    else None
+                ),
+                rate_date=(
+                    day if refund_currency.is_base or entitlement_currency.is_base
+                    else None
+                ),
                 created_by=actor,
                 idempotency_key=f"refund:{document_number}:cash",
-                allow_unvalued_foreign=not refund_currency.is_base,
+                allow_unvalued_foreign=(
+                    not refund_currency.is_base and not entitlement_currency.is_base
+                ),
             )
             Refund.objects.filter(pk=refund.pk).update(journal_entry=cash_entry)
             CrossCurrencyRefund.objects.create(
