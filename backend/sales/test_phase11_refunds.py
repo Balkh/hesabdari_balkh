@@ -16,7 +16,7 @@ from products.services import create_product
 from uom.services import create_uom
 from warehouses.services import create_warehouse
 
-from .models import PaymentMode, SalesChannel, SalesReturnStatus
+from .models import PaymentMode, RefundStatus, SalesChannel, SalesReturnStatus
 from .returns_services import (
     ReturnValidationError,
     _allocate_return_entitlement,
@@ -320,7 +320,8 @@ class Phase11WorkflowTests(TestCase):
                 document_number="P11-SRV-ACTIVE-REFUND",
                 idempotency_key="p11-srv-active-refund",
             )
-        reverse_refund(refund, reason="Refund correction")
+        reversed_refund = reverse_refund(refund, reason="Refund correction")
+        self.assertEqual(reversed_refund.status, RefundStatus.REVERSED)
         reversal = reverse_sales_return(
             returned, reversal_date=self.day, reason="Return correction",
             document_number="P11-SRV-1", idempotency_key="p11-srv-1",
