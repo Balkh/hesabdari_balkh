@@ -255,7 +255,7 @@ def _jalali_year(value):
     return int(gregorian_to_jalali(_as_date(value, "posting_date")).split("/")[0])
 
 
-def reverse_journal(entry, reason, user, *, _allow_cross_currency_settlement=False):
+def reverse_journal(entry, reason, user, *, _allow_cross_currency_settlement=False, _allow_cross_currency_refund=False):
     """Reverse a POSTED entry with a balanced mirror entry (Stage 2.3, §1.9/G4).
 
     The original keeps every financial field and line byte-identical; only its
@@ -272,9 +272,19 @@ def reverse_journal(entry, reason, user, *, _allow_cross_currency_settlement=Fal
     with transaction.atomic():
         try:
             original = JournalEntry.objects.select_for_update().get(pk=entry.pk)
-            if (not _allow_cross_currency_settlement) and (hasattr(original, "cross_currency_cash_settlement") or hasattr(original, "cross_currency_receivable_settlement")):
+            if (not _allow_cross_currency_settlement) and (
+                hasattr(original, "cross_currency_cash_settlement")
+                or hasattr(original, "cross_currency_receivable_settlement")
+            ):
                 raise JournalValidationError(
                     "Cross-currency settlement journal legs must be reversed through the settlement aggregate."
+                )
+            if (not _allow_cross_currency_refund) and (
+                hasattr(original, "cross_currency_refund_entitlement")
+                or hasattr(original, "cross_currency_refund_cash")
+            ):
+                raise JournalValidationError(
+                    "Cross-currency refund journal legs must be reversed through the refund aggregate."
                 )
             payment_document = getattr(original, "payment_document", None)
             if (not _allow_cross_currency_settlement) and payment_document is not None and hasattr(payment_document, "cross_currency_settlement"):
