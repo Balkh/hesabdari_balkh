@@ -24,6 +24,7 @@ from documents.services import next_document_number
 from fiscal_periods.services import assert_posting_date_open
 from inventory.models import InventoryReturn, MovementType, StockMovement
 from inventory.services import sales_return as inventory_sales_return
+from inventory.services import reverse_sales_return_stock
 from inventory.services import resolve_warehouse_account
 from warehouses.services import resolve_warehouse
 from party_ledger.models import BalanceType, PartyLedgerAttribution, PARTY_LEDGER_ACCOUNTS
@@ -32,7 +33,7 @@ from security.models import AuditAction
 from security.services import record_audit_event
 
 from .models import (
-    CrossCurrencyRefund, CrossCurrencyRefundStatus,
+    CrossCurrencyRefund, CrossCurrencyRefundStatus, SalesReturnReversal,
     PaymentMode, Refund, RefundStatus,
     SaleStatus, SalesReturn, SalesReturnStatus,
 )
@@ -135,9 +136,10 @@ def _remaining_released_quantity(sale_line):
         return_type="SALES_RETURN",
         product=sale_line.product,
         party=sale_line.sale.customer,
-    ).filter(
         source_movement__warehouse_checks__sale_line=sale_line,
-    ).aggregate(v=Sum("quantity"))["v"] or 0
+    ).exclude(sales_return__status=SalesReturnStatus.REVERSED).aggregate(
+        v=Sum("quantity")
+    )["v"] or 0
     return int(abs(released)) - int(returned)
 
 
@@ -294,7 +296,11 @@ def create_sales_return(*, sale_line, warehouse, quantity, return_date,
         )
         source = None
         for candidate in source_rows:
-            used = InventoryReturn.objects.filter(source_movement=candidate).aggregate(v=Sum("quantity"))["v"] or 0
+            used = InventoryReturn.objects.filter(
+                source_movement=candidate
+            ).exclude(sales_return__status=SalesReturnStatus.REVERSED).aggregate(
+                v=Sum("quantity")
+            )["v"] or 0
             if abs(candidate.quantity) - int(used) >= quantity:
                 source = candidate
                 break
@@ -592,3 +598,106 @@ def reverse_refund(refund, *, reason, user=None):
             reason=reason,
         )
         return obj
+
+
+def reverse_sales_return(sales_return, *, reversal_date, reason, user=None,
+                          document_number=None, idempotency_key=None):
+    """Reverse a posted return through compensating stock and journal events.
+
+    The original Sale, InventoryReturn, stock movements, and journals remain
+    immutable. Any active refunds must be reversed before the return itself.
+    """
+    actor = _actor(user)
+    day = _day(reversal_date)
+    if not isinstance(reason, str) or not reason.strip():
+        raise ReturnValidationError("A return reversal reason is required")
+    reason = reason.strip()
+    if len(reason) > 500:
+        raise ReturnValidationError("Return reversal reason must be at most 500 characters")
+    if idempotency_key is not None and (
+        not isinstance(idempotency_key, str) or not idempotency_key
+        or len(idempotency_key) > 128
+    ):
+        raise ReturnValidationError("A valid idempotency key is required")
+
+    with transaction.atomic():
+        ret = SalesReturn.objects.select_for_update().select_related(
+            "sale__customer", "inventory_return", "entitlement_journal", "cogs_journal"
+        ).get(pk=getattr(sales_return, "pk", sales_return))
+        existing = None
+        if idempotency_key:
+            existing = SalesReturnReversal.objects.filter(
+                idempotency_key=idempotency_key
+            ).first()
+        if existing:
+            if (
+                existing.sales_return_id != ret.pk
+                or existing.reversal_date != day
+                or existing.reason != reason
+                or existing.created_by_id != (actor.pk if actor else None)
+                or (document_number is not None and existing.document_number != document_number)
+            ):
+                raise ReturnValidationError(
+                    "This idempotency key was used for a different return reversal"
+                )
+            return existing
+
+        if ret.status != SalesReturnStatus.POSTED:
+            raise ReturnValidationError("Only a posted Sales Return can be reversed")
+        if ret.refunds.filter(status=RefundStatus.POSTED).exists():
+            raise ReturnValidationError(
+                "Reverse all posted Refunds before reversing the Sales Return"
+            )
+        assert_posting_date_open(day)
+
+        if document_number is None:
+            document_number = next_document_number("SRV", _jalali_year(day))
+        if not isinstance(document_number, str) or not document_number.strip():
+            raise ReturnValidationError("A reversal document number is required")
+        document_number = document_number.strip()
+        if len(document_number) > 30:
+            raise ReturnValidationError("Reversal document number must be at most 30 characters")
+        if SalesReturnReversal.objects.filter(document_number=document_number).exists():
+            raise ReturnValidationError("Return reversal document number already exists")
+
+        key = idempotency_key or f"sales-return-reversal:{document_number}"
+        movement = reverse_sales_return_stock(
+            inventory_return=ret.inventory_return,
+            movement_date=day,
+            reference=document_number,
+            description=reason,
+            user=actor,
+            idempotency_key=f"{key}:inventory",
+        )
+        entitlement_reversal = reverse_journal(
+            ret.entitlement_journal, reason, actor
+        )
+        cogs_reversal = reverse_journal(ret.cogs_journal, reason, actor)
+
+        reversal = SalesReturnReversal.objects.create(
+            document_number=document_number,
+            sales_return=ret,
+            reversal_date=day,
+            inventory_movement=movement,
+            entitlement_reversal_journal=entitlement_reversal,
+            cogs_reversal_journal=cogs_reversal,
+            reason=reason,
+            created_by=actor,
+            idempotency_key=key,
+        )
+        SalesReturn.objects.filter(pk=ret.pk).update(status=SalesReturnStatus.REVERSED)
+        record_audit_event(
+            user=actor, action=AuditAction.REVERSE, entity="SalesReturn",
+            entity_id=ret.pk, reference=ret.document_number,
+            previous_state={"status": SalesReturnStatus.POSTED},
+            new_state={
+                "status": SalesReturnStatus.REVERSED,
+                "reversal_id": reversal.pk,
+                "reversal_document_number": reversal.document_number,
+                "inventory_movement_id": movement.pk,
+                "entitlement_reversal_journal_id": entitlement_reversal.pk,
+                "cogs_reversal_journal_id": cogs_reversal.pk,
+            },
+            reason=reason,
+        )
+        return reversal
