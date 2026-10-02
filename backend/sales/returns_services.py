@@ -173,15 +173,10 @@ def _remaining_line_entitlement(sale_line):
     return quantize_half_up(sale_line.net_total - returned, 2)
 
 
-def _returned_entitlement_amount(sale_line, quantity):
-    prior = SalesReturn.objects.filter(
-        sale_line=sale_line, status=SalesReturnStatus.POSTED
-    ).aggregate(quantity=Sum("quantity"), amount=Sum("entitlement_amount"))
-    returned_quantity = int(prior["quantity"] or 0)
-    remaining_quantity = sale_line.quantity - returned_quantity
-    remaining_amount = quantize_half_up(
-        sale_line.net_total - (prior["amount"] or Decimal("0.00")), 2
-    )
+def _allocate_return_entitlement(*, net_total, sale_quantity, returned_quantity,
+                                  prior_amount, quantity):
+    remaining_quantity = sale_quantity - returned_quantity
+    remaining_amount = quantize_half_up(net_total - prior_amount, 2)
     if quantity > remaining_quantity:
         raise ReturnValidationError("Return quantity exceeds the remaining Sale Line quantity")
     if remaining_amount <= 0:
@@ -191,9 +186,22 @@ def _returned_entitlement_amount(sale_line, quantity):
     if quantity == remaining_quantity:
         return remaining_amount
     proportional = quantize_half_up(
-        sale_line.net_total * Decimal(quantity) / Decimal(sale_line.quantity), 2
+        net_total * Decimal(quantity) / Decimal(sale_quantity), 2
     )
     return min(proportional, remaining_amount)
+
+
+def _returned_entitlement_amount(sale_line, quantity):
+    prior = SalesReturn.objects.filter(
+        sale_line=sale_line, status=SalesReturnStatus.POSTED
+    ).aggregate(quantity=Sum("quantity"), amount=Sum("entitlement_amount"))
+    return _allocate_return_entitlement(
+        net_total=sale_line.net_total,
+        sale_quantity=sale_line.quantity,
+        returned_quantity=int(prior["quantity"] or 0),
+        prior_amount=prior["amount"] or Decimal("0.00"),
+        quantity=quantity,
+    )
 
 
 def _post_entitlement_journal(*, sale, customer, amount, posting_day, reference, actor):
@@ -382,7 +390,10 @@ def _validate_rate(entitlement_currency, refund_currency, rate):
         return Decimal("1.0000"), f"{entitlement_currency.code} per {refund_currency.code}"
     if rate is None:
         raise ReturnValidationError("An explicit rate is required for a cross-currency refund")
-    value = normalize_rate(Decimal(str(rate)))
+    try:
+        value = normalize_rate(Decimal(str(rate)))
+    except (InvalidOperation, TypeError, ValueError, ArithmeticError) as exc:
+        raise ReturnValidationError("Refund rate must be a valid positive number") from exc
     if value <= 0:
         raise ReturnValidationError("Refund rate must be positive")
     base = Currency.objects.filter(is_base=True).first()
