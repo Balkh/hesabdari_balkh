@@ -621,9 +621,11 @@ def reverse_refund(refund, *, reason, user=None):
             reverse_journal(cross.entitlement_journal, reason, actor, _allow_cross_currency_refund=True)
             reverse_journal(cross.cash_journal, reason, actor, _allow_cross_currency_refund=True)
             CrossCurrencyRefund.objects.filter(pk=cross.pk).update(status=CrossCurrencyRefundStatus.REVERSED)
+            cross.status = CrossCurrencyRefundStatus.REVERSED
         else:
             reverse_journal(obj.journal_entry, reason, actor)
         Refund.objects.filter(pk=obj.pk).update(status=RefundStatus.REVERSED)
+        obj.status = RefundStatus.REVERSED
         record_audit_event(
             user=actor, action=AuditAction.REVERSE, entity="Refund",
             entity_id=obj.pk, reference=obj.document_number,
