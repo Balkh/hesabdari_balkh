@@ -13,12 +13,10 @@ from decimal import Decimal, InvalidOperation
 
 from django.db import transaction
 from django.db.models import Sum
-from django.utils import timezone
 
-from accounting.models import Account, JournalStatus
+from accounting.models import Account
 from accounting.services import post_journal, reverse_journal
 from core.dates import gregorian_to_jalali
-from core.idempotency import DuplicateOperationError, IdempotencyRecord, idempotent_operation
 from core.money import quantize_half_up, normalize_rate
 from currencies.models import Currency
 from documents.services import next_document_number
@@ -28,7 +26,7 @@ from inventory.services import sales_return as inventory_sales_return
 from inventory.services import _reverse_sales_return_stock
 from inventory.services import resolve_warehouse_account
 from warehouses.services import resolve_warehouse
-from party_ledger.models import BalanceType, PartyLedgerAttribution, PARTY_LEDGER_ACCOUNTS
+
 from party_ledger.services import attribute_journal_line
 from security.models import AuditAction
 from security.services import record_audit_event
@@ -110,28 +108,6 @@ def _usable(code):
 
 def _jalali_year(day):
     return int(gregorian_to_jalali(day).split("/")[0])
-
-
-def _posted_party_balance(party, currency, account_code):
-    """Current posted balance for one party/account/currency.
-
-    This deliberately reads the existing Party Ledger attribution rather than
-    introducing another balance engine. Reversed journals are excluded; their
-    original financial effect is therefore removed from the live balance.
-    """
-    qs = PartyLedgerAttribution.objects.filter(
-        party=party,
-        journal_line__account__code=account_code,
-        journal_line__entry__currency=currency,
-        journal_line__entry__status=JournalStatus.POSTED,
-    )
-    debit = qs.aggregate(v=Sum("journal_line__debit"))["v"] or Decimal("0")
-    credit = qs.aggregate(v=Sum("journal_line__credit"))["v"] or Decimal("0")
-    if account_code == RECEIVABLE_ACCOUNT:
-        return debit - credit
-    if account_code == CUSTOMER_CREDIT_ACCOUNT:
-        return credit - debit
-    raise ReturnValidationError("Unsupported party balance account")
 
 
 def _remaining_released_quantity(sale_line):
