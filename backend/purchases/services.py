@@ -409,6 +409,12 @@ def _post_effects(purchase, actor, idempotency_key):
                                  movement_date=purchase.purchase_date, reference=movement_reference,
                                  description=purchase.description, user=actor, party=purchase.supplier,
                                  idempotency_key=f"{purchase.document_number}:line:{line.pk}")
+        # A purchase receipt is the authoritative real-cost event that resolves
+        # any earlier negative-stock Sales COGS obligation for the same
+        # (product, warehouse). Keep this inside the purchase transaction so
+        # receipt + COGS adjustment are atomic.
+        from sales.services import resolve_negative_obligations
+        resolve_negative_obligations(receipt_movement=movement)
         movement_ids.append(movement.pk)
         movement_references.append(movement.reference)
     previous = _snapshot(purchase)
