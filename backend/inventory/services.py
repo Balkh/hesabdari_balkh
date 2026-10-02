@@ -1238,7 +1238,11 @@ def _post_return(*, return_type, source_type, movement_type, party_role,
     )
     if units > source.quantity.__abs__():
         raise InventoryValidationError("Return quantity exceeds the source quantity.")
-    already = InventoryReturn.objects.filter(source_movement=source).aggregate(
+    # A reversed SalesReturn no longer consumes the source issue's
+    # returnable quantity; the compensating outbound movement restores it.
+    already = InventoryReturn.objects.filter(
+        source_movement=source
+    ).exclude(sales_return__status="REVERSED").aggregate(
         total=Sum("quantity")
     )["total"] or 0
     remaining = abs(source.quantity) - int(already)
