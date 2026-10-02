@@ -148,4 +148,4 @@ class COGSAdjustment(models.Model):
 
 
 # Phase 11 models live in a separate module to keep the existing Sales models readable.
-from .returns_models import CrossCurrencyRefund, CrossCurrencyRefundStatus, Refund, RefundStatus, SalesReturn, SalesReturnStatus
+from .returns_models import CrossCurrencyRefund, CrossCurrencyRefundStatus, Refund, RefundStatus, SalesReturn, SalesReturnReversal, SalesReturnStatus
