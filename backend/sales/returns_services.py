@@ -141,6 +141,29 @@ def _remaining_released_quantity(sale_line):
     return int(abs(released)) - int(returned)
 
 
+def _remaining_invoice_receivable(sale):
+    """Outstanding receivable attributable to this invoice, not the whole customer.
+
+    Phase 10A allocations are the authoritative link between payments and a
+    specific credit Sale. Prior posted Returns may already have reduced that
+    invoice's receivable; only the portion not converted to customer credit
+    counts as a prior receivable reduction.
+    """
+    from allocations.services import invoice_outstanding
+
+    outstanding = invoice_outstanding(sale)
+    prior = SalesReturn.objects.filter(
+        sale=sale, status=SalesReturnStatus.POSTED
+    ).aggregate(
+        entitlement=Sum("entitlement_amount"),
+        refundable=Sum("refundable_amount"),
+    )
+    prior_entitlement = prior["entitlement"] or Decimal("0.00")
+    prior_refundable = prior["refundable"] or Decimal("0.00")
+    prior_receivable_reduction = prior_entitlement - prior_refundable
+    return max(quantize_half_up(outstanding - prior_receivable_reduction, 2), Decimal("0.00"))
+
+
 def _remaining_line_entitlement(sale_line):
     returned = SalesReturn.objects.filter(
         sale_line=sale_line, status=SalesReturnStatus.POSTED
@@ -164,7 +187,9 @@ def _post_entitlement_journal(*, sale, customer, amount, posting_day, reference,
     returns = _usable(RETURN_ACCOUNT)
     receivable = _usable(RECEIVABLE_ACCOUNT)
     credit = _usable(CUSTOMER_CREDIT_ACCOUNT)
-    remaining_receivable = _posted_party_balance(customer, sale.currency, RECEIVABLE_ACCOUNT)
+    # Never use the customer's aggregate 1310 balance here: it may include
+    # unrelated invoices. Return can reduce only this Sale's outstanding amount.
+    remaining_receivable = _remaining_invoice_receivable(sale)
 
     receivable_amount = Decimal("0.00")
     credit_amount = amount
