@@ -5,7 +5,8 @@ from types import SimpleNamespace
 from django.test import SimpleTestCase, TestCase
 
 from accounting.coa import seed_chart_of_accounts
-from accounting.models import Account, JournalValidationError
+from accounting.models import Account
+from accounting.services import JournalValidationError
 from categories.services import create_category
 from currencies.models import Currency
 from inventory.services import receive_stock
