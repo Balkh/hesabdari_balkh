@@ -25,7 +25,7 @@ from documents.services import next_document_number
 from fiscal_periods.services import assert_posting_date_open
 from inventory.models import InventoryReturn, MovementType, StockMovement
 from inventory.services import sales_return as inventory_sales_return
-from inventory.services import reverse_sales_return_stock
+from inventory.services import _reverse_sales_return_stock
 from inventory.services import resolve_warehouse_account
 from warehouses.services import resolve_warehouse
 from party_ledger.models import BalanceType, PartyLedgerAttribution, PARTY_LEDGER_ACCOUNTS
@@ -699,7 +699,7 @@ def reverse_sales_return(sales_return, *, reversal_date, reason, user=None,
 
         key = idempotency_key or f"sales-return-reversal:{document_number}"
         stock_key = _child_idempotency_key("sales-return-reversal-stock", key)
-        movement = reverse_sales_return_stock(
+        movement = _reverse_sales_return_stock(
             inventory_return=ret.inventory_return,
             movement_date=day,
             reference=document_number,
