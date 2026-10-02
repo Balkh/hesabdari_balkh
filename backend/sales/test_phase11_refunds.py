@@ -241,6 +241,35 @@ class Phase11WorkflowTests(TestCase):
                 reason="Changed amount", idempotency_key="p11-refund-conflict",
             )
 
+    def test_multiple_partial_refunds_cannot_exceed_return_entitlement(self):
+        _sale, line = self.make_sale(
+            currency=self.afn, payment_mode=PaymentMode.CASH,
+            document_number="P11-PARTIAL-REFUNDS",
+        )
+        returned = create_sales_return(
+            sale_line=line, warehouse=self.warehouse, quantity=2,
+            return_date=self.day, reason="Partial refund limit",
+            document_number="P11-SR-PARTIAL", idempotency_key="p11-sr-partial",
+        )
+        first = create_refund(
+            sales_return=returned, refund_date=self.day,
+            refund_currency=self.afn, entitlement_amount="75",
+            document_number="P11-RF-PARTIAL-1", idempotency_key="p11-rf-partial-1",
+        )
+        second = create_refund(
+            sales_return=returned, refund_date=self.day,
+            refund_currency=self.afn, entitlement_amount="125",
+            document_number="P11-RF-PARTIAL-2", idempotency_key="p11-rf-partial-2",
+        )
+        self.assertEqual(first.refund_amount + second.refund_amount, Decimal("200.00"))
+        self.assertEqual(returned.refunds.filter(status="POSTED").count(), 2)
+        with self.assertRaises(ReturnValidationError):
+            create_refund(
+                sales_return=returned, refund_date=self.day,
+                refund_currency=self.afn, entitlement_amount="0.01",
+                idempotency_key="p11-rf-partial-over",
+            )
+
     def test_cross_currency_refund_requires_aggregate_reversal_and_return_can_then_reverse(self):
         _sale, line = self.make_sale(
             currency=self.usd, payment_mode=PaymentMode.CASH,
