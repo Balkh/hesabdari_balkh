@@ -209,13 +209,12 @@ def _post_entitlement_journal(*, sale, customer, amount, posting_day, reference,
     returns = _usable(RETURN_ACCOUNT)
     receivable = _usable(RECEIVABLE_ACCOUNT)
     credit = _usable(CUSTOMER_CREDIT_ACCOUNT)
-    # Never use the customer's aggregate 1310 balance here: it may include
-    # unrelated invoices. Return can reduce only this Sale's outstanding amount.
-    remaining_receivable = _remaining_invoice_receivable(sale)
-
     receivable_amount = Decimal("0.00")
     credit_amount = amount
     if sale.payment_mode == PaymentMode.CREDIT:
+        # Never use the customer's aggregate 1310 balance here: it may include
+        # unrelated invoices. Return can reduce only this Sale's outstanding amount.
+        remaining_receivable = _remaining_invoice_receivable(sale)
         receivable_amount = min(amount, max(remaining_receivable, Decimal("0.00")))
         credit_amount = amount - receivable_amount
 
