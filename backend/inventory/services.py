@@ -1412,7 +1412,7 @@ def customer_dispatch(*, product, warehouse, customer, quantity,
     )
 
 @transaction.atomic
-def reverse_sales_return_stock(*, inventory_return, movement_date, reference,
+def _reverse_sales_return_stock(*, inventory_return, movement_date, reference,
                                description, user=None, idempotency_key=None):
     """Compensate a posted sales return with a new immutable outbound movement.
 
