@@ -1406,3 +1406,62 @@ def customer_dispatch(*, product, warehouse, customer, quantity,
         temporary_rate_date=temporary_rate_date,
         party=resolved_customer,
     )
+
+@transaction.atomic
+def reverse_sales_return_stock(*, inventory_return, movement_date, reference,
+                               description, user=None, idempotency_key=None):
+    """Compensate a posted sales return with a new immutable outbound movement.
+
+    This does not edit/delete the original return or movement. It preserves the
+    original return's cost snapshot and refuses to reverse goods no longer
+    present in the same warehouse.
+    """
+    actor = _require_actor(user, "reverse sales return stock")
+    day = _coerce_day(movement_date)
+    assert_posting_date_open(day)
+    clean_reference = _clean_reference(reference)
+    clean_description = _clean_description(description)
+    if not clean_description:
+        raise InventoryValidationError("A reversal reason/description is required.")
+
+    if isinstance(inventory_return, InventoryReturn):
+        return_record = inventory_return
+    else:
+        try:
+            return_record = InventoryReturn.objects.get(pk=inventory_return)
+        except (InventoryReturn.DoesNotExist, ValueError, TypeError):
+            raise InventoryValidationError("Inventory return does not exist.") from None
+    if return_record.return_type != "SALES_RETURN":
+        raise InventoryValidationError("Only a sales return can be reversed through this service.")
+
+    original = StockMovement.objects.select_for_update().select_related(
+        "product", "warehouse", "currency"
+    ).get(pk=return_record.return_movement_id)
+    if original.movement_type != MovementType.SALES_RETURN:
+        raise InventoryValidationError("The linked movement is not a sales return movement.")
+
+    product, warehouse = _lock_stock_identity(original.product, original.warehouse)
+    current = stock_for(product, warehouse)
+    if current < return_record.quantity:
+        raise InventoryValidationError(
+            "Cannot reverse this return because some returned goods are no longer in this warehouse."
+        )
+
+    return _post_movement(
+        movement_type=MovementType.SALES_ISSUE,
+        product=product,
+        warehouse=warehouse,
+        signed_quantity=-return_record.quantity,
+        movement_day=day,
+        currency=original.currency,
+        unit_cost=original.unit_cost,
+        rate_value=original.rate,
+        rate_day=original.rate_date,
+        reference=clean_reference,
+        description=clean_description,
+        actor=actor,
+        is_temporary_cost=original.is_temporary_cost,
+        idempotency_key=idempotency_key,
+        audit_reason="Sales return reversal; original cost basis preserved",
+        source_party=return_record.party,
+    )
