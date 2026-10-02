@@ -9,12 +9,12 @@ from accounting.models import Account
 from accounting.services import JournalValidationError
 from categories.services import create_category
 from currencies.models import Currency
-from inventory.services import receive_stock
+from inventory.services import assign_warehouse_account, receive_stock
 from inventory.stock import stock_for
 from parties.services import create_party
 from products.services import create_product
 from uom.services import create_uom
-from warehouses.services import assign_warehouse_account, create_warehouse
+from warehouses.services import create_warehouse
 
 from .models import PaymentMode, SalesChannel, SalesReturnStatus
 from .returns_services import (
