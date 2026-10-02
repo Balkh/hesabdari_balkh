@@ -7,6 +7,7 @@ Physical stock is delegated to inventory.services.sales_return().
 Accounting is delegated to accounting.services.post_journal()/reverse_journal().
 Customer attribution is delegated to party_ledger.services.attribute_journal_line().
 """
+import hashlib
 from datetime import date as date_class
 from decimal import Decimal, InvalidOperation
 
@@ -672,13 +673,16 @@ def reverse_sales_return(sales_return, *, reversal_date, reason, user=None,
             raise ReturnValidationError("Return reversal document number already exists")
 
         key = idempotency_key or f"sales-return-reversal:{document_number}"
+        stock_key = "sales-return-reversal-stock:" + hashlib.sha256(
+            key.encode("utf-8")
+        ).hexdigest()
         movement = reverse_sales_return_stock(
             inventory_return=ret.inventory_return,
             movement_date=day,
             reference=document_number,
             description=reason,
             user=actor,
-            idempotency_key=f"{key}:inventory",
+            idempotency_key=stock_key,
         )
         entitlement_reversal = reverse_journal(
             ret.entitlement_journal, reason, actor
