@@ -345,15 +345,18 @@ def validate_purchase(purchase):
 
 
 def _fingerprint(purchase):
-    payload = {
-        "purchase_id": purchase.pk, "document_number": purchase.document_number,
-        "status": purchase.status, "supplier_id": purchase.supplier_id,
-        "purchase_date": purchase.purchase_date.isoformat(), "currency_id": purchase.currency_id,
-        "rate": str(purchase.exchange_rate), "rate_date": purchase.rate_date.isoformat(),
-        "warehouse_id": purchase.warehouse_id, "discount": str(purchase.discount),
-        "freight": str(purchase.freight), "description": purchase.description,
-        "lines": list(purchase.lines.values("product_id", "quantity", "unit_price", "net_total")),
-    }
+    if isinstance(purchase, dict):
+        payload = purchase
+    else:
+        payload = {
+            "purchase_id": purchase.pk, "document_number": purchase.document_number,
+            "status": purchase.status, "supplier_id": purchase.supplier_id,
+            "purchase_date": purchase.purchase_date.isoformat(), "currency_id": purchase.currency_id,
+            "rate": str(purchase.exchange_rate), "rate_date": purchase.rate_date.isoformat(),
+            "warehouse_id": purchase.warehouse_id, "discount": str(purchase.discount),
+            "freight": str(purchase.freight), "description": purchase.description,
+            "lines": list(purchase.lines.values("product_id", "quantity", "unit_price", "net_total")),
+        }
     return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()
 
 
