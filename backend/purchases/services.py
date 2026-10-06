@@ -503,7 +503,7 @@ def post_purchase_return(*, purchase, product, quantity, source_movement,
                 ).get(pk=purchase_id)
                 if purchase.status != PurchaseStatus.POSTED:
                     raise PurchaseValidationError("Only a posted purchase can be returned.")
-                source = StockMovement.objects.select_for_update().select_related(
+                source = StockMovement.objects.select_for_update(of=("self",)).select_related(
                     "product", "warehouse", "currency", "source_party"
                 ).get(pk=source_id)
                 if source.movement_type != MovementType.PURCHASE_RECEIPT:
