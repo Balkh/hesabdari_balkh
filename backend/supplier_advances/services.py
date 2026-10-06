@@ -340,8 +340,7 @@ def reverse_supplier_advance(advance, *, reason, user=None, idempotency_key=None
                     party=advance.supplier, user=actor,
                 )
                 advance.status = SupplierAdvanceStatus.REVERSED
-        advance.save(allow_reversal=True, update_fields=["status"])
-                advance.status = SupplierAdvanceStatus.REVERSED
+                advance.save(allow_reversal=True, update_fields=["status"])
                 record.response_body = {"advance_id": advance.pk, "reversal_id": reversal.pk, "fingerprint": fingerprint}
                 record.save(update_fields=["response_body"])
                 record_audit_event(user=actor, action=AuditAction.REVERSE, entity="SupplierAdvance",
