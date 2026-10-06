@@ -190,6 +190,101 @@ class PurchaseReturn(models.Model):
         return super().delete(*args, **kwargs)
 
 
+class SupplierRefundStatus(models.TextChoices):
+    POSTED = "POSTED", "Posted"
+    REVERSED = "REVERSED", "Reversed"
+
+
+class SupplierRefund(models.Model):
+    """Settlement of a supplier claim created by a Purchase Return."""
+    document_number = models.CharField(max_length=30, unique=True)
+    purchase_return = models.ForeignKey(PurchaseReturn, on_delete=models.PROTECT, related_name="refunds")
+    refund_date = models.DateField()
+    claim_amount = models.DecimalField(max_digits=20, decimal_places=2)
+    refund_amount = models.DecimalField(max_digits=20, decimal_places=2)
+    claim_currency = models.ForeignKey("currencies.Currency", on_delete=models.PROTECT, related_name="supplier_refund_claims")
+    refund_currency = models.ForeignKey("currencies.Currency", on_delete=models.PROTECT, related_name="supplier_refund_cash")
+    agreed_rate = models.DecimalField(max_digits=20, decimal_places=8)
+    rate_direction = models.CharField(max_length=80)
+    status = models.CharField(max_length=10, choices=SupplierRefundStatus.choices, default=SupplierRefundStatus.POSTED)
+    reason = models.CharField(max_length=500)
+    idempotency_key = models.CharField(max_length=128, unique=True)
+    journal_entry = models.ForeignKey("accounting.JournalEntry", null=True, blank=True, on_delete=models.PROTECT, related_name="supplier_refunds")
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="supplier_refunds_created")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["refund_date", "document_number"]
+        constraints = [
+            models.CheckConstraint(condition=models.Q(claim_amount__gt=0), name="supplier_refund_claim_amount_gt0"),
+            models.CheckConstraint(condition=models.Q(refund_amount__gt=0), name="supplier_refund_amount_gt0"),
+            models.CheckConstraint(condition=models.Q(agreed_rate__gt=0), name="supplier_refund_rate_gt0"),
+        ]
+
+    def save(self, *args, **kwargs):
+        if self.pk is not None:
+            raise PostedImmutabilityError("Supplier refunds are immutable; correct through reversal")
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise PostedImmutabilityError("Supplier refunds cannot be deleted; correct through reversal")
+
+
+class CrossCurrencySupplierRefundStatus(models.TextChoices):
+    POSTED = "POSTED", "Posted"
+    REVERSED = "REVERSED", "Reversed"
+
+
+class CrossCurrencySupplierRefund(models.Model):
+    """Coordinator for a supplier claim settled in a different currency."""
+    refund = models.OneToOneField(SupplierRefund, on_delete=models.PROTECT, related_name="cross_currency_refund")
+    claim_currency = models.ForeignKey("currencies.Currency", on_delete=models.PROTECT, related_name="cross_supplier_refunds_as_claim")
+    claim_amount = models.DecimalField(max_digits=20, decimal_places=2)
+    refund_currency = models.ForeignKey("currencies.Currency", on_delete=models.PROTECT, related_name="cross_supplier_refunds_as_cash")
+    refund_amount = models.DecimalField(max_digits=20, decimal_places=2)
+    agreed_rate = models.DecimalField(max_digits=20, decimal_places=8)
+    rate_direction = models.CharField(max_length=80)
+    claim_journal = models.OneToOneField("accounting.JournalEntry", on_delete=models.PROTECT, related_name="cross_currency_supplier_refund_claim")
+    cash_journal = models.OneToOneField("accounting.JournalEntry", on_delete=models.PROTECT, related_name="cross_currency_supplier_refund_cash")
+    status = models.CharField(max_length=10, choices=CrossCurrencySupplierRefundStatus.choices, default=CrossCurrencySupplierRefundStatus.POSTED)
+    idempotency_key = models.CharField(max_length=128, unique=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["id"]
+        constraints = [
+            models.CheckConstraint(condition=models.Q(claim_amount__gt=0), name="cross_supplier_refund_claim_gt0"),
+            models.CheckConstraint(condition=models.Q(refund_amount__gt=0), name="cross_supplier_refund_amount_gt0"),
+            models.CheckConstraint(condition=models.Q(agreed_rate__gt=0), name="cross_supplier_refund_rate_gt0"),
+        ]
+
+    def save(self, *args, **kwargs):
+        if self.pk is not None:
+            raise PostedImmutabilityError("Cross-currency supplier refunds are immutable")
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise PostedImmutabilityError("Cross-currency supplier refunds cannot be deleted")
+
+
+class SupplierRefundReversal(models.Model):
+    refund = models.OneToOneField(SupplierRefund, on_delete=models.PROTECT, related_name="reversal")
+    journal_entry = models.OneToOneField("accounting.JournalEntry", on_delete=models.PROTECT, related_name="supplier_refund_reversal")
+    cross_currency = models.OneToOneField(CrossCurrencySupplierRefund, null=True, blank=True, on_delete=models.PROTECT, related_name="reversal")
+    reason = models.CharField(max_length=500)
+    idempotency_key = models.CharField(max_length=128, unique=True)
+    reversed_at = models.DateTimeField(auto_now_add=True)
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="supplier_refund_reversals_created")
+
+    def save(self, *args, **kwargs):
+        if self.pk is not None:
+            raise PostedImmutabilityError("Supplier refund reversals are immutable")
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise PostedImmutabilityError("Supplier refund reversals cannot be deleted")
+
+
 class PurchaseReturnReversal(models.Model):
     purchase_return = models.OneToOneField(PurchaseReturn, on_delete=models.PROTECT, related_name="reversal")
     journal_entry = models.OneToOneField("accounting.JournalEntry", on_delete=models.PROTECT, related_name="purchase_return_reversal")
