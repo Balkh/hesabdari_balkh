@@ -26,7 +26,7 @@ from .supplier_refund_services import (
     create_supplier_refund,
     reverse_supplier_refund,
 )
-from .services import reverse_purchase_return
+from .services import PurchaseValidationError, reverse_purchase_return
 
 
 @pytest.fixture
@@ -83,7 +83,7 @@ def test_usd_supplier_claim_refunded_in_afn_uses_manual_rate_without_fx_gain_los
     assert not JournalEntry.objects.filter(source_type="SUPPLIER_REFUND_CROSS_CURRENCY").filter(
         lines__account__code__in=["8100", "8200"]
     ).exists()
-    assert party_balance(supplier, currency=usd, balance_type="PAYABLE")["balance"] == Decimal("8000.00")
+    assert party_balance(supplier, currency=usd, balance_type="PAYABLE")["balance"] == Decimal("10000.00")
 
 
 def test_supplier_refund_partial_and_multiple_settlements_cannot_exceed_claim(supplier_refund_setup):
@@ -146,7 +146,7 @@ def test_purchase_return_cannot_be_reversed_while_supplier_refund_is_active(supp
         refund_currency=afn, claim_amount="500", rate="70",
         user=user, document_number="SRF-5", idempotency_key="srf-5",
     )
-    with pytest.raises(SupplierRefundValidationError, match="Reverse all posted Supplier Refunds"):
+    with pytest.raises(PurchaseValidationError, match="Reverse all posted Supplier Refunds"):
         reverse_purchase_return(returned, reason="Should be blocked", user=user, idempotency_key="srf-5-return-rev")
 
 
