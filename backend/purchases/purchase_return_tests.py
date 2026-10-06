@@ -34,7 +34,7 @@ def purchase_return_setup(db):
     supplier = create_party(name="Supplier Return", is_supplier=True, user=user)
     category = create_category(name="Return Category", user=user)
     uom = create_uom(name="Return Unit", user=user)
-    product = create_product(code="RET-1", name="Return Product", category=category, primary_uom=uom, user=user)
+    product = create_product(code="RET-1", name="Return Product", name_fa="محصول برگشتی", category=category, primary_uom=uom, user=user)
     warehouse = create_warehouse(name="Return Warehouse", user=user)
     inventory_account = __import__("accounting.models", fromlist=["Account"]).Account.objects.get(code="1410")
     WarehouseInventoryAccount.objects.create(warehouse=warehouse, account=inventory_account)
