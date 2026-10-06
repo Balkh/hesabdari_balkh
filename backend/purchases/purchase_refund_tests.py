@@ -38,7 +38,7 @@ def supplier_refund_setup(db):
     supplier = create_party(name="Supplier Refund", is_supplier=True, user=user)
     category = create_category(name="Refund Category", user=user)
     uom = create_uom(name="Refund Unit", user=user)
-    product = create_product(code="SRF-1", name="Refund Product", category=category, primary_uom=uom, user=user)
+    product = create_product(code="SRF-1", name="Refund Product", name_fa="محصول بازپرداخت", category=category, primary_uom=uom, user=user)
     warehouse = create_warehouse(name="Refund Warehouse", user=user)
     inventory_account = __import__("accounting.models", fromlist=["Account"]).Account.objects.get(code="1410")
     WarehouseInventoryAccount.objects.create(warehouse=warehouse, account=inventory_account)
