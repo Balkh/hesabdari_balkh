@@ -38,7 +38,7 @@ def setup_supplier_advance(db):
     supplier = create_party(name="Supplier Ahmad", is_supplier=True, user=user)
     category = create_category(name="Advance Category", user=user)
     uom = create_uom(name="Advance Unit", user=user)
-    product = create_product(code="ADV-1", name="Advance Product", category=category, primary_uom=uom, user=user)
+    product = create_product(code="ADV-1", name="Advance Product", name_fa="محصول پیش‌پرداخت", category=category, primary_uom=uom, user=user)
     warehouse = create_warehouse(name="Advance Warehouse", user=user)
     WarehouseInventoryAccount.objects.create(
         warehouse=warehouse,
