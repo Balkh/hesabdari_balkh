@@ -282,6 +282,8 @@ def reverse_journal(entry, reason, user, *, _allow_cross_currency_settlement=Fal
             if (not _allow_cross_currency_refund) and (
                 hasattr(original, "cross_currency_refund_entitlement")
                 or hasattr(original, "cross_currency_refund_cash")
+                or hasattr(original, "cross_currency_supplier_refund_claim")
+                or hasattr(original, "cross_currency_supplier_refund_cash")
             ):
                 raise JournalValidationError(
                     "Cross-currency refund journal legs must be reversed through the refund aggregate."
