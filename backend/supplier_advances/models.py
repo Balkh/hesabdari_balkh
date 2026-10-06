@@ -77,10 +77,18 @@ class SupplierAdvance(models.Model):
     objects = SupplierAdvanceQuerySet.as_manager()
 
     def save(self, *args, **kwargs):
+        allow_reversal = kwargs.pop("allow_reversal", False)
         if self.pk is not None:
             current = type(self).objects.filter(pk=self.pk).values_list("status", flat=True).first()
             if current is not None:
-                raise PostedImmutabilityError("Posted supplier advances are immutable; correct through reversal")
+                if not (
+                    allow_reversal
+                    and current == SupplierAdvanceStatus.POSTED
+                    and self.status == SupplierAdvanceStatus.REVERSED
+                    and kwargs.get("update_fields") is not None
+                    and set(kwargs["update_fields"]) == {"status"}
+                ):
+                    raise PostedImmutabilityError("Posted supplier advances are immutable; correct through reversal")
         return super().save(*args, **kwargs)
 
     def delete(self, *args, **kwargs):
