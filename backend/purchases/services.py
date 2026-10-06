@@ -464,7 +464,7 @@ def post_purchase(*, purchase, user=None, idempotency_key=None):
 # Phase 11 — Purchase Return financial workflow
 # ---------------------------------------------------------------------------
 
-from inventory.models import InventoryReturn, MovementType
+from inventory.models import InventoryReturn, MovementType, StockMovement
 from inventory.services import purchase_return as inventory_purchase_return
 from inventory.services import receive_stock, resolve_warehouse_account
 from accounting.services import reverse_journal
