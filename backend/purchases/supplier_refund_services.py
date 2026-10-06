@@ -362,6 +362,10 @@ def reverse_supplier_refund(refund, *, reason, user=None, idempotency_key=None):
             claim_reversal = reverse_journal(
                 cross.claim_journal, reason, actor, _allow_cross_currency_refund=True
             )
+            attribute_journal_line(
+                claim_reversal.lines.get(account__code=PAYABLE_ACCOUNT),
+                party=obj.purchase_return.supplier, user=actor,
+            )
             cash_reversal = reverse_journal(
                 cross.cash_journal, reason, actor, _allow_cross_currency_refund=True
             )
@@ -372,6 +376,10 @@ def reverse_supplier_refund(refund, *, reason, user=None, idempotency_key=None):
             cross_reversal = cross
         else:
             reversal_entry = reverse_journal(obj.journal_entry, reason, actor)
+            attribute_journal_line(
+                reversal_entry.lines.get(account__code=PAYABLE_ACCOUNT),
+                party=obj.purchase_return.supplier, user=actor,
+            )
             cross_reversal = None
 
         SupplierRefund.objects.filter(pk=obj.pk).update(status=SupplierRefundStatus.REVERSED)
