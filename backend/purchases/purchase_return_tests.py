@@ -8,6 +8,7 @@ from accounting.coa import seed_chart_of_accounts
 from accounting.models import JournalEntry
 from currencies.models import Currency
 from inventory.models import StockMovement, WarehouseInventoryAccount
+from inventory.services import InventoryValidationError
 from party_ledger.ledger import party_balance
 from parties.services import create_party
 from categories.services import create_category
@@ -69,7 +70,7 @@ def test_purchase_return_reduces_stock_and_posts_supplier_claim(purchase_return_
 
 def test_purchase_return_cannot_return_more_than_remaining_source_quantity(purchase_return_setup):
     user, usd, supplier, product, warehouse, purchase, source = purchase_return_setup
-    with pytest.raises(Exception):
+    with pytest.raises(InventoryValidationError):
         post_purchase_return(
             purchase=purchase, product=product, quantity=101, source_movement=source,
             return_date=date(2026, 9, 29), reason="Too much", user=user,
