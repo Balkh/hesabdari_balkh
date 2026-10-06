@@ -10,7 +10,7 @@ from currencies.models import Currency
 from core.idempotency import IdempotencyRecord
 from inventory.models import WarehouseInventoryAccount
 from inventory.stock import stock_for
-from party_ledger.ledger import party_balance
+from party_ledger.ledger import party_balance, reconcile_party_ledger
 from parties.services import create_party
 from categories.services import create_category
 from uom.services import create_uom
@@ -186,6 +186,8 @@ def test_advance_reversal_uses_frozen_journal_reversal(setup_supplier_advance):
     advance.journal_entry.refresh_from_db()
     assert advance.journal_entry.status == "REVERSED"
     assert reversed.pk == advance.pk
+    assert party_balance(supplier, currency=usd, balance_type="SUPPLIER_ADVANCE")["balance"] == Decimal("0.00")
+    assert reconcile_party_ledger(currency=usd)["reconciled"] is True
 
 
 def test_supplier_advance_idempotency_returns_same_document(setup_supplier_advance):
