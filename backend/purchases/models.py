@@ -128,3 +128,81 @@ class PurchaseLine(models.Model):
         if self.purchase_id and Purchase.objects.filter(pk=self.purchase_id, status=PurchaseStatus.POSTED).exists():
             raise PostedImmutabilityError("Posted purchase lines cannot be deleted")
         return super().delete(*args, **kwargs)
+
+
+class PurchaseReturnStatus(models.TextChoices):
+    POSTED = "POSTED", "Posted"
+    REVERSED = "REVERSED", "Reversed"
+
+
+class PurchaseReturnQuerySet(models.QuerySet):
+    def update(self, **kwargs):
+        if self.filter(status=PurchaseReturnStatus.POSTED).exists() or "status" in kwargs:
+            raise PostedImmutabilityError("Posted purchase returns are immutable")
+        return super().update(**kwargs)
+
+    def delete(self):
+        if self.filter(status=PurchaseReturnStatus.POSTED).exists():
+            raise PostedImmutabilityError("Posted purchase returns cannot be deleted")
+        return super().delete()
+
+
+class PurchaseReturn(models.Model):
+    """Financial document for one immutable inventory purchase return.
+
+    InventoryReturn remains the stock truth. This document adds the supplier
+    claim/payable effect: Dr 2110 / Cr warehouse inventory at original cost.
+    """
+
+    document_number = models.CharField(max_length=30, unique=True)
+    purchase = models.ForeignKey(Purchase, on_delete=models.PROTECT, related_name="purchase_returns")
+    inventory_return = models.OneToOneField("inventory.InventoryReturn", on_delete=models.PROTECT, related_name="purchase_financial_return")
+    supplier = models.ForeignKey("parties.Party", on_delete=models.PROTECT, related_name="purchase_returns")
+    warehouse = models.ForeignKey("warehouses.Warehouse", on_delete=models.PROTECT, related_name="purchase_returns")
+    currency = models.ForeignKey("currencies.Currency", on_delete=models.PROTECT, related_name="purchase_returns")
+    return_date = models.DateField()
+    quantity = models.IntegerField()
+    amount = models.DecimalField(max_digits=20, decimal_places=2)
+    journal_entry = models.OneToOneField("accounting.JournalEntry", on_delete=models.PROTECT, related_name="purchase_return_document")
+    status = models.CharField(max_length=10, choices=PurchaseReturnStatus.choices, default=PurchaseReturnStatus.POSTED)
+    reason = models.CharField(max_length=500)
+    idempotency_key = models.CharField(max_length=128, unique=True)
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="purchase_returns_created")
+    posted_at = models.DateTimeField(auto_now_add=True)
+
+    objects = PurchaseReturnQuerySet.as_manager()
+
+    class Meta:
+        ordering = ["return_date", "document_number"]
+        constraints = [
+            models.CheckConstraint(condition=models.Q(quantity__gt=0), name="purchase_return_qty_gt0"),
+            models.CheckConstraint(condition=models.Q(amount__gt=0), name="purchase_return_amount_gt0"),
+        ]
+
+    def save(self, *args, **kwargs):
+        if self.pk is not None and type(self).objects.filter(pk=self.pk, status=PurchaseReturnStatus.POSTED).exists():
+            raise PostedImmutabilityError("Posted purchase returns are immutable; correct through reversal")
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        if self.pk is not None and type(self).objects.filter(pk=self.pk, status=PurchaseReturnStatus.POSTED).exists():
+            raise PostedImmutabilityError("Posted purchase returns cannot be deleted")
+        return super().delete(*args, **kwargs)
+
+
+class PurchaseReturnReversal(models.Model):
+    purchase_return = models.OneToOneField(PurchaseReturn, on_delete=models.PROTECT, related_name="reversal")
+    journal_entry = models.OneToOneField("accounting.JournalEntry", on_delete=models.PROTECT, related_name="purchase_return_reversal")
+    stock_movement = models.OneToOneField("inventory.StockMovement", on_delete=models.PROTECT, related_name="purchase_return_reversal")
+    reason = models.CharField(max_length=500)
+    idempotency_key = models.CharField(max_length=128, unique=True)
+    reversed_at = models.DateTimeField(auto_now_add=True)
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="purchase_return_reversals_created")
+
+    def save(self, *args, **kwargs):
+        if self.pk is not None:
+            raise PostedImmutabilityError("Purchase return reversals are immutable")
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise PostedImmutabilityError("Purchase return reversals cannot be deleted")
