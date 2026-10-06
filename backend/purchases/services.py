@@ -455,3 +455,184 @@ def post_purchase(*, purchase, user=None, idempotency_key=None):
         if IdempotencyRecord.objects.filter(key=idempotency_key).exists():
             return _existing_retry(idempotency_key, fingerprint)
         raise
+
+
+# ---------------------------------------------------------------------------
+# Phase 11 — Purchase Return financial workflow
+# ---------------------------------------------------------------------------
+
+from inventory.models import InventoryReturn, MovementType
+from inventory.services import purchase_return as inventory_purchase_return
+from inventory.services import receive_stock, resolve_warehouse_account
+from accounting.services import reverse_journal
+from party_ledger.services import attribute_journal_line
+from purchases.models import PurchaseReturn, PurchaseReturnStatus, PurchaseReturnReversal
+
+
+def _purchase_return_year(day):
+    return int(gregorian_to_jalali(day).split("/")[0])
+
+
+@transaction.atomic
+def post_purchase_return(*, purchase, product, quantity, source_movement,
+                         return_date, reason, user=None,
+                         document_number=None, idempotency_key=None,
+                         acknowledge_negative=False):
+    actor = _actor(user)
+    if not isinstance(idempotency_key, str) or not idempotency_key or len(idempotency_key) > 128:
+        raise PurchaseValidationError("A valid idempotency key is required.")
+    if not isinstance(reason, str) or not reason.strip():
+        raise PurchaseValidationError("A purchase return reason is required.")
+    purchase_id = getattr(purchase, "pk", purchase)
+    source_id = getattr(source_movement, "pk", source_movement)
+    product_id = getattr(product, "pk", product)
+    day = _date(return_date, "return_date")
+    fingerprint = _fingerprint({
+        "purchase_id": purchase_id, "source_id": source_id, "product_id": product_id,
+        "quantity": quantity, "return_date": day, "reason": reason.strip(),
+        "document_number": document_number or "",
+    })
+    try:
+        with idempotent_operation(key=idempotency_key, operation="purchase-return.post") as idem:
+            with transaction.atomic():
+                purchase = Purchase.objects.select_for_update().select_related(
+                    "supplier", "warehouse", "currency"
+                ).get(pk=purchase_id)
+                if purchase.status != PurchaseStatus.POSTED:
+                    raise PurchaseValidationError("Only a posted purchase can be returned.")
+                source = StockMovement.objects.select_for_update().select_related(
+                    "product", "warehouse", "currency", "source_party"
+                ).get(pk=source_id)
+                if source.movement_type != MovementType.PURCHASE_RECEIPT:
+                    raise PurchaseValidationError("Purchase return source must be a purchase receipt.")
+                if source.product_id != product_id or source.warehouse_id != purchase.warehouse_id:
+                    raise PurchaseValidationError("Return product/warehouse does not match the purchase receipt.")
+                if source.source_party_id != purchase.supplier_id:
+                    raise PurchaseValidationError("Purchase receipt supplier does not match the purchase supplier.")
+                if source.currency_id != purchase.currency_id:
+                    raise PurchaseValidationError("Purchase return currency must match the purchase.")
+                if document_number is None:
+                    document_number = next_document_number("PRTN", _purchase_return_year(day))
+                if PurchaseReturn.objects.filter(document_number=document_number).exists():
+                    raise PurchaseValidationError("Purchase return document number already exists.")
+                assert_posting_date_open(day)
+
+                inv_return = inventory_purchase_return(
+                    product=source.product, warehouse=source.warehouse,
+                    supplier=purchase.supplier, source_movement=source,
+                    quantity=quantity, source_document=document_number,
+                    movement_date=day, description=reason.strip(), user=actor,
+                    idempotency_key=f"{idempotency_key}:inventory",
+                    acknowledge_negative=acknowledge_negative,
+                )
+                amount = quantize_half_up(
+                    source.unit_cost * Decimal(str(inv_return.quantity)), 2
+                )
+                if amount <= 0:
+                    raise PurchaseValidationError("Purchase return value must be greater than zero.")
+                inventory_account = resolve_warehouse_account(purchase.warehouse)
+                payable = Account.objects.get(code=PAYABLE_ACCOUNT)
+                journal = post_journal(
+                    number=next_document_number("JE", _purchase_return_year(day)),
+                    posting_date=day,
+                    description=f"Purchase return {document_number}",
+                    lines=[
+                        {"account": payable, "debit": amount, "reference": document_number,
+                         "description": f"Supplier claim for purchase return {document_number}"},
+                        {"account": inventory_account, "credit": amount, "reference": document_number,
+                         "description": f"Remove returned inventory {document_number}"},
+                    ],
+                    source_type="PURCHASE_RETURN", source_id=document_number,
+                    currency=source.currency, rate=source.rate, rate_date=source.rate_date,
+                    created_by=actor, idempotency_key=f"{idempotency_key}:journal",
+                )
+                attribute_journal_line(journal.lines.get(account=payable), party=purchase.supplier, user=actor)
+                result = PurchaseReturn.objects.create(
+                    document_number=document_number, purchase=purchase,
+                    inventory_return=inv_return, supplier=purchase.supplier,
+                    warehouse=purchase.warehouse, currency=source.currency,
+                    return_date=day, quantity=inv_return.quantity, amount=amount,
+                    journal_entry=journal, status=PurchaseReturnStatus.POSTED,
+                    reason=reason.strip(), idempotency_key=idempotency_key, created_by=actor,
+                )
+                idem.response_body = {"purchase_return_id": result.pk, "fingerprint": fingerprint}
+                idem.save(update_fields=["response_body"])
+                record_audit_event(
+                    user=actor, action=AuditAction.CREATE, entity="PurchaseReturn",
+                    entity_id=result.pk, reference=document_number,
+                    previous_state=None,
+                    new_state={"document_number": document_number, "purchase_id": purchase.pk,
+                               "inventory_return_id": inv_return.pk, "quantity": result.quantity,
+                               "amount": str(amount), "journal_entry_id": journal.pk},
+                    reason=reason.strip(),
+                )
+                return result
+    except DuplicateOperationError:
+        record = IdempotencyRecord.objects.filter(key=idempotency_key).first()
+        if record is not None and (record.response_body or {}).get("fingerprint") == fingerprint:
+            return PurchaseReturn.objects.get(pk=record.response_body["purchase_return_id"])
+        raise
+
+
+@transaction.atomic
+def reverse_purchase_return(purchase_return, *, reason, user=None, idempotency_key=None):
+    actor = _actor(user)
+    if not isinstance(reason, str) or not reason.strip():
+        raise PurchaseValidationError("A reversal reason is required.")
+    if not isinstance(idempotency_key, str) or not idempotency_key or len(idempotency_key) > 128:
+        raise PurchaseValidationError("A valid idempotency key is required.")
+    return_id = getattr(purchase_return, "pk", purchase_return)
+    fingerprint = _fingerprint({"return_id": return_id, "reason": reason.strip()})
+    try:
+        with idempotent_operation(key=idempotency_key, operation="purchase-return.reverse") as idem:
+            with transaction.atomic():
+                result = PurchaseReturn.objects.select_for_update().select_related(
+                    "purchase", "supplier", "warehouse", "currency", "journal_entry", "inventory_return__return_movement"
+                ).get(pk=return_id)
+                if result.status == PurchaseReturnStatus.REVERSED:
+                    if (idem.response_body or {}).get("fingerprint") == fingerprint:
+                        return result
+                    raise PurchaseValidationError("Purchase return has already been reversed.")
+                assert_posting_date_open(result.return_date)
+                original = result.inventory_return.return_movement
+                restored = receive_stock(
+                    product=original.product, warehouse=original.warehouse,
+                    quantity=result.quantity, unit_cost=original.unit_cost,
+                    currency=original.currency, rate=original.rate, rate_date=original.rate_date,
+                    movement_date=result.return_date,
+                    reference=f"{result.document_number}:REVERSAL",
+                    description=f"Reversal of purchase return {result.document_number}",
+                    user=actor, party=result.supplier,
+                    idempotency_key=f"{idempotency_key}:inventory",
+                )
+                reversal = reverse_journal(result.journal_entry, reason.strip(), actor)
+                attribute_journal_line(
+                    reversal.lines.get(account__code=PAYABLE_ACCOUNT),
+                    party=result.supplier, user=actor,
+                )
+                PurchaseReturn.objects.filter(pk=result.pk).update(status=PurchaseReturnStatus.REVERSED)
+                result.status = PurchaseReturnStatus.REVERSED
+                row = PurchaseReturnReversal.objects.create(
+                    purchase_return=result, journal_entry=reversal,
+                    stock_movement=restored, reason=reason.strip(),
+                    idempotency_key=idempotency_key, created_by=actor,
+                )
+                idem.response_body = {"reversal_id": row.pk, "fingerprint": fingerprint}
+                idem.save(update_fields=["response_body"])
+                record_audit_event(
+                    user=actor, action=AuditAction.REVERSE, entity="PurchaseReturn",
+                    entity_id=result.pk, reference=result.document_number,
+                    previous_state={"status": PurchaseReturnStatus.POSTED},
+                    new_state={"status": PurchaseReturnStatus.REVERSED,
+                               "reversal_id": row.pk, "stock_movement_id": restored.pk,
+                               "journal_reversal_id": reversal.pk},
+                    reason=reason.strip(),
+                )
+                return result
+    except PurchaseReturn.DoesNotExist as exc:
+        raise PurchaseValidationError("Purchase return does not exist.") from exc
+    except DuplicateOperationError:
+        record = IdempotencyRecord.objects.filter(key=idempotency_key).first()
+        if record is not None and (record.response_body or {}).get("fingerprint") == fingerprint:
+            return PurchaseReturn.objects.get(pk=return_id)
+        raise
