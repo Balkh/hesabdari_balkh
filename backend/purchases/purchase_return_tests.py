@@ -30,6 +30,7 @@ from .services import (
 def purchase_return_setup(db):
     seed_chart_of_accounts()
     user = get_user_model().objects.create_user(username="purchase-return-user", password="x")
+    Currency.objects.create(code="AFN", name="Afghani", is_base=True)
     usd = Currency.objects.create(code="USD", name="US Dollar", is_base=False)
     supplier = create_party(name="Supplier Return", is_supplier=True, user=user)
     category = create_category(name="Return Category", user=user)
