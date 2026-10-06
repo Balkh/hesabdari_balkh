@@ -598,6 +598,10 @@ def reverse_purchase_return(purchase_return, *, reason, user=None, idempotency_k
                         return result
                     raise PurchaseValidationError("Purchase return has already been reversed.")
                 assert_posting_date_open(result.return_date)
+                if result.refunds.filter(status="POSTED").exists():
+                    raise PurchaseValidationError(
+                        "Reverse all posted Supplier Refunds before reversing the Purchase Return."
+                    )
                 original = result.inventory_return.return_movement
                 restored = receive_stock(
                     product=original.product, warehouse=original.warehouse,
