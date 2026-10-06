@@ -339,7 +339,8 @@ def reverse_supplier_advance(advance, *, reason, user=None, idempotency_key=None
                     reversal.lines.get(account__code=SUPPLIER_ADVANCE_ACCOUNT),
                     party=advance.supplier, user=actor,
                 )
-                SupplierAdvance.objects.filter(pk=advance.pk).update(status=SupplierAdvanceStatus.REVERSED)
+                advance.status = SupplierAdvanceStatus.REVERSED
+        advance.save(allow_reversal=True, update_fields=["status"])
                 advance.status = SupplierAdvanceStatus.REVERSED
                 record.response_body = {"advance_id": advance.pk, "reversal_id": reversal.pk, "fingerprint": fingerprint}
                 record.save(update_fields=["response_body"])
