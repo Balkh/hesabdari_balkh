@@ -53,7 +53,7 @@ def _purchase(user, currency, supplier, product, warehouse, *, rate=None, rate_d
         purchase_date=date(2026, 9, 28),
         currency=currency,
         warehouse=warehouse,
-        lines=[{"product": product, "quantity": 10, "unit_price": total}],
+        lines=[{"product": product, "quantity": 1, "unit_price": total}],
         user=user,
         document_number=document_number,
     )
