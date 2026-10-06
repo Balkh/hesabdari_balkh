@@ -146,7 +146,7 @@ def test_purchase_return_cannot_be_reversed_while_supplier_refund_is_active(supp
         refund_currency=afn, claim_amount="500", rate="70",
         user=user, document_number="SRF-5", idempotency_key="srf-5",
     )
-    with pytest.raises(Exception, match="Reverse all posted Supplier Refunds"):
+    with pytest.raises(SupplierRefundValidationError, match="Reverse all posted Supplier Refunds"):
         reverse_purchase_return(returned, reason="Should be blocked", user=user, idempotency_key="srf-5-return-rev")
 
 
