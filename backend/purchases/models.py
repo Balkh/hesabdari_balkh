@@ -180,8 +180,17 @@ class PurchaseReturn(models.Model):
         ]
 
     def save(self, *args, **kwargs):
-        if self.pk is not None and type(self).objects.filter(pk=self.pk, status=PurchaseReturnStatus.POSTED).exists():
-            raise PostedImmutabilityError("Posted purchase returns are immutable; correct through reversal")
+        allow_reversal = kwargs.pop("allow_reversal", False)
+        if self.pk is not None:
+            current = type(self).objects.filter(pk=self.pk).values_list("status", flat=True).first()
+            if current == PurchaseReturnStatus.POSTED:
+                if not (
+                    allow_reversal
+                    and self.status == PurchaseReturnStatus.REVERSED
+                    and kwargs.get("update_fields") is not None
+                    and set(kwargs["update_fields"]) == {"status"}
+                ):
+                    raise PostedImmutabilityError("Posted purchase returns are immutable; correct through reversal")
         return super().save(*args, **kwargs)
 
     def delete(self, *args, **kwargs):
