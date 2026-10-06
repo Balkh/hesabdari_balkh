@@ -290,6 +290,9 @@ def reverse_supplier_advance_allocation(allocation, *, reason, user=None, idempo
                     return existing
                 assert_posting_date_open(allocation.purchase.purchase_date)
                 reversal = reverse_journal(allocation.journal_entry, reason.strip(), actor)
+                supplier = allocation.advance.supplier
+                for code in (SUPPLIER_PAYABLE_ACCOUNT, SUPPLIER_ADVANCE_ACCOUNT):
+                    attribute_journal_line(reversal.lines.get(account__code=code), party=supplier, user=actor)
                 row = SupplierAdvanceAllocationReversal.objects.create(
                     allocation=allocation, journal_entry=reversal, reason=reason.strip(),
                     idempotency_key=idempotency_key, created_by=actor,
@@ -332,6 +335,10 @@ def reverse_supplier_advance(advance, *, reason, user=None, idempotency_key=None
                     raise SupplierAdvanceValidationError("Reverse active advance allocations before reversing the supplier advance.")
                 assert_posting_date_open(advance.advance_date)
                 reversal = reverse_journal(advance.journal_entry, reason.strip(), actor)
+                attribute_journal_line(
+                    reversal.lines.get(account__code=SUPPLIER_ADVANCE_ACCOUNT),
+                    party=advance.supplier, user=actor,
+                )
                 SupplierAdvance.objects.filter(pk=advance.pk).update(status=SupplierAdvanceStatus.REVERSED)
                 advance.status = SupplierAdvanceStatus.REVERSED
                 record.response_body = {"advance_id": advance.pk, "reversal_id": reversal.pk, "fingerprint": fingerprint}
