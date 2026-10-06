@@ -621,8 +621,8 @@ def reverse_purchase_return(purchase_return, *, reason, user=None, idempotency_k
                     reversal.lines.get(account__code=PAYABLE_ACCOUNT),
                     party=result.supplier, user=actor,
                 )
-                PurchaseReturn.objects.filter(pk=result.pk).update(status=PurchaseReturnStatus.REVERSED)
                 result.status = PurchaseReturnStatus.REVERSED
+                result.save(allow_reversal=True, update_fields=["status"])
                 row = PurchaseReturnReversal.objects.create(
                     purchase_return=result, journal_entry=reversal,
                     stock_movement=restored, reason=reason.strip(),
