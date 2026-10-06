@@ -282,7 +282,7 @@ def reverse_supplier_advance_allocation(allocation, *, reason, user=None, idempo
     try:
         with idempotent_operation(key=idempotency_key, operation=ALLOCATION_REVERSAL_OPERATION) as record:
             with transaction.atomic():
-                allocation = SupplierAdvanceAllocation.objects.select_for_update().select_related("advance", "purchase", "journal_entry").get(pk=allocation_id)
+                allocation = SupplierAdvanceAllocation.objects.select_for_update(of=("self",)).select_related("advance", "purchase", "journal_entry").get(pk=allocation_id)
                 if hasattr(allocation, "reversal"):
                     existing = allocation.reversal
                     if (record.response_body or {}).get("fingerprint") != fingerprint:
