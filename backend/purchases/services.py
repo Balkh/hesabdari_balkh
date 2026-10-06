@@ -509,6 +509,10 @@ def post_purchase_return(*, purchase, product, quantity, source_movement,
                     raise PurchaseValidationError("Return product/warehouse does not match the purchase receipt.")
                 if source.source_party_id != purchase.supplier_id:
                     raise PurchaseValidationError("Purchase receipt supplier does not match the purchase supplier.")
+                if not source.reference.startswith(f"{purchase.document_number}:LINE:"):
+                    raise PurchaseValidationError("Purchase receipt does not belong to the selected purchase.")
+                if day < purchase.purchase_date:
+                    raise PurchaseValidationError("Return date cannot precede the purchase date.")
                 if source.currency_id != purchase.currency_id:
                     raise PurchaseValidationError("Purchase return currency must match the purchase.")
                 if document_number is None:
