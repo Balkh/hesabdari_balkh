@@ -344,7 +344,7 @@ def reverse_supplier_refund(refund, *, reason, user=None, idempotency_key=None):
         raise SupplierRefundValidationError("A valid supplier refund reversal idempotency key is required")
 
     with transaction.atomic():
-        obj = SupplierRefund.objects.select_for_update().select_related(
+        obj = SupplierRefund.objects.select_for_update(of=("self",)).select_related(
             "purchase_return", "journal_entry"
         ).get(pk=getattr(refund, "pk", refund))
         if obj.status != SupplierRefundStatus.POSTED:
