@@ -4,6 +4,45 @@ from django.db import models
 from accounting.models import JournalEntry, PostedImmutabilityError
 
 
+class SupplierAdvanceQuerySet(models.QuerySet):
+    def _contains_posted(self):
+        return self.filter(status=SupplierAdvanceStatus.POSTED).exists()
+
+    def update(self, **kwargs):
+        if self._contains_posted() or "status" in kwargs:
+            raise PostedImmutabilityError("Posted supplier advances cannot be changed through bulk ORM updates")
+        return super().update(**kwargs)
+
+    def delete(self):
+        if self._contains_posted():
+            raise PostedImmutabilityError("Posted supplier advances cannot be deleted through bulk ORM deletion")
+        return super().delete()
+
+
+class SupplierAdvanceAllocationQuerySet(models.QuerySet):
+    def update(self, **kwargs):
+        if self.exists():
+            raise PostedImmutabilityError("Supplier advance allocations are immutable")
+        return super().update(**kwargs)
+
+    def delete(self):
+        if self.exists():
+            raise PostedImmutabilityError("Supplier advance allocations cannot be deleted")
+        return super().delete()
+
+
+class SupplierAdvanceAllocationReversalQuerySet(models.QuerySet):
+    def update(self, **kwargs):
+        if self.exists():
+            raise PostedImmutabilityError("Supplier advance allocation reversals are immutable")
+        return super().update(**kwargs)
+
+    def delete(self):
+        if self.exists():
+            raise PostedImmutabilityError("Supplier advance allocation reversals cannot be deleted")
+        return super().delete()
+
+
 class SupplierAdvanceStatus(models.TextChoices):
     POSTED = "POSTED", "Posted"
     REVERSED = "REVERSED", "Reversed"
@@ -35,6 +74,8 @@ class SupplierAdvance(models.Model):
         ordering = ["advance_date", "document_number"]
         constraints = [models.CheckConstraint(condition=models.Q(amount__gt=0), name="supplier_advance_amount_gt0")]
 
+    objects = SupplierAdvanceQuerySet.as_manager()
+
     def save(self, *args, **kwargs):
         if self.pk is not None:
             current = type(self).objects.filter(pk=self.pk).values_list("status", flat=True).first()
@@ -61,6 +102,8 @@ class SupplierAdvanceAllocation(models.Model):
         ordering = ["id"]
         constraints = [models.CheckConstraint(condition=models.Q(amount__gt=0), name="supplier_advance_alloc_amount_gt0")]
 
+    objects = SupplierAdvanceAllocationQuerySet.as_manager()
+
     def save(self, *args, **kwargs):
         if self.pk is not None:
             raise PostedImmutabilityError("Supplier advance allocations are immutable")
@@ -82,6 +125,8 @@ class SupplierAdvanceAllocationReversal(models.Model):
 
     class Meta:
         ordering = ["id"]
+
+    objects = SupplierAdvanceAllocationReversalQuerySet.as_manager()
 
     def save(self, *args, **kwargs):
         if self.pk is not None:
