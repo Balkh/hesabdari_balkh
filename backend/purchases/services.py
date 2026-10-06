@@ -527,7 +527,7 @@ def post_purchase_return(*, purchase, product, quantity, source_movement,
                 inv_return = inventory_purchase_return(
                     product=source.product, warehouse=source.warehouse,
                     supplier=purchase.supplier, source_movement=source,
-                    quantity=quantity, source_document=document_number,
+                    quantity=quantity, source_document=source.reference,
                     movement_date=day, description=reason.strip(), user=actor,
                     idempotency_key=f"{idempotency_key}:inventory",
                     acknowledge_negative=acknowledge_negative,
