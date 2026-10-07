@@ -1,6 +1,7 @@
 """Goods in Transit ownership and physical-receipt services (Phase 11)."""
 
 from decimal import Decimal
+import hashlib
 
 from django.db import transaction
 
@@ -125,7 +126,7 @@ def _receive_transit_legacy(*, lot, quantity, receipt_date, user=None,
                 resolve_negative_obligations(receipt_movement=movement)
                 amount = quantize_half_up(lot.unit_cost * quantity, 2)
                 entry = post_journal(
-                    number=f"JE-TRANSIT-RECEIPT-{lot.pk}-{idempotency_key[:12]}",
+                    number=f"JE-TR-{lot.pk}-{hashlib.sha256(idempotency_key.encode()).hexdigest()[:12]}",
                     posting_date=receipt_date,
                     description=f"Goods in Transit receipt {lot.purchase.document_number}",
                     lines=[
@@ -201,7 +202,7 @@ def transfer_transit_destination(*, lot, warehouse, quantity, transfer_date, use
 
 
 @transaction.atomic
-def receive_transit(*, lot, quantity, receipt_date, user=None, idempotency_key=None):
+def _receive_transit_core(*, lot, quantity, receipt_date, user=None, idempotency_key=None):
     actor = _actor(user)
     if not isinstance(quantity, int) or isinstance(quantity, bool) or quantity <= 0:
         raise TransitValidationError("Receipt quantity must be a positive integer.")
@@ -255,3 +256,14 @@ def receive_transit(*, lot, quantity, receipt_date, user=None, idempotency_key=N
             record.save(update_fields=["response_body"])
             record_audit_event(user=actor, action=AuditAction.CREATE, entity="TransitReceipt", entity_id=receipt.pk, reference=reference, previous_state={"remaining_quantity": before}, new_state={"remaining_quantity": lot.remaining_quantity, "company_quantity": company_qty, "customer_custody_quantity": custody_qty}, reason="")
             return receipt
+
+
+@transaction.atomic
+def receive_transit(*, lot, quantity, receipt_date, user=None, idempotency_key=None):
+    try:
+        return _receive_transit_core(lot=lot, quantity=quantity, receipt_date=receipt_date, user=user, idempotency_key=idempotency_key)
+    except DuplicateOperationError:
+        record = IdempotencyRecord.objects.filter(key=idempotency_key).first()
+        if record is not None and (record.response_body or {}).get("receipt_id"):
+            return TransitReceipt.objects.get(pk=record.response_body["receipt_id"])
+        raise
