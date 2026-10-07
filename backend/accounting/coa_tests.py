@@ -147,7 +147,7 @@ class COAContractTests(TestCase):
 
     def test_canonical_count_is_40(self):
         self.assertEqual(len(EXPECTED_COA), 40)
-        self.assertEqual(Account.objects.filter(code__in=EXPECTED_CODES).count(), 39)
+        self.assertEqual(Account.objects.filter(code__in=EXPECTED_CODES).count(), 40)
 
     def test_every_account_matches_contract(self):
         for code, name_en, name_fa, type_, parent_code, is_posting, is_active in EXPECTED_COA:
