@@ -699,7 +699,7 @@ def reverse_purchase_return(purchase_return, *, reason, user=None, idempotency_k
         with idempotent_operation(key=idempotency_key, operation="purchase-return.reverse") as idem:
             with transaction.atomic():
                 result = PurchaseReturn.objects.select_for_update().select_related(
-                    "purchase", "supplier", "warehouse", "currency", "journal_entry", "inventory_return__return_movement"
+                    "purchase", "supplier", "warehouse", "currency", "journal_entry"
                 ).get(pk=return_id)
                 if result.status == PurchaseReturnStatus.REVERSED:
                     if (idem.response_body or {}).get("fingerprint") == fingerprint:
