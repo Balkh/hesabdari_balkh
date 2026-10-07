@@ -86,7 +86,7 @@ def create_transit_lot(*, purchase, purchase_line, unit_cost, user=None,
 
 
 @transaction.atomic
-def receive_transit(*, lot, quantity, receipt_date, user=None,
+def _receive_transit_legacy(*, lot, quantity, receipt_date, user=None,
                     idempotency_key=None):
     actor = _actor(user)
     if not isinstance(quantity, int) or isinstance(quantity, bool) or quantity <= 0:
@@ -198,3 +198,60 @@ def transfer_transit_destination(*, lot, warehouse, quantity, transfer_date, use
             record.response_body = {"transfer_id": row.pk}
             record.save(update_fields=["response_body"])
             return row
+
+
+@transaction.atomic
+def receive_transit(*, lot, quantity, receipt_date, user=None, idempotency_key=None):
+    actor = _actor(user)
+    if not isinstance(quantity, int) or isinstance(quantity, bool) or quantity <= 0:
+        raise TransitValidationError("Receipt quantity must be a positive integer.")
+    if not isinstance(idempotency_key, str) or not idempotency_key:
+        raise TransitValidationError("A valid idempotency key is required.")
+    from django.db.models import Sum
+    from sales.models import TransitSaleAllocation
+    lot_id = getattr(lot, "pk", lot)
+    with idempotent_operation(key=idempotency_key, operation=TRANSIT_RECEIPT_OPERATION) as record:
+        with transaction.atomic():
+            lot = GoodsInTransitLot.objects.select_for_update().select_related("purchase", "product", "currency", "destination_warehouse").get(pk=lot_id)
+            if lot.status != TransitLotStatus.OPEN:
+                raise TransitValidationError("Transit lot is not open.")
+            assert_posting_date_open(receipt_date)
+            allocations = list(TransitSaleAllocation.objects.select_related("sale_line__sale__customer").filter(transit_lot=lot).order_by("id"))
+            custody_by_line = {x["sale_line_id"]: x["total"] or 0 for x in TransitCustomerCustody.objects.filter(sale_line__in=[a.sale_line_id for a in allocations]).values("sale_line_id").annotate(total=Sum("quantity"))}
+            outstanding = sum(a.quantity - custody_by_line.get(a.sale_line_id, 0) for a in allocations)
+            if quantity > lot.remaining_quantity + outstanding:
+                raise TransitValidationError("Physical receipt exceeds remaining owned Transit plus sold customer custody.")
+            company_qty = min(quantity, lot.remaining_quantity)
+            custody_qty = quantity - company_qty
+            if custody_qty > outstanding:
+                raise TransitValidationError("Customer custody receipt exceeds sold Transit quantity.")
+            warehouse = lot.destination_warehouse
+            movement = None
+            entry = None
+            reference = f"TRANSIT:{lot.purchase.document_number}:LOT:{lot.pk}:RECEIPT:{idempotency_key}"
+            if company_qty:
+                movement = receive_stock(product=lot.product, warehouse=warehouse, quantity=company_qty, unit_cost=lot.unit_cost, currency=lot.currency, rate=lot.rate, rate_date=lot.rate_date, movement_date=receipt_date, reference=reference, description=f"Goods in Transit receipt for {lot.purchase.document_number}", user=actor, party=lot.supplier, idempotency_key=f"{idempotency_key}:movement")
+                from sales.services import resolve_negative_obligations
+                resolve_negative_obligations(receipt_movement=movement)
+                amount = quantize_half_up(lot.unit_cost * company_qty, 2)
+                entry = post_journal(number=f"JE-TRANSIT-RECEIPT-{lot.pk}-{idempotency_key[:12]}", posting_date=receipt_date, description=f"Goods in Transit receipt {lot.purchase.document_number}", lines=[{"account": resolve_warehouse_account(warehouse), "debit": amount, "reference": reference}, {"account": Account.objects.get(code=TRANSIT_ACCOUNT), "credit": amount, "reference": reference}], source_type="GOODS_IN_TRANSIT_RECEIPT", source_id=reference, currency=lot.currency, rate=lot.rate, rate_date=lot.rate_date, created_by=actor, idempotency_key=f"{idempotency_key}:journal")
+            before = lot.remaining_quantity
+            lot.remaining_quantity = before - company_qty
+            lot.status = TransitLotStatus.CLOSED if lot.remaining_quantity == 0 else TransitLotStatus.OPEN
+            lot.save(allow_state_transition=True, update_fields={"remaining_quantity", "status"})
+            receipt = TransitReceipt.objects.create(lot=lot, warehouse=warehouse, quantity=quantity, company_quantity=company_qty, customer_custody_quantity=custody_qty, receipt_date=receipt_date, stock_movement=movement, journal_entry=entry, idempotency_key=idempotency_key, created_by=actor)
+            left = custody_qty
+            for allocation in allocations:
+                available = allocation.quantity - custody_by_line.get(allocation.sale_line_id, 0)
+                take = min(available, left)
+                if take:
+                    TransitCustomerCustody.objects.create(receipt=receipt, sale_line=allocation.sale_line, customer=allocation.sale_line.sale.customer, warehouse=warehouse, quantity=take, receipt_date=receipt_date)
+                    left -= take
+                if left == 0:
+                    break
+            if left:
+                raise TransitValidationError("Customer custody allocation could not be completed.")
+            record.response_body = {"receipt_id": receipt.pk}
+            record.save(update_fields=["response_body"])
+            record_audit_event(user=actor, action=AuditAction.CREATE, entity="TransitReceipt", entity_id=receipt.pk, reference=reference, previous_state={"remaining_quantity": before}, new_state={"remaining_quantity": lot.remaining_quantity, "company_quantity": company_qty, "customer_custody_quantity": custody_qty}, reason="")
+            return receipt
