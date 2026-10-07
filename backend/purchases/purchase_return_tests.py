@@ -16,12 +16,13 @@ from uom.services import create_uom
 from products.services import create_product
 from warehouses.services import create_warehouse
 
-from .models import PurchaseReturn, PurchaseReturnStatus
+from .models import PurchaseDeliveryMode, PurchaseReturn, PurchaseReturnStatus
 from .services import (
     PurchaseValidationError,
     create_purchase,
     post_purchase,
     post_purchase_return,
+    post_transit_purchase_return,
     reverse_purchase_return,
 )
 
@@ -130,3 +131,22 @@ def test_purchase_return_cannot_use_receipt_from_another_purchase(purchase_retur
             return_date=date(2026, 9, 30), reason="Wrong purchase", user=user,
             document_number="PRTN-5", idempotency_key="purchase-return-5",
         )
+
+
+def test_transit_purchase_return_reduces_owned_transit_and_reversal_restores_it(purchase_return_setup):
+    user, usd, supplier, product, warehouse, _, _ = purchase_return_setup
+    purchase = create_purchase(supplier=supplier, purchase_date=date(2026, 9, 28), currency=usd, warehouse=warehouse, rate="70", rate_date=date(2026, 9, 28), delivery_mode=PurchaseDeliveryMode.IN_TRANSIT, lines=[{"product": product, "quantity": 100, "unit_price": "100"}], user=user, document_number="PI-RETURN-TRANSIT-1")
+    purchase = post_purchase(purchase=purchase, user=user, idempotency_key="purchase-return-transit-purchase")
+    from goods_in_transit.models import GoodsInTransitLot
+    lot = GoodsInTransitLot.objects.get(purchase=purchase)
+    result = post_transit_purchase_return(purchase=purchase, transit_lot=lot, quantity=10, return_date=date(2026, 9, 29), reason="Transit defective goods", user=user, document_number="PRTN-TRANSIT-1", idempotency_key="purchase-return-transit-1")
+    lot.refresh_from_db()
+    assert result.inventory_return_id is None
+    assert result.transit_lot_id == lot.pk
+    assert lot.remaining_quantity == 90
+    assert result.journal_entry.lines.get(account__code="2110").debit == Decimal("1000.00")
+    assert result.journal_entry.lines.get(account__code="1430").credit == Decimal("1000.00")
+    reverse_purchase_return(result, reason="Transit correction", user=user, idempotency_key="purchase-return-transit-reversal-1")
+    lot.refresh_from_db()
+    assert lot.remaining_quantity == 100
+    assert result.reversal.stock_movement_id is None
