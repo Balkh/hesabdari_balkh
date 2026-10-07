@@ -200,7 +200,7 @@ class GoodsInTransitTests(TestCase):
             user=self.user,
             document_number="SI-TRANSIT-001",
         )
-        finalize_sale(sale=sale, user=self.user)
+        sale = finalize_sale(sale=sale, user=self.user)
 
         lot.refresh_from_db()
         line = sale.lines.get()
