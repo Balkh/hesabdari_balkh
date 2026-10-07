@@ -159,6 +159,7 @@ def _snapshot(purchase):
         "document_number": purchase.document_number,
         "supplier_id": purchase.supplier_id,
         "warehouse_id": purchase.warehouse_id,
+        "delivery_mode": purchase.delivery_mode,
         "currency": purchase.currency.code,
         "purchase_date": purchase.purchase_date.isoformat(),
         "subtotal": str(purchase.subtotal),
@@ -195,7 +196,8 @@ def _totals(rows, discount, freight):
 
 def create_purchase(*, supplier, purchase_date, currency, warehouse, lines,
                     discount=0, freight=0, rate=None, rate_date=None,
-                    description="", user=None, document_number=None):
+                    description="", user=None, document_number=None,
+                    delivery_mode=PurchaseDeliveryMode.IMMEDIATE):
     actor = _actor(user)
     supplier = _resolve_supplier(supplier)
     warehouse = _resolve_warehouse(warehouse)
@@ -203,6 +205,10 @@ def create_purchase(*, supplier, purchase_date, currency, warehouse, lines,
     currency = resolve_currency(currency)
     if not currency.is_active:
         raise PurchaseValidationError("Currency is not active.")
+    try:
+        delivery_mode = PurchaseDeliveryMode(delivery_mode)
+    except ValueError as exc:
+        raise PurchaseValidationError("Invalid purchase delivery mode.") from exc
     rate_value, rate_day = _rate(currency, rate, rate_date, purchase_day)
     rows = _prepare_lines(lines)
     subtotal, discount, freight, total = _totals(rows, discount, freight)
@@ -214,8 +220,9 @@ def create_purchase(*, supplier, purchase_date, currency, warehouse, lines,
         purchase = Purchase.objects.create(
             document_number=document_number.strip(), supplier=supplier,
             purchase_date=purchase_day, currency=currency, exchange_rate=rate_value,
-            rate_date=rate_day, warehouse=warehouse, description=str(description).strip(),
-            subtotal=subtotal, discount=discount, freight=freight, total=total,
+            rate_date=rate_day, warehouse=warehouse, delivery_mode=delivery_mode,
+            description=str(description).strip(), subtotal=subtotal, discount=discount,
+            freight=freight, total=total,
             status=PurchaseStatus.DRAFT, created_by=actor,
         )
         for row in rows:
