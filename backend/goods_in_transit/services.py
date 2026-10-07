@@ -14,7 +14,7 @@ from inventory.services import receive_stock, resolve_warehouse_account
 from security.models import AuditAction
 from security.services import record_audit_event
 
-from .models import GoodsInTransitLot, TransitLotStatus, TransitReceipt
+from .models import GoodsInTransitLot, TransitCustomerCustody, TransitDestinationTransfer, TransitLotStatus, TransitReceipt
 
 
 class TransitValidationError(ValueError):
@@ -167,3 +167,34 @@ def receive_transit(*, lot, quantity, receipt_date, user=None,
         if record is not None and (record.response_body or {}).get("receipt_id"):
             return TransitReceipt.objects.get(pk=record.response_body["receipt_id"])
         raise
+
+
+@transaction.atomic
+def transfer_transit_destination(*, lot, warehouse, quantity, transfer_date, user=None, idempotency_key=None):
+    actor = _actor(user)
+    if not isinstance(quantity, int) or isinstance(quantity, bool) or quantity <= 0:
+        raise TransitValidationError("Transfer quantity must be a positive integer.")
+    if not isinstance(idempotency_key, str) or not idempotency_key:
+        raise TransitValidationError("A valid idempotency key is required.")
+    from warehouses.services import resolve_warehouse
+    target = resolve_warehouse(warehouse)
+    if not target.is_active:
+        raise TransitValidationError("Destination warehouse is inactive.")
+    lot_id = getattr(lot, "pk", lot)
+    with idempotent_operation(key=idempotency_key, operation="goods_in_transit.destination_transfer") as record:
+        with transaction.atomic():
+            lot = GoodsInTransitLot.objects.select_for_update().select_related("destination_warehouse").get(pk=lot_id)
+            if lot.status != TransitLotStatus.OPEN:
+                raise TransitValidationError("Transit lot is not open.")
+            if quantity > lot.remaining_quantity:
+                raise TransitValidationError("Transfer exceeds remaining Transit quantity.")
+            if target.pk == lot.destination_warehouse_id:
+                raise TransitValidationError("Destination warehouse is unchanged.")
+            assert_posting_date_open(transfer_date)
+            old_id = lot.destination_warehouse_id
+            row = TransitDestinationTransfer.objects.create(lot=lot, from_warehouse_id=old_id, to_warehouse=target, quantity=quantity, transfer_date=transfer_date, idempotency_key=idempotency_key, created_by=actor)
+            lot.destination_warehouse = target
+            lot.save(allow_state_transition=True, update_fields={"destination_warehouse"})
+            record.response_body = {"transfer_id": row.pk}
+            record.save(update_fields=["response_body"])
+            return row
