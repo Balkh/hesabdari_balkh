@@ -613,6 +613,79 @@ def post_purchase_return(*, purchase, product, quantity, source_movement,
         raise
 
 
+
+
+@transaction.atomic
+def post_transit_purchase_return(*, purchase, transit_lot, quantity, return_date, reason, user=None, document_number=None, idempotency_key=None):
+    """Return owned goods that are still in Transit; creates the same supplier claim as a warehouse return."""
+    actor = _actor(user)
+    if not isinstance(idempotency_key, str) or not idempotency_key or len(idempotency_key) > 128:
+        raise PurchaseValidationError("A valid idempotency key is required.")
+    if not isinstance(reason, str) or not reason.strip():
+        raise PurchaseValidationError("A purchase return reason is required.")
+    purchase_id = getattr(purchase, "pk", purchase)
+    lot_id = getattr(transit_lot, "pk", transit_lot)
+    day = _date(return_date, "return_date")
+    fingerprint = _fingerprint({"purchase_id": purchase_id, "transit_lot_id": lot_id, "quantity": quantity, "return_date": day, "reason": reason.strip(), "document_number": document_number or ""})
+    try:
+        with idempotent_operation(key=idempotency_key, operation="purchase-return.transit.post") as idem:
+            with transaction.atomic():
+                purchase = Purchase.objects.select_for_update().select_related("supplier", "warehouse", "currency").get(pk=purchase_id)
+                if purchase.status != PurchaseStatus.POSTED:
+                    raise PurchaseValidationError("Only a posted purchase can be returned.")
+                from goods_in_transit.models import GoodsInTransitLot, TransitLotStatus
+                lot = GoodsInTransitLot.objects.select_for_update().select_related("product", "currency", "destination_warehouse").get(pk=lot_id)
+                if lot.purchase_id != purchase.pk or lot.status != TransitLotStatus.OPEN:
+                    raise PurchaseValidationError("Transit lot does not belong to the posted purchase or is not open.")
+                if quantity <= 0 or not isinstance(quantity, int) or isinstance(quantity, bool):
+                    raise PurchaseValidationError("Return quantity must be a positive integer.")
+                if quantity > lot.remaining_quantity:
+                    raise PurchaseValidationError("Return exceeds remaining Transit quantity.")
+                if day < purchase.purchase_date:
+                    raise PurchaseValidationError("Return date cannot precede the purchase date.")
+                if lot.currency_id != purchase.currency_id:
+                    raise PurchaseValidationError("Purchase return currency must match the purchase.")
+                if document_number is None:
+                    document_number = next_document_number("PRTN", _purchase_return_year(day))
+                if PurchaseReturn.objects.filter(document_number=document_number).exists():
+                    raise PurchaseValidationError("Purchase return document number already exists.")
+                assert_posting_date_open(day)
+                amount = quantize_half_up(lot.unit_cost * Decimal(quantity), 2)
+                payable = Account.objects.get(code=PAYABLE_ACCOUNT)
+                transit_account = Account.objects.get(code="1430")
+                journal = post_journal(
+                    number=next_document_number("JE", _purchase_return_year(day)), posting_date=day,
+                    description=f"Transit purchase return {document_number}",
+                    lines=[
+                        {"account": payable, "debit": amount, "reference": document_number, "description": f"Supplier claim for transit return {document_number}"},
+                        {"account": transit_account, "credit": amount, "reference": document_number, "description": f"Remove owned Transit {document_number}"},
+                    ], source_type="PURCHASE_RETURN", source_id=document_number,
+                    currency=lot.currency, rate=lot.rate, rate_date=lot.rate_date,
+                    created_by=actor, idempotency_key=f"{idempotency_key}:journal",
+                )
+                attribute_journal_line(journal.lines.get(account=payable), party=purchase.supplier, user=actor)
+                remaining = lot.remaining_quantity - quantity
+                lot.remaining_quantity = remaining
+                lot.status = TransitLotStatus.CLOSED if remaining == 0 else TransitLotStatus.OPEN
+                lot.save(allow_state_transition=True, update_fields={"remaining_quantity", "status"})
+                result = PurchaseReturn.objects.create(
+                    document_number=document_number, purchase=purchase, inventory_return=None, transit_lot=lot,
+                    supplier=purchase.supplier, warehouse=purchase.warehouse, currency=lot.currency,
+                    return_date=day, quantity=quantity, amount=amount, journal_entry=journal,
+                    status=PurchaseReturnStatus.POSTED, reason=reason.strip(), idempotency_key=idempotency_key, created_by=actor,
+                )
+                idem.response_body = {"purchase_return_id": result.pk, "fingerprint": fingerprint}
+                idem.save(update_fields=["response_body"])
+                record_audit_event(user=actor, action=AuditAction.CREATE, entity="PurchaseReturn", entity_id=result.pk, reference=document_number, previous_state=None,
+                    new_state={"document_number": document_number, "purchase_id": purchase.pk, "transit_lot_id": lot.pk, "quantity": quantity, "amount": str(amount), "journal_entry_id": journal.pk}, reason=reason.strip())
+                return result
+    except GoodsInTransitLot.DoesNotExist as exc:
+        raise PurchaseValidationError("Goods in Transit lot does not exist.") from exc
+    except DuplicateOperationError:
+        record = IdempotencyRecord.objects.filter(key=idempotency_key).first()
+        if record is not None and (record.response_body or {}).get("fingerprint") == fingerprint:
+            return PurchaseReturn.objects.get(pk=record.response_body["purchase_return_id"])
+        raise
 @transaction.atomic
 def reverse_purchase_return(purchase_return, *, reason, user=None, idempotency_key=None):
     actor = _actor(user)
