@@ -235,7 +235,7 @@ def _receive_transit_core(*, lot, quantity, receipt_date, user=None, idempotency
                 from sales.services import resolve_negative_obligations
                 resolve_negative_obligations(receipt_movement=movement)
                 amount = quantize_half_up(lot.unit_cost * company_qty, 2)
-                entry = post_journal(number=f"JE-TRANSIT-RECEIPT-{lot.pk}-{idempotency_key[:12]}", posting_date=receipt_date, description=f"Goods in Transit receipt {lot.purchase.document_number}", lines=[{"account": resolve_warehouse_account(warehouse), "debit": amount, "reference": reference}, {"account": Account.objects.get(code=TRANSIT_ACCOUNT), "credit": amount, "reference": reference}], source_type="GOODS_IN_TRANSIT_RECEIPT", source_id=reference, currency=lot.currency, rate=lot.rate, rate_date=lot.rate_date, created_by=actor, idempotency_key=f"{idempotency_key}:journal")
+                entry = post_journal(number=f"JE-TR-{lot.pk}-{hashlib.sha256(idempotency_key.encode()).hexdigest()[:12]}", posting_date=receipt_date, description=f"Goods in Transit receipt {lot.purchase.document_number}", lines=[{"account": resolve_warehouse_account(warehouse), "debit": amount, "reference": reference}, {"account": Account.objects.get(code=TRANSIT_ACCOUNT), "credit": amount, "reference": reference}], source_type="GOODS_IN_TRANSIT_RECEIPT", source_id=reference, currency=lot.currency, rate=lot.rate, rate_date=lot.rate_date, created_by=actor, idempotency_key=f"{idempotency_key}:journal")
             before = lot.remaining_quantity
             lot.remaining_quantity = before - company_qty
             lot.status = TransitLotStatus.CLOSED if lot.remaining_quantity == 0 else TransitLotStatus.OPEN
