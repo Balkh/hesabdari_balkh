@@ -164,12 +164,13 @@ def finalize_sale(*, sale, user=None, idempotency_key=None):
         sale.finalized_at = timezone.now()
         sale.journal_entry = journal
         sale.save(update_fields=["status", "finalized_at", "journal_entry"])
-        for line in SaleLine.objects.filter(sale=sale).order_by("id"):
-            create_ownership_entitlement(
-                sale_line=line,
-                user=actor,
-                idempotency_key=f"sale:{sale.pk}:line:{line.pk}:ownership",
-            )
+        if sale.sale_type == SaleType.AVAILABLE:
+            for line in SaleLine.objects.filter(sale=sale).order_by("id"):
+                create_ownership_entitlement(
+                    sale_line=line,
+                    user=actor,
+                    idempotency_key=f"sale:{sale.pk}:line:{line.pk}:ownership",
+                )
     return sale
 
 
