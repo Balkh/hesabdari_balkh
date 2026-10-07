@@ -31,7 +31,7 @@ class CustomerCustodyTests(TestCase):
     def setUp(self):
         category = create_category(name="Custody Category")
         unit = create_uom(name="Custody Unit")
-        self.product = create_product(code="CUST-1", name="Custody Product", category=category, primary_uom=unit)
+        self.product = create_product(code="CUST-1", name="Custody Product", name_fa="محصول امانت", category=category, primary_uom=unit)
         self.customer = create_party(name="Custody Customer", is_customer=True)
         self.warehouse = create_warehouse(name="Custody Warehouse")
         self.day = date(2026, 10, 1)
