@@ -20,8 +20,8 @@ from purchases.services import create_purchase, post_purchase
 from sales.models import PaymentMode, SalesChannel, SaleStatus, TransitSaleAllocation
 from sales.services import SalesValidationError, create_sale, finalize_sale
 
-from .models import GoodsInTransitLot, TransitLotStatus, TransitReceipt
-from .services import TransitValidationError, receive_transit
+from .models import GoodsInTransitLot, TransitCustomerCustody, TransitDestinationTransfer, TransitLotStatus, TransitReceipt
+from .services import TransitValidationError, receive_transit, transfer_transit_destination
 
 
 class GoodsInTransitTests(TestCase):
@@ -247,3 +247,35 @@ class GoodsInTransitTests(TestCase):
         lot.refresh_from_db()
         self.assertEqual(lot.remaining_quantity, 100)
         self.assertEqual(sale.status, SaleStatus.DRAFT)
+
+
+    def test_sale_then_full_physical_receipt_creates_customer_custody_without_company_stock(self):
+        purchase = self._purchase(document_number="PI-TRANSIT-CUSTODY-001")
+        post_purchase(purchase=purchase, user=self.user)
+        lot = GoodsInTransitLot.objects.get(purchase_line=purchase.lines.get())
+        sale = create_sale(customer=self.customer, sale_date=date(2026, 2, 10), currency=self.usd, channel=SalesChannel.WHOLESALE, payment_mode=PaymentMode.CREDIT, lines=[{"product": self.product, "unit": self.product.primary_uom, "quantity": 20, "unit_price": "120", "transit_lot": lot}], user=self.user, document_number="SI-TRANSIT-CUSTODY-001")
+        finalize_sale(sale=sale, user=self.user)
+        receipt = receive_transit(lot=lot, quantity=100, receipt_date=date(2026, 2, 12), user=self.user, idempotency_key="transit-custody-001")
+        lot.refresh_from_db()
+        self.assertEqual(receipt.company_quantity, 80)
+        self.assertEqual(receipt.customer_custody_quantity, 20)
+        self.assertEqual(lot.remaining_quantity, 0)
+        self.assertEqual(stock_for(self.product, self.warehouse), 80)
+        custody = TransitCustomerCustody.objects.get(receipt=receipt)
+        self.assertEqual(custody.quantity, 20)
+        self.assertEqual(custody.customer_id, self.customer.pk)
+        self.assertEqual(custody.warehouse_id, self.warehouse.pk)
+
+    def test_transit_destination_transfer_preserves_owned_quantity_and_changes_destination(self):
+        purchase = self._purchase(document_number="PI-TRANSIT-MOVE-001")
+        post_purchase(purchase=purchase, user=self.user)
+        lot = GoodsInTransitLot.objects.get(purchase_line=purchase.lines.get())
+        second = create_warehouse(name="Transit Destination 2", user=self.user)
+        WarehouseInventoryAccount.objects.create(warehouse=second, account_id=self._account_id("1420"))
+        row = transfer_transit_destination(lot=lot, warehouse=second, quantity=40, transfer_date=date(2026, 2, 3), user=self.user, idempotency_key="transit-move-001")
+        lot.refresh_from_db()
+        self.assertEqual(row.quantity, 40)
+        self.assertEqual(row.from_warehouse_id, self.warehouse.pk)
+        self.assertEqual(row.to_warehouse_id, second.pk)
+        self.assertEqual(lot.destination_warehouse_id, second.pk)
+        self.assertEqual(lot.remaining_quantity, 100)
