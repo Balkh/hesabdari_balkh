@@ -710,17 +710,27 @@ def reverse_purchase_return(purchase_return, *, reason, user=None, idempotency_k
                     raise PurchaseValidationError(
                         "Reverse all posted Supplier Refunds before reversing the Purchase Return."
                     )
-                original = result.inventory_return.return_movement
-                restored = receive_stock(
-                    product=original.product, warehouse=original.warehouse,
-                    quantity=result.quantity, unit_cost=original.unit_cost,
-                    currency=original.currency, rate=original.rate, rate_date=original.rate_date,
-                    movement_date=result.return_date,
-                    reference=f"{result.document_number}:REVERSAL",
-                    description=f"Reversal of purchase return {result.document_number}",
-                    user=actor, party=result.supplier,
-                    idempotency_key=f"{idempotency_key}:inventory",
-                )
+                restored = None
+                if result.inventory_return_id:
+                    original = result.inventory_return.return_movement
+                    restored = receive_stock(
+                        product=original.product, warehouse=original.warehouse,
+                        quantity=result.quantity, unit_cost=original.unit_cost,
+                        currency=original.currency, rate=original.rate, rate_date=original.rate_date,
+                        movement_date=result.return_date,
+                        reference=f"{result.document_number}:REVERSAL",
+                        description=f"Reversal of purchase return {result.document_number}",
+                        user=actor, party=result.supplier,
+                        idempotency_key=f"{idempotency_key}:inventory",
+                    )
+                elif result.transit_lot_id:
+                    from goods_in_transit.models import GoodsInTransitLot, TransitLotStatus
+                    lot = GoodsInTransitLot.objects.select_for_update().get(pk=result.transit_lot_id)
+                    lot.remaining_quantity += result.quantity
+                    lot.status = TransitLotStatus.OPEN
+                    lot.save(allow_state_transition=True, update_fields={"remaining_quantity", "status"})
+                else:
+                    raise PurchaseValidationError("Purchase return has no restorable inventory source.")
                 reversal = reverse_journal(result.journal_entry, reason.strip(), actor)
                 attribute_journal_line(
                     reversal.lines.get(account__code=PAYABLE_ACCOUNT),
@@ -740,7 +750,7 @@ def reverse_purchase_return(purchase_return, *, reason, user=None, idempotency_k
                     entity_id=result.pk, reference=result.document_number,
                     previous_state={"status": PurchaseReturnStatus.POSTED},
                     new_state={"status": PurchaseReturnStatus.REVERSED,
-                               "reversal_id": row.pk, "stock_movement_id": restored.pk,
+                               "reversal_id": row.pk, "stock_movement_id": restored.pk if restored else None,
                                "journal_reversal_id": reversal.pk},
                     reason=reason.strip(),
                 )
