@@ -149,3 +149,31 @@ class COGSAdjustment(models.Model):
 
 # Phase 11 models live in a separate module to keep the existing Sales models readable.
 from .returns_models import CrossCurrencyRefund, CrossCurrencyRefundStatus, Refund, RefundStatus, SalesReturn, SalesReturnReversal, SalesReturnStatus
+
+
+
+class TransitSaleAllocation(models.Model):
+    """Immutable ownership/cost allocation of a finalized SaleLine from Transit."""
+
+    sale_line = models.OneToOneField(SaleLine, on_delete=models.PROTECT, related_name="transit_allocation")
+    transit_lot = models.ForeignKey("goods_in_transit.GoodsInTransitLot", on_delete=models.PROTECT, related_name="sale_allocations")
+    quantity = models.PositiveIntegerField()
+    unit_cost = models.DecimalField(max_digits=20, decimal_places=4)
+    cogs_journal = models.OneToOneField("accounting.JournalEntry", on_delete=models.PROTECT, related_name="transit_sale_allocation")
+    idempotency_key = models.CharField(max_length=128, unique=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["id"]
+        constraints = [
+            models.CheckConstraint(condition=models.Q(quantity__gt=0), name="transit_sale_alloc_qty_gt0"),
+            models.CheckConstraint(condition=models.Q(unit_cost__gte=0), name="transit_sale_alloc_cost_gte0"),
+        ]
+
+    def save(self, *args, **kwargs):
+        if self.pk is not None:
+            raise PostedImmutabilityError("Transit sale allocations are immutable")
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise PostedImmutabilityError("Transit sale allocations cannot be deleted")
