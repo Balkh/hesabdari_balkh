@@ -121,6 +121,8 @@ def receive_transit(*, lot, quantity, receipt_date, user=None,
                     user=actor, party=lot.supplier,
                     idempotency_key=f"{idempotency_key}:movement",
                 )
+                from sales.services import resolve_negative_obligations
+                resolve_negative_obligations(receipt_movement=movement)
                 amount = quantize_half_up(lot.unit_cost * quantity, 2)
                 entry = post_journal(
                     number=f"JE-TRANSIT-RECEIPT-{lot.pk}-{idempotency_key[:12]}",
