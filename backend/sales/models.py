@@ -73,6 +73,7 @@ class SaleLine(models.Model):
     discount = models.DecimalField(max_digits=20, decimal_places=2, default=Decimal("0.00"))
     line_total = models.DecimalField(max_digits=20, decimal_places=2)
     net_total = models.DecimalField(max_digits=20, decimal_places=2)
+    transit_lot = models.ForeignKey("goods_in_transit.GoodsInTransitLot", null=True, blank=True, on_delete=models.PROTECT, related_name="sale_lines")
 
     class Meta:
         ordering = ["id"]
