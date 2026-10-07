@@ -1,0 +1,177 @@
+from datetime import date
+from decimal import Decimal
+
+from django.contrib.auth import get_user_model
+from django.test import TestCase
+
+from accounting.coa import seed_chart_of_accounts
+from accounting.models import JournalEntry
+from categories.services import create_category
+from currencies.models import Currency
+from inventory.models import StockMovement, WarehouseInventoryAccount
+from inventory.stock import stock_for
+from parties.services import create_party
+from products.services import create_product
+from uom.services import create_uom
+from warehouses.services import create_warehouse
+
+from purchases.models import PurchaseDeliveryMode
+from purchases.services import create_purchase, post_purchase
+
+from .models import GoodsInTransitLot, TransitLotStatus, TransitReceipt
+from .services import TransitValidationError, receive_transit
+
+
+class GoodsInTransitTests(TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        seed_chart_of_accounts()
+        cls.afn = Currency.objects.create(code="AFN", name="Afghani", is_base=True)
+        cls.usd = Currency.objects.create(code="USD", name="US Dollar")
+        cls.user = get_user_model().objects.create_user("transit-user", password="x")
+
+    def setUp(self):
+        category = create_category(name="Transit Category", user=self.user)
+        uom = create_uom(name="Transit Unit", user=self.user)
+        self.product = create_product(
+            code="TR-1", name="Transit Oil", name_fa="روغن در مسیر",
+            category=category, primary_uom=uom, user=self.user,
+        )
+        self.supplier = create_party(name="Transit Supplier", is_supplier=True, user=self.user)
+        self.warehouse = create_warehouse(name="Transit Destination", user=self.user)
+        WarehouseInventoryAccount.objects.create(
+            warehouse=self.warehouse,
+            account_id=self._account_id("1410"),
+        )
+        self.day = date(2026, 2, 1)
+
+    def _account_id(self, code):
+        from accounting.models import Account
+        return Account.objects.get(code=code).pk
+
+    def _purchase(self, **kwargs):
+        params = dict(
+            supplier=self.supplier,
+            purchase_date=self.day,
+            currency=self.usd,
+            warehouse=self.warehouse,
+            lines=[{"product": self.product, "quantity": 100, "unit_price": "100"}],
+            rate="70",
+            rate_date=self.day,
+            delivery_mode=PurchaseDeliveryMode.IN_TRANSIT,
+            user=self.user,
+        )
+        params.update(kwargs)
+        return create_purchase(**params)
+
+    def test_owned_purchase_creates_transit_not_warehouse_stock(self):
+        purchase = self._purchase(document_number="PI-TRANSIT-001")
+        post_purchase(purchase=purchase, user=self.user)
+
+        line = purchase.lines.get()
+        lot = GoodsInTransitLot.objects.get(purchase_line=line)
+
+        self.assertEqual(lot.original_quantity, 100)
+        self.assertEqual(lot.remaining_quantity, 100)
+        self.assertEqual(lot.unit_cost, Decimal("100.0000"))
+        self.assertEqual(lot.rate, Decimal("70.0000"))
+        self.assertEqual(lot.status, TransitLotStatus.OPEN)
+        self.assertEqual(stock_for(self.product, self.warehouse), 0)
+
+        purchase_journal = JournalEntry.objects.get(
+            source_type="PURCHASE", source_id=purchase.document_number
+        )
+        self.assertEqual(
+            purchase_journal.lines.get(account__code="1430").debit,
+            Decimal("10000.00"),
+        )
+        self.assertEqual(
+            purchase_journal.lines.get(account__code="2110").credit,
+            Decimal("10000.00"),
+        )
+        self.assertFalse(
+            StockMovement.objects.filter(
+                reference=f"{purchase.document_number}:LINE:{line.pk}"
+            ).exists()
+        )
+
+    def test_partial_receipt_moves_only_received_quantity_to_warehouse(self):
+        purchase = self._purchase(document_number="PI-TRANSIT-002")
+        post_purchase(purchase=purchase, user=self.user)
+        lot = GoodsInTransitLot.objects.get(purchase_line=purchase.lines.get())
+
+        receipt = receive_transit(
+            lot=lot, quantity=60, receipt_date=date(2026, 2, 5),
+            user=self.user, idempotency_key="transit-receipt-002",
+        )
+
+        lot.refresh_from_db()
+        self.assertEqual(receipt.quantity, 60)
+        self.assertEqual(lot.remaining_quantity, 40)
+        self.assertEqual(lot.status, TransitLotStatus.OPEN)
+        self.assertEqual(stock_for(self.product, self.warehouse), 60)
+
+        movement = receipt.stock_movement
+        self.assertEqual(movement.quantity, 60)
+        self.assertEqual(movement.unit_cost, Decimal("100.0000"))
+        self.assertEqual(movement.unit_cost_afn, Decimal("7000.0000"))
+
+        journal = receipt.journal_entry
+        self.assertEqual(journal.lines.get(account__code="1410").debit, Decimal("6000.00"))
+        self.assertEqual(journal.lines.get(account__code="1430").credit, Decimal("6000.00"))
+
+    def test_multiple_receipts_close_exactly_at_zero(self):
+        purchase = self._purchase(document_number="PI-TRANSIT-003")
+        post_purchase(purchase=purchase, user=self.user)
+        lot = GoodsInTransitLot.objects.get(purchase_line=purchase.lines.get())
+
+        receive_transit(
+            lot=lot, quantity=30, receipt_date=date(2026, 2, 5),
+            user=self.user, idempotency_key="transit-receipt-003-a",
+        )
+        receive_transit(
+            lot=lot, quantity=20, receipt_date=date(2026, 2, 6),
+            user=self.user, idempotency_key="transit-receipt-003-b",
+        )
+        receive_transit(
+            lot=lot, quantity=50, receipt_date=date(2026, 2, 7),
+            user=self.user, idempotency_key="transit-receipt-003-c",
+        )
+
+        lot.refresh_from_db()
+        self.assertEqual(lot.remaining_quantity, 0)
+        self.assertEqual(lot.status, TransitLotStatus.CLOSED)
+        self.assertEqual(stock_for(self.product, self.warehouse), 100)
+
+    def test_receipt_cannot_exceed_remaining_transit(self):
+        purchase = self._purchase(document_number="PI-TRANSIT-004")
+        post_purchase(purchase=purchase, user=self.user)
+        lot = GoodsInTransitLot.objects.get(purchase_line=purchase.lines.get())
+
+        with self.assertRaises(TransitValidationError):
+            receive_transit(
+                lot=lot, quantity=101, receipt_date=date(2026, 2, 5),
+                user=self.user, idempotency_key="transit-receipt-004",
+            )
+
+        lot.refresh_from_db()
+        self.assertEqual(lot.remaining_quantity, 100)
+        self.assertEqual(stock_for(self.product, self.warehouse), 0)
+
+    def test_receipt_idempotency_has_one_business_effect(self):
+        purchase = self._purchase(document_number="PI-TRANSIT-005")
+        post_purchase(purchase=purchase, user=self.user)
+        lot = GoodsInTransitLot.objects.get(purchase_line=purchase.lines.get())
+
+        first = receive_transit(
+            lot=lot, quantity=25, receipt_date=date(2026, 2, 5),
+            user=self.user, idempotency_key="transit-receipt-005",
+        )
+        second = receive_transit(
+            lot=lot, quantity=25, receipt_date=date(2026, 2, 5),
+            user=self.user, idempotency_key="transit-receipt-005",
+        )
+
+        self.assertEqual(first.pk, second.pk)
+        self.assertEqual(TransitReceipt.objects.filter(lot=lot).count(), 1)
+        self.assertEqual(stock_for(self.product, self.warehouse), 25)
