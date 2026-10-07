@@ -88,7 +88,9 @@ class TransitReceipt(models.Model):
     def delete(self, *args, **kwargs):
         raise PostedImmutabilityError("Transit receipts cannot be deleted")
 
-\n\nclass TransitCustomerCustody(models.Model):
+
+
+class TransitCustomerCustody(models.Model):
     """Physical customer-owned goods received into a warehouse without company inventory valuation."""
     receipt = models.ForeignKey(TransitReceipt, on_delete=models.PROTECT, related_name="customer_custody_rows")
     sale_line = models.ForeignKey("sales.SaleLine", on_delete=models.PROTECT, related_name="transit_customer_custody")
