@@ -18,7 +18,7 @@ from parties.services import create_party
 from products.services import create_product
 from uom.services import create_uom
 from warehouses.services import create_warehouse
-from sales.models import PaymentMode, SalesChannel
+from sales.models import PaymentMode, SalesChannel, SaleType
 from sales.services import create_sale, finalize_sale
 
 
@@ -53,6 +53,12 @@ class CustomerCustodyTests(TestCase):
         self.assertRaises(PostedImmutabilityError, entitlement.delete)
 
     def test_ownership_is_not_created_for_draft_sale(self):
+        self.assertEqual(CustomerOwnershipEntitlement.objects.count(), 0)
+
+    def test_future_sale_does_not_create_customer_ownership(self):
+        self.sale.sale_type = SaleType.FUTURE
+        self.sale.save(update_fields=["sale_type"])
+        finalize_sale(sale=self.sale)
         self.assertEqual(CustomerOwnershipEntitlement.objects.count(), 0)
 
     def test_partial_multi_warehouse_custody_and_release(self):
