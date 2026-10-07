@@ -17,6 +17,8 @@ from warehouses.services import create_warehouse
 
 from purchases.models import PurchaseDeliveryMode
 from purchases.services import create_purchase, post_purchase
+from sales.models import PaymentMode, SalesChannel, SaleStatus, TransitSaleAllocation
+from sales.services import SalesValidationError, create_sale, finalize_sale
 
 from .models import GoodsInTransitLot, TransitLotStatus, TransitReceipt
 from .services import TransitValidationError, receive_transit
@@ -38,6 +40,7 @@ class GoodsInTransitTests(TestCase):
             category=category, primary_uom=uom, user=self.user,
         )
         self.supplier = create_party(name="Transit Supplier", is_supplier=True, user=self.user)
+        self.customer = create_party(name="Transit Customer", is_customer=True, user=self.user)
         self.warehouse = create_warehouse(name="Transit Destination", user=self.user)
         WarehouseInventoryAccount.objects.create(
             warehouse=self.warehouse,
@@ -175,3 +178,72 @@ class GoodsInTransitTests(TestCase):
         self.assertEqual(first.pk, second.pk)
         self.assertEqual(TransitReceipt.objects.filter(lot=lot).count(), 1)
         self.assertEqual(stock_for(self.product, self.warehouse), 25)
+
+    def test_sale_from_transit_consumes_owned_transit_and_posts_cogs(self):
+        purchase = self._purchase(document_number="PI-TRANSIT-SALE-001")
+        post_purchase(purchase=purchase, user=self.user)
+        lot = GoodsInTransitLot.objects.get(purchase_line=purchase.lines.get())
+
+        sale = create_sale(
+            customer=self.customer,
+            sale_date=date(2026, 2, 10),
+            currency=self.usd,
+            channel=SalesChannel.WHOLESALE,
+            payment_mode=PaymentMode.CREDIT,
+            lines=[{
+                "product": self.product,
+                "unit": self.product.primary_uom,
+                "quantity": 20,
+                "unit_price": "120",
+                "transit_lot": lot,
+            }],
+            user=self.user,
+            document_number="SI-TRANSIT-001",
+        )
+        finalize_sale(sale=sale, user=self.user)
+
+        lot.refresh_from_db()
+        line = sale.lines.get()
+        allocation = TransitSaleAllocation.objects.get(sale_line=line)
+
+        self.assertEqual(sale.status, SaleStatus.FINALIZED)
+        self.assertEqual(lot.remaining_quantity, 80)
+        self.assertEqual(allocation.quantity, 20)
+        self.assertEqual(allocation.unit_cost, Decimal("100.0000"))
+        self.assertEqual(
+            allocation.cogs_journal.lines.get(account__code="5100").debit,
+            Decimal("2000.00"),
+        )
+        self.assertEqual(
+            allocation.cogs_journal.lines.get(account__code="1430").credit,
+            Decimal("2000.00"),
+        )
+        self.assertEqual(stock_for(self.product, self.warehouse), 0)
+
+    def test_sale_cannot_consume_more_transit_than_available(self):
+        purchase = self._purchase(document_number="PI-TRANSIT-SALE-002")
+        post_purchase(purchase=purchase, user=self.user)
+        lot = GoodsInTransitLot.objects.get(purchase_line=purchase.lines.get())
+
+        sale = create_sale(
+            customer=self.customer,
+            sale_date=date(2026, 2, 10),
+            currency=self.usd,
+            channel=SalesChannel.WHOLESALE,
+            payment_mode=PaymentMode.CREDIT,
+            lines=[{
+                "product": self.product,
+                "unit": self.product.primary_uom,
+                "quantity": 101,
+                "unit_price": "120",
+                "transit_lot": lot,
+            }],
+            user=self.user,
+            document_number="SI-TRANSIT-002",
+        )
+        with self.assertRaises(SalesValidationError):
+            finalize_sale(sale=sale, user=self.user)
+
+        lot.refresh_from_db()
+        self.assertEqual(lot.remaining_quantity, 100)
+        self.assertEqual(sale.status, SaleStatus.DRAFT)
