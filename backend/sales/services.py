@@ -194,7 +194,7 @@ def finalize_sale(*, sale, user=None, idempotency_key=None):
                 raise SalesValidationError("Transit lot product does not match SaleLine.")
             cogs_value = quantize_half_up(Decimal(line.quantity) * lot.unit_cost, 2)
             cogs_journal = post_journal(
-                number=f"JE-TCOGS-{hashlib.sha256(f"{sale.pk}:{line.pk}".encode()).hexdigest()[:20]}",
+                number=f"JE-TCOGS-{hashlib.sha256(f'{sale.pk}:{line.pk}'.encode()).hexdigest()[:20]}",
                 posting_date=sale.sale_date,
                 description=f"COGS for Transit Sale {sale.document_number} line {line.pk}",
                 lines=[
