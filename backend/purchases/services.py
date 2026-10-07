@@ -30,7 +30,7 @@ from security.services import record_audit_event
 from warehouses.models import Warehouse
 from warehouses.services import WarehouseValidationError, resolve_warehouse
 
-from .models import Purchase, PurchaseLine, PurchaseStatus
+from .models import Purchase, PurchaseDeliveryMode, PurchaseLine, PurchaseStatus
 
 
 class PurchaseValidationError(ValueError):
@@ -273,7 +273,7 @@ def update_purchase(purchase, *, supplier=_UNSET, purchase_date=_UNSET, currency
             current.freight = new_freight
             current.total = total
             current.save(update_fields=["supplier", "purchase_date", "currency", "exchange_rate",
-                                        "rate_date", "warehouse", "description", "subtotal",
+                                        "rate_date", "warehouse", "delivery_mode", "description", "subtotal",
                                         "discount", "freight", "total"])
             current.lines.all().delete()
             for row in rows:
