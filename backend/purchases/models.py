@@ -11,6 +11,11 @@ class PurchaseStatus(models.TextChoices):
     POSTED = "POSTED", "Posted"
 
 
+class PurchaseDeliveryMode(models.TextChoices):
+    IMMEDIATE = "IMMEDIATE", "Immediate warehouse receipt"
+    IN_TRANSIT = "IN_TRANSIT", "Owned in transit"
+
+
 class PurchaseQuerySet(models.QuerySet):
     def _contains_posted(self):
         return self.filter(status=PurchaseStatus.POSTED).exists()
@@ -68,6 +73,7 @@ class Purchase(models.Model):
     exchange_rate = models.DecimalField(max_digits=20, decimal_places=4)
     rate_date = models.DateField()
     warehouse = models.ForeignKey("warehouses.Warehouse", on_delete=models.PROTECT, related_name="purchases")
+    delivery_mode = models.CharField(max_length=12, choices=PurchaseDeliveryMode.choices, default=PurchaseDeliveryMode.IMMEDIATE)
     description = models.CharField(max_length=500, blank=True, default="")
     subtotal = models.DecimalField(max_digits=20, decimal_places=2, default=Decimal("0.00"))
     discount = models.DecimalField(max_digits=20, decimal_places=2, default=Decimal("0.00"))
