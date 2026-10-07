@@ -241,8 +241,9 @@ _UNSET = object()
 
 
 def update_purchase(purchase, *, supplier=_UNSET, purchase_date=_UNSET, currency=_UNSET,
-                    warehouse=_UNSET, description=_UNSET, discount=_UNSET, freight=_UNSET,
-                    rate=_UNSET, rate_date=_UNSET, lines=_UNSET, user=None):
+                    warehouse=_UNSET, delivery_mode=_UNSET, description=_UNSET,
+                    discount=_UNSET, freight=_UNSET, rate=_UNSET, rate_date=_UNSET,
+                    lines=_UNSET, user=None):
     """Edit a commercial Purchase only while it is DRAFT and recalculate its totals."""
     actor = _actor(user)
     try:
@@ -254,6 +255,11 @@ def update_purchase(purchase, *, supplier=_UNSET, purchase_date=_UNSET, currency
             old_state = _snapshot(current)
             supplier = current.supplier if supplier is _UNSET else _resolve_supplier(supplier)
             warehouse = current.warehouse if warehouse is _UNSET else _resolve_warehouse(warehouse)
+            delivery_mode = current.delivery_mode if delivery_mode is _UNSET else delivery_mode
+            try:
+                delivery_mode = PurchaseDeliveryMode(delivery_mode)
+            except ValueError as exc:
+                raise PurchaseValidationError("Invalid purchase delivery mode.") from exc
             purchase_day = current.purchase_date if purchase_date is _UNSET else _date(purchase_date, "purchase_date")
             currency = current.currency if currency is _UNSET else resolve_currency(currency)
             if not currency.is_active:
@@ -274,6 +280,7 @@ def update_purchase(purchase, *, supplier=_UNSET, purchase_date=_UNSET, currency
             current.exchange_rate = rate_value
             current.rate_date = rate_day
             current.warehouse = warehouse
+            current.delivery_mode = delivery_mode
             current.description = current.description if description is _UNSET else str(description).strip()
             current.subtotal = subtotal
             current.discount = new_discount
@@ -324,6 +331,10 @@ def validate_purchase(purchase):
     if not currency.is_active:
         raise PurchaseValidationError("Currency is not active.")
     _rate(currency, purchase.exchange_rate, purchase.rate_date, purchase.purchase_date)
+    try:
+        PurchaseDeliveryMode(purchase.delivery_mode)
+    except ValueError as exc:
+        raise PurchaseValidationError("Invalid purchase delivery mode.") from exc
     if not isinstance(purchase.description, str):
         raise PurchaseValidationError("Description must be text.")
     lines = list(purchase.lines.select_related("product").order_by("id"))
@@ -360,7 +371,8 @@ def _fingerprint(purchase):
             "status": purchase.status, "supplier_id": purchase.supplier_id,
             "purchase_date": purchase.purchase_date.isoformat(), "currency_id": purchase.currency_id,
             "rate": str(purchase.exchange_rate), "rate_date": purchase.rate_date.isoformat(),
-            "warehouse_id": purchase.warehouse_id, "discount": str(purchase.discount),
+            "warehouse_id": purchase.warehouse_id, "delivery_mode": purchase.delivery_mode,
+            "discount": str(purchase.discount),
             "freight": str(purchase.freight), "description": purchase.description,
             "lines": list(purchase.lines.values("product_id", "quantity", "unit_price", "net_total")),
         }
