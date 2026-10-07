@@ -53,7 +53,7 @@ class GoodsInTransitLot(models.Model):
             raise PostedImmutabilityError("Goods in Transit lots are immutable")
         if self.pk is not None and allow_state_transition:
             update_fields = set(kwargs.get("update_fields") or ())
-            if update_fields != {"remaining_quantity", "status"}:
+            if update_fields not in ({"remaining_quantity", "status"}, {"destination_warehouse"}):
                 raise PostedImmutabilityError("Transit state may only change through an approved receipt/disposition event")
         return super().save(*args, **kwargs)
 
