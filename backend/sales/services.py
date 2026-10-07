@@ -185,6 +185,8 @@ def finalize_sale(*, sale, user=None, idempotency_key=None):
             lot = GoodsInTransitLot.objects.select_for_update(of=("self",)).get(pk=line.transit_lot_id)
             if lot.status != TransitLotStatus.OPEN:
                 raise SalesValidationError("Transit lot is not open.")
+            if sale.sale_date < lot.ownership_date:
+                raise SalesValidationError("Sale date cannot precede Transit ownership date.")
             if line.quantity > lot.remaining_quantity:
                 raise SalesValidationError("Sale exceeds remaining Transit quantity.")
             if line.product_id != lot.product_id:
