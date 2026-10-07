@@ -399,13 +399,17 @@ def _post_effects(purchase, actor, idempotency_key):
         raise PurchaseValidationError("Only a draft purchase can be posted.")
     validate_purchase(purchase)
     assert_posting_date_open(purchase.purchase_date)
-    inventory_account = Account.objects.filter(code__in=["1410", "1420"]).first()
     from inventory.services import resolve_warehouse_account
-    inventory_account = resolve_warehouse_account(purchase.warehouse)
+    if purchase.delivery_mode == PurchaseDeliveryMode.IN_TRANSIT:
+        inventory_account = Account.objects.get(code="1430")
+        inventory_description = f"Goods in Transit {purchase.document_number}"
+    else:
+        inventory_account = resolve_warehouse_account(purchase.warehouse)
+        inventory_description = f"Inventory receipt {purchase.document_number}"
     payable = Account.objects.get(code=PAYABLE_ACCOUNT)
     freight_account = Account.objects.get(code=FREIGHT_ACCOUNT)
     journal_lines = [{"account": inventory_account, "debit": purchase.subtotal - purchase.discount,
-                      "description": f"Inventory receipt {purchase.document_number}", "reference": purchase.document_number},
+                      "description": inventory_description, "reference": purchase.document_number},
                      {"account": payable, "credit": purchase.total,
                       "description": f"Supplier payable {purchase.document_number}", "reference": purchase.document_number}]
     if purchase.freight:
@@ -422,23 +426,31 @@ def _post_effects(purchase, actor, idempotency_key):
     attribute_journal_line(payable_line, party=purchase.supplier, user=actor)
     movement_ids = []
     movement_references = []
-    for line in purchase.lines.select_related("product"):
-        unit_cost = quantize_half_up(line.net_total / Decimal(line.quantity), 4)
-        movement_reference = f"{purchase.document_number}:LINE:{line.pk}"
-        movement = receive_stock(product=line.product, warehouse=purchase.warehouse, quantity=line.quantity,
-                                 unit_cost=unit_cost, currency=purchase.currency,
-                                 rate=purchase.exchange_rate, rate_date=purchase.rate_date,
-                                 movement_date=purchase.purchase_date, reference=movement_reference,
-                                 description=purchase.description, user=actor, party=purchase.supplier,
-                                 idempotency_key=f"{purchase.document_number}:line:{line.pk}")
-        # A purchase receipt is the authoritative real-cost event that resolves
-        # any earlier negative-stock Sales COGS obligation for the same
-        # (product, warehouse). Keep this inside the purchase transaction so
-        # receipt + COGS adjustment are atomic.
-        from sales.services import resolve_negative_obligations
-        resolve_negative_obligations(receipt_movement=movement)
-        movement_ids.append(movement.pk)
-        movement_references.append(movement.reference)
+    transit_lot_ids = []
+    if purchase.delivery_mode == PurchaseDeliveryMode.IMMEDIATE:
+        for line in purchase.lines.select_related("product"):
+            unit_cost = quantize_half_up(line.net_total / Decimal(line.quantity), 4)
+            movement_reference = f"{purchase.document_number}:LINE:{line.pk}"
+            movement = receive_stock(product=line.product, warehouse=purchase.warehouse, quantity=line.quantity,
+                                     unit_cost=unit_cost, currency=purchase.currency,
+                                     rate=purchase.exchange_rate, rate_date=purchase.rate_date,
+                                     movement_date=purchase.purchase_date, reference=movement_reference,
+                                     description=purchase.description, user=actor, party=purchase.supplier,
+                                     idempotency_key=f"{purchase.document_number}:line:{line.pk}")
+            from sales.services import resolve_negative_obligations
+            resolve_negative_obligations(receipt_movement=movement)
+            movement_ids.append(movement.pk)
+            movement_references.append(movement.reference)
+    else:
+        from goods_in_transit.services import create_transit_lot
+        for line in purchase.lines.select_related("product"):
+            unit_cost = quantize_half_up(line.net_total / Decimal(line.quantity), 4)
+            lot = create_transit_lot(
+                purchase=purchase, purchase_line=line, unit_cost=unit_cost,
+                user=actor, journal_entry=journal,
+                idempotency_key=f"{purchase.document_number}:transit:{line.pk}",
+            )
+            transit_lot_ids.append(lot.pk)
     previous = _snapshot(purchase)
     purchase.status = PurchaseStatus.POSTED
     purchase.posted_at = timezone.now()
@@ -449,6 +461,7 @@ def _post_effects(purchase, actor, idempotency_key):
         "journal_number": journal.number,
         "stock_movement_ids": movement_ids,
         "stock_movement_references": movement_references,
+        "transit_lot_ids": transit_lot_ids,
     })
     record_audit_event(user=actor, action=AuditAction.POST, entity="Purchase", entity_id=purchase.pk,
                        reference=purchase.document_number, previous_state=previous,
