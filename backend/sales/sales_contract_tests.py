@@ -19,6 +19,8 @@ from accounting.coa import seed_chart_of_accounts
 from accounting.models import Account, JournalEntry
 from categories.services import create_category
 from currencies.models import Currency
+from customer_custody.models import CustomerCustodyEvent, CustomerOwnershipEntitlement, CustodyEventType
+from customer_custody.services import custody_balance
 from inventory.models import StockMovement
 from inventory.services import assign_warehouse_account
 from inventory.stock import stock_for
@@ -29,7 +31,7 @@ from uom.services import create_uom
 from warehouses.services import create_warehouse
 
 from .models import (
-    COGSAdjustment, NegativeCOGSObligation, OwnershipEvent, PaymentMode,
+    COGSAdjustment, NegativeCOGSObligation, PaymentMode,
     Sale, SaleLine, SaleStatus, SalesChannel, WarehouseCheck,
 )
 from .services import (
@@ -143,37 +145,35 @@ class ResolvedContractTests(TestCase):
         self.assertEqual(self.balance("5100"), Decimal("40.00"))
         self.assertEqual(JournalEntry.objects.filter(source_type="SALE").count(), 1)
 
-    # Clause 7 — First finalized Warehouse Check is the ownership/custody event.
+    # Clause 7 — Sale finalization establishes ownership; Warehouse Check releases custody.
 
-    def test_first_finalized_warehouse_check_is_the_ownership_event(self):
+    def test_sale_finalization_creates_ownership_and_warehouse_check_releases_custody(self):
         sale = self.sale(quantity=10)
         finalize_sale(sale=sale)
         line = sale.lines.get()
+        entitlement = CustomerOwnershipEntitlement.objects.get(sale_line=line)
+        self.assertEqual(entitlement.quantity, 10)
+        self.assertEqual(CustomerCustodyEvent.objects.count(), 0)
+
         first = prepare_warehouse_check(
             sale_line=line, warehouse=self.warehouse, quantity=4, number="WC-CT-3A")
         second = prepare_warehouse_check(
             sale_line=line, warehouse=self.warehouse, quantity=6, number="WC-CT-3B")
-        self.assertEqual(OwnershipEvent.objects.count(), 0)
+        self.assertEqual(CustomerCustodyEvent.objects.count(), 0)
 
         finalize_warehouse_check(
             check=first, acknowledge_negative=True, temporary_unit_cost="4")
-        self.assertEqual(OwnershipEvent.objects.count(), 1)
-        event = OwnershipEvent.objects.get()
-        self.assertEqual(event.warehouse_check, first)
-        self.assertEqual(event.sale_line, line)
-        self.assertEqual(event.customer, self.customer)
-        self.assertEqual(event.product, self.product)
-        self.assertEqual(event.warehouse, self.warehouse)
-        self.assertEqual(event.quantity, 4)
+        self.assertEqual(custody_balance(entitlement=entitlement, warehouse=self.warehouse), 0)
+        self.assertEqual(
+            CustomerCustodyEvent.objects.filter(event_type=CustodyEventType.PLACED).count(), 1)
+        self.assertEqual(
+            CustomerCustodyEvent.objects.filter(event_type=CustodyEventType.RELEASED).count(), 1)
 
         finalize_warehouse_check(
             check=second, acknowledge_negative=True, temporary_unit_cost="4")
-        self.assertEqual(OwnershipEvent.objects.count(), 2)
+        self.assertEqual(CustomerCustodyEvent.objects.count(), 4)
         self.assertEqual(
-            OwnershipEvent.objects.filter(warehouse_check=first).count(), 1)
-        self.assertEqual(
-            OwnershipEvent.objects.get(warehouse_check=second).quantity, 6)
-
+            CustomerCustodyEvent.objects.filter(event_type=CustodyEventType.RELEASED).count(), 2)
     # Clauses 5 and 6 — Payment separate from Sale; release separate from Payment.
 
     def test_payment_is_separate_from_sale_and_release_does_not_settle(self):
