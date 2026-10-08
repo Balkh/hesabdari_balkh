@@ -10,16 +10,14 @@ from core.money import cogs as cogs_amount, line_total, quantize_half_up, normal
 from fiscal_periods.services import assert_posting_date_open
 from inventory.models import StockMovement
 from inventory.services import issue_stock, resolve_warehouse_account
-from customer_custody.services import release_customer_custody
+from customer_custody.services import create_ownership_entitlement, release_customer_custody
 from party_ledger.services import attribute_journal_line
 from parties.services import resolve_party
 from products.services import resolve_product
 from uom.models import UnitOfMeasure
 from warehouses.services import resolve_warehouse
-from customer_custody.services import create_ownership_entitlement, release_customer_custody
-
 from .models import (
-    COGSAdjustment, CheckStatus, NegativeCOGSObligation, OwnershipEvent,
+    COGSAdjustment, CheckStatus, NegativeCOGSObligation,
     PaymentMode, Sale, SaleLine, SaleStatus, SalesChannel, SaleType,
     WarehouseCheck,
 )
@@ -218,8 +216,9 @@ def finalize_warehouse_check(*, check, user=None, acknowledge_negative=False,
         if check.quantity > line.quantity - used:
             raise SalesValidationError("Warehouse Check exceeds remaining Invoice Line quantity")
         assert_posting_date_open(check.sale.sale_date)
+        movement_holder = {}
         def _issue_customer_owned_stock(*, quantity, warehouse, entitlement):
-            return issue_stock(
+            movement_holder["movement"] = issue_stock(
                 product=line.product, warehouse=warehouse, quantity=quantity,
                 movement_date=check.sale.sale_date, reference=check.number,
                 description=f"Warehouse Check {check.number}", user=actor,
@@ -235,7 +234,9 @@ def finalize_warehouse_check(*, check, user=None, acknowledge_negative=False,
             idempotency_key=idempotency_key or f"warehouse-check:{check.pk}:custody-release",
             stock_issue=_issue_customer_owned_stock,
         )
-        movement = release_event.reference and StockMovement.objects.get(reference=check.number, idempotency_key=idempotency_key or f"warehouse-check:{check.pk}:issue")
+        movement = movement_holder.get("movement")
+        if movement is None:
+            raise SalesValidationError("Customer custody release did not create the required stock issue")
         base = movement.currency if movement.currency.is_base else __import__("currencies.models", fromlist=["Currency"]).Currency.objects.get(is_base=True)
         inv_account = resolve_warehouse_account(check.warehouse)
         cogs_value = cogs_amount(check.quantity, movement.unit_cost_afn)
