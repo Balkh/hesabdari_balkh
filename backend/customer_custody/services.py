@@ -43,24 +43,25 @@ def _qty(value, label="Quantity"):
 
 
 def _balance(entitlement, warehouse):
-    placed = CustomerCustodyEvent.objects.filter(
-        entitlement=entitlement, warehouse=warehouse,
-        event_type=CustodyEventType.PLACED,
-    ).aggregate(v=models.Sum("quantity"))["v"] or 0
-    released = CustomerCustodyEvent.objects.filter(
-        entitlement=entitlement, warehouse=warehouse,
-        event_type=CustodyEventType.RELEASED,
-    ).aggregate(v=models.Sum("quantity"))["v"] or 0
-    placement_reversals = CustomerCustodyEvent.objects.filter(
-        entitlement=entitlement, warehouse=warehouse,
-        event_type=CustodyEventType.PLACEMENT_REVERSAL,
-    ).aggregate(v=models.Sum("quantity"))["v"] or 0
-    release_reversals = CustomerCustodyEvent.objects.filter(
-        entitlement=entitlement, warehouse=warehouse,
-        event_type=CustodyEventType.RELEASE_REVERSAL,
-    ).aggregate(v=models.Sum("quantity"))["v"] or 0
-    return int(placed - released - placement_reversals + release_reversals)
+    rows = CustomerCustodyEvent.objects.filter(entitlement=entitlement, warehouse=warehouse).values("event_type").annotate(total=models.Sum("quantity"))
+    totals = {row["event_type"]: int(row["total"] or 0) for row in rows}
+    return (
+        totals.get(CustodyEventType.PLACED, 0)
+        - totals.get(CustodyEventType.RELEASED, 0)
+        - totals.get(CustodyEventType.PLACEMENT_REVERSAL, 0)
+        + totals.get(CustodyEventType.RELEASE_REVERSAL, 0)
+    )
 
+
+def _total_balance(entitlement):
+    rows = CustomerCustodyEvent.objects.filter(entitlement=entitlement).values("event_type").annotate(total=models.Sum("quantity"))
+    totals = {row["event_type"]: int(row["total"] or 0) for row in rows}
+    return (
+        totals.get(CustodyEventType.PLACED, 0)
+        - totals.get(CustodyEventType.RELEASED, 0)
+        - totals.get(CustodyEventType.PLACEMENT_REVERSAL, 0)
+        + totals.get(CustodyEventType.RELEASE_REVERSAL, 0)
+    )
 
 def create_ownership_entitlement(*, sale_line, user=None, idempotency_key=None):
     actor = _actor(user)
@@ -153,11 +154,7 @@ def place_customer_custody(*, entitlement, warehouse, quantity, event_date,
                 warehouse = warehouse.__class__.objects.select_for_update().get(pk=warehouse.pk)
                 if entitlement.status != OwnershipStatus.ACTIVE:
                     raise CustomerCustodyValidationError("Ownership entitlement is not active")
-                current_total = sum(
-                    _balance(entitlement, w) for w in warehouse.__class__.objects.filter(
-                        customer_custody_events__entitlement=entitlement
-                    ).distinct()
-                )
+                current_total = _total_balance(entitlement)
                 if current_total + quantity > entitlement.quantity:
                     raise CustomerCustodyValidationError("Custody placement exceeds customer ownership")
                 return _event(
