@@ -11,6 +11,8 @@ from core.money import cogs as cogs_amount, line_total, quantize_half_up, normal
 from fiscal_periods.services import assert_posting_date_open
 from inventory.models import StockMovement
 from inventory.services import issue_stock, resolve_warehouse_account
+from customer_custody.models import CustomerOwnershipEntitlement
+from customer_custody.services import create_ownership_entitlement, custody_balance, place_customer_custody, release_customer_custody, unallocated_custody_balance
 from party_ledger.services import attribute_journal_line
 from parties.services import resolve_party
 from products.services import resolve_product
@@ -18,7 +20,7 @@ from uom.models import UnitOfMeasure
 from warehouses.services import resolve_warehouse
 
 from .models import (
-    COGSAdjustment, CheckStatus, NegativeCOGSObligation, OwnershipEvent,
+    COGSAdjustment, CheckStatus, NegativeCOGSObligation,
     PaymentMode, Sale, SaleLine, SaleStatus, SalesChannel, SaleType,
     WarehouseCheck,
 )
@@ -222,6 +224,13 @@ def finalize_sale(*, sale, user=None, idempotency_key=None):
         sale.finalized_at = timezone.now()
         sale.journal_entry = journal
         sale.save(update_fields=["status", "finalized_at", "journal_entry"])
+        if sale.sale_type == SaleType.AVAILABLE:
+            for line in SaleLine.objects.filter(sale=sale).order_by("id"):
+                create_ownership_entitlement(
+                    sale_line=line,
+                    user=actor,
+                    idempotency_key=f"sale:{sale.pk}:line:{line.pk}:ownership",
+                )
     return sale
 
 
@@ -268,15 +277,38 @@ def finalize_warehouse_check(*, check, user=None, acknowledge_negative=False,
         if check.quantity > line.quantity - used:
             raise SalesValidationError("Warehouse Check exceeds remaining Invoice Line quantity")
         assert_posting_date_open(check.sale.sale_date)
-        movement = issue_stock(
-            product=line.product, warehouse=check.warehouse, quantity=check.quantity,
-            movement_date=check.sale.sale_date, reference=check.number,
-            description=f"Warehouse Check {check.number}", user=actor,
-            idempotency_key=idempotency_key or f"warehouse-check:{check.pk}:issue",
-            acknowledge_negative=acknowledge_negative, temporary_unit_cost=temporary_unit_cost,
-            temporary_currency=temporary_currency, temporary_rate=temporary_rate,
-            temporary_rate_date=temporary_rate_date, party=check.sale.customer,
+        movement_holder = {}
+        def _issue_customer_owned_stock(*, quantity, warehouse, entitlement):
+            movement_holder["movement"] = issue_stock(
+                product=line.product, warehouse=warehouse, quantity=quantity,
+                movement_date=check.sale.sale_date, reference=check.number,
+                description=f"Warehouse Check {check.number}", user=actor,
+                idempotency_key=idempotency_key or f"warehouse-check:{check.pk}:issue",
+                acknowledge_negative=acknowledge_negative, temporary_unit_cost=temporary_unit_cost,
+                temporary_currency=temporary_currency, temporary_rate=temporary_rate,
+                temporary_rate_date=temporary_rate_date, party=check.sale.customer,
+            )
+        entitlement = CustomerOwnershipEntitlement.objects.get(sale_line=line)
+        available_here = custody_balance(entitlement=entitlement, warehouse=check.warehouse)
+        if available_here < check.quantity:
+            unallocated = unallocated_custody_balance(entitlement=entitlement)
+            needed = check.quantity - available_here
+            if needed > unallocated:
+                raise SalesValidationError("Warehouse Check exceeds customer custody available for this warehouse")
+            place_customer_custody(
+                entitlement=entitlement, warehouse=check.warehouse, quantity=needed,
+                event_date=check.sale.sale_date, reference=check.number, user=actor,
+                idempotency_key=idempotency_key or f"warehouse-check:{check.pk}:custody-place",
+            )
+        release_event = release_customer_custody(
+            entitlement=entitlement, warehouse=check.warehouse, quantity=check.quantity,
+            event_date=check.sale.sale_date, reference=check.number, user=actor,
+            idempotency_key=idempotency_key or f"warehouse-check:{check.pk}:custody-release",
+            stock_issue=_issue_customer_owned_stock,
         )
+        movement = movement_holder.get("movement")
+        if movement is None:
+            raise SalesValidationError("Customer custody release did not create the required stock issue")
         base = movement.currency if movement.currency.is_base else __import__("currencies.models", fromlist=["Currency"]).Currency.objects.get(is_base=True)
         inv_account = resolve_warehouse_account(check.warehouse)
         cogs_value = cogs_amount(check.quantity, movement.unit_cost_afn)
@@ -289,8 +321,6 @@ def finalize_warehouse_check(*, check, user=None, acknowledge_negative=False,
             rate=Decimal("1.0000"), rate_date=check.sale.sale_date, created_by=actor,
             idempotency_key=idempotency_key or f"warehouse-check:{check.pk}:cogs",
         )
-        OwnershipEvent.objects.create(warehouse_check=check, sale_line=line, customer=check.sale.customer,
-                                      product=line.product, warehouse=check.warehouse, quantity=check.quantity)
         check.stock_movement = movement
         check.cogs_journal = cogs_entry
         check.status = CheckStatus.FINALIZED
