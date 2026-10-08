@@ -10,7 +10,8 @@ from core.money import cogs as cogs_amount, line_total, quantize_half_up, normal
 from fiscal_periods.services import assert_posting_date_open
 from inventory.models import StockMovement
 from inventory.services import issue_stock, resolve_warehouse_account
-from customer_custody.services import create_ownership_entitlement, custody_balance, place_customer_custody, release_customer_custody
+from customer_custody.models import CustomerOwnershipEntitlement
+from customer_custody.services import create_ownership_entitlement, custody_balance, place_customer_custody, release_customer_custody, unallocated_custody_balance
 from party_ledger.services import attribute_journal_line
 from parties.services import resolve_party
 from products.services import resolve_product
