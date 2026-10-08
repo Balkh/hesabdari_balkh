@@ -201,3 +201,8 @@ def release_customer_custody(*, entitlement, warehouse, quantity, event_date,
 
 def custody_balance(*, entitlement, warehouse):
     return _balance(entitlement, warehouse)
+
+
+def unallocated_custody_balance(*, entitlement):
+    entitlement = CustomerOwnershipEntitlement.objects.get(pk=getattr(entitlement, "pk", entitlement))
+    return max(0, entitlement.quantity - _total_balance(entitlement))
