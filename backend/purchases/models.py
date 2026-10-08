@@ -11,6 +11,11 @@ class PurchaseStatus(models.TextChoices):
     POSTED = "POSTED", "Posted"
 
 
+class PurchaseDeliveryMode(models.TextChoices):
+    IMMEDIATE = "IMMEDIATE", "Immediate warehouse receipt"
+    IN_TRANSIT = "IN_TRANSIT", "Owned in transit"
+
+
 class PurchaseQuerySet(models.QuerySet):
     def _contains_posted(self):
         return self.filter(status=PurchaseStatus.POSTED).exists()
@@ -68,6 +73,7 @@ class Purchase(models.Model):
     exchange_rate = models.DecimalField(max_digits=20, decimal_places=4)
     rate_date = models.DateField()
     warehouse = models.ForeignKey("warehouses.Warehouse", on_delete=models.PROTECT, related_name="purchases")
+    delivery_mode = models.CharField(max_length=12, choices=PurchaseDeliveryMode.choices, default=PurchaseDeliveryMode.IMMEDIATE)
     description = models.CharField(max_length=500, blank=True, default="")
     subtotal = models.DecimalField(max_digits=20, decimal_places=2, default=Decimal("0.00"))
     discount = models.DecimalField(max_digits=20, decimal_places=2, default=Decimal("0.00"))
@@ -156,7 +162,8 @@ class PurchaseReturn(models.Model):
 
     document_number = models.CharField(max_length=30, unique=True)
     purchase = models.ForeignKey(Purchase, on_delete=models.PROTECT, related_name="purchase_returns")
-    inventory_return = models.OneToOneField("inventory.InventoryReturn", on_delete=models.PROTECT, related_name="purchase_financial_return")
+    inventory_return = models.OneToOneField("inventory.InventoryReturn", null=True, blank=True, on_delete=models.PROTECT, related_name="purchase_financial_return")
+    transit_lot = models.ForeignKey("goods_in_transit.GoodsInTransitLot", null=True, blank=True, on_delete=models.PROTECT, related_name="purchase_returns")
     supplier = models.ForeignKey("parties.Party", on_delete=models.PROTECT, related_name="purchase_returns")
     warehouse = models.ForeignKey("warehouses.Warehouse", on_delete=models.PROTECT, related_name="purchase_returns")
     currency = models.ForeignKey("currencies.Currency", on_delete=models.PROTECT, related_name="purchase_returns")
@@ -297,7 +304,7 @@ class SupplierRefundReversal(models.Model):
 class PurchaseReturnReversal(models.Model):
     purchase_return = models.OneToOneField(PurchaseReturn, on_delete=models.PROTECT, related_name="reversal")
     journal_entry = models.OneToOneField("accounting.JournalEntry", on_delete=models.PROTECT, related_name="purchase_return_reversal")
-    stock_movement = models.OneToOneField("inventory.StockMovement", on_delete=models.PROTECT, related_name="purchase_return_reversal")
+    stock_movement = models.OneToOneField("inventory.StockMovement", null=True, blank=True, on_delete=models.PROTECT, related_name="purchase_return_reversal")
     reason = models.CharField(max_length=500)
     idempotency_key = models.CharField(max_length=128, unique=True)
     reversed_at = models.DateTimeField(auto_now_add=True)
