@@ -230,8 +230,7 @@ def finalize_warehouse_check(*, check, user=None, acknowledge_negative=False,
         entitlement = CustomerOwnershipEntitlement.objects.get(sale_line=line)
         available_here = custody_balance(entitlement=entitlement, warehouse=check.warehouse)
         if available_here < check.quantity:
-            from customer_custody.services import _total_balance
-            unallocated = entitlement.quantity - _total_balance(entitlement)
+            unallocated = unallocated_custody_balance(entitlement=entitlement)
             needed = check.quantity - available_here
             if needed > unallocated:
                 raise SalesValidationError("Warehouse Check exceeds customer custody available for this warehouse")
