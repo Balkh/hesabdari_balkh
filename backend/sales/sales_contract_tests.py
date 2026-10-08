@@ -250,7 +250,7 @@ class ResolvedContractTests(TestCase):
         self.assertEqual(sale.status, SaleStatus.DRAFT)
         self.assertEqual(JournalEntry.objects.count(), 0)
         self.assertEqual(StockMovement.objects.count(), 0)
-        self.assertEqual(OwnershipEvent.objects.count(), 0)
+        self.assertEqual(CustomerOwnershipEntitlement.objects.count(), 0)
         self.assertEqual(COGSAdjustment.objects.count(), 0)
         with self.assertRaises(Exception):
             prepare_warehouse_check(
