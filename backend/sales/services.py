@@ -261,8 +261,6 @@ def finalize_warehouse_check(*, check, user=None, acknowledge_negative=False,
             rate=Decimal("1.0000"), rate_date=check.sale.sale_date, created_by=actor,
             idempotency_key=idempotency_key or f"warehouse-check:{check.pk}:cogs",
         )
-        OwnershipEvent.objects.create(warehouse_check=check, sale_line=line, customer=check.sale.customer,
-                                      product=line.product, warehouse=check.warehouse, quantity=check.quantity)
         check.stock_movement = movement
         check.cogs_journal = cogs_entry
         check.status = CheckStatus.FINALIZED
