@@ -38,6 +38,7 @@ CANONICAL_COA = (
     ("1400", "Inventory", "موجودی کالا", AccountType.ASSET, "1000", False, True),
     ("1410", "Main Warehouse", "گدام اصلی", AccountType.ASSET, "1400", True, True),
     ("1420", "Secondary Warehouse", "گدام فرعی", AccountType.ASSET, "1400", True, True),
+    ("1430", "Goods in Transit", "کالای در مسیر", AccountType.ASSET, "1400", True, True),
     ("1500", "Supplier Advances", "پیش‌پرداخت به تأمین‌کنندگان", AccountType.ASSET, "1000", True, True),
     ("1900", "Other Assets", "سایر دارایی‌ها", AccountType.ASSET, "1000", True, True),
     ("1910", "Cross-Currency Settlement Clearing", "حساب تسویه فنی چندارزی", AccountType.ASSET, "1900", True, True),
