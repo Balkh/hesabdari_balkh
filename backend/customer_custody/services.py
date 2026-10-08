@@ -168,7 +168,7 @@ def place_customer_custody(*, entitlement, warehouse, quantity, event_date,
 
 
 def release_customer_custody(*, entitlement, warehouse, quantity, event_date,
-                             reference, user=None, idempotency_key=None):
+                             reference, user=None, idempotency_key=None, stock_issue=None):
     actor = _actor(user)
     quantity = _qty(quantity)
     day = _day(event_date)
@@ -187,6 +187,8 @@ def release_customer_custody(*, entitlement, warehouse, quantity, event_date,
                 available = _balance(entitlement, warehouse)
                 if quantity > available:
                     raise CustomerCustodyValidationError("Release exceeds customer custody in the warehouse")
+                if stock_issue is not None:
+                    stock_issue(quantity=quantity, warehouse=warehouse, entitlement=entitlement)
                 return _event(
                     entitlement=entitlement, warehouse=warehouse,
                     event_type=CustodyEventType.RELEASED, quantity=quantity,
