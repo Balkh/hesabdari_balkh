@@ -1,5 +1,4 @@
 from datetime import date
-import hashlib
 from decimal import Decimal
 
 from django.db import models, transaction
@@ -11,14 +10,15 @@ from core.money import cogs as cogs_amount, line_total, quantize_half_up, normal
 from fiscal_periods.services import assert_posting_date_open
 from inventory.models import StockMovement
 from inventory.services import issue_stock, resolve_warehouse_account
+from customer_custody.models import CustomerOwnershipEntitlement
+from customer_custody.services import create_ownership_entitlement, custody_balance, place_customer_custody, release_customer_custody, unallocated_custody_balance
 from party_ledger.services import attribute_journal_line
 from parties.services import resolve_party
 from products.services import resolve_product
 from uom.models import UnitOfMeasure
 from warehouses.services import resolve_warehouse
-
 from .models import (
-    COGSAdjustment, CheckStatus, NegativeCOGSObligation, OwnershipEvent,
+    COGSAdjustment, CheckStatus, NegativeCOGSObligation,
     PaymentMode, Sale, SaleLine, SaleStatus, SalesChannel, SaleType,
     WarehouseCheck,
 )
@@ -77,25 +77,15 @@ def _customer(ref):
 
 def _line_rows(lines):
     rows = []
-    from goods_in_transit.models import GoodsInTransitLot
     for row in lines:
         try:
             product = resolve_product(row["product"])
             unit = row["unit"] if isinstance(row["unit"], UnitOfMeasure) else UnitOfMeasure.objects.get(pk=row["unit"])
             warehouse = row.get("warehouse")
-            transit_lot_ref = row.get("transit_lot")
-            transit_lot = None
-            if transit_lot_ref is not None:
-                transit_lot = (
-                    transit_lot_ref if isinstance(transit_lot_ref, GoodsInTransitLot)
-                    else GoodsInTransitLot.objects.select_related("product").get(pk=transit_lot_ref)
-                )
-        except (KeyError, UnitOfMeasure.DoesNotExist, GoodsInTransitLot.DoesNotExist) as exc:
+        except (KeyError, UnitOfMeasure.DoesNotExist) as exc:
             raise SalesValidationError("Product and UOM are required") from exc
         if warehouse is not None:
             raise SalesValidationError("Warehouse belongs to Warehouse Check, not SaleLine")
-        if transit_lot is not None and transit_lot.product_id != product.pk:
-            raise SalesValidationError("Transit lot product must match SaleLine product")
         quantity = row.get("quantity")
         if isinstance(quantity, bool) or not isinstance(quantity, int) or quantity <= 0:
             raise SalesValidationError("Quantity must be a positive integer")
@@ -106,8 +96,7 @@ def _line_rows(lines):
             raise SalesValidationError("Invalid discount")
         rows.append({"product": product, "unit": unit, "quantity": quantity,
                      "unit_price": price, "discount": discount,
-                     "gross": gross, "net": gross - discount,
-                     "transit_lot": transit_lot})
+                     "gross": gross, "net": gross - discount})
     if not rows:
         raise SalesValidationError("At least one Sales Line is required")
     return rows
@@ -128,8 +117,6 @@ def create_sale(*, customer, sale_date, currency, channel, payment_mode,
         raise SalesValidationError("Invalid channel, payment mode, or sale type") from exc
     rate_value, rate_day = _rate(currency, rate, rate_date, sale_day)
     rows = _line_rows(lines)
-    if sale_type == SaleType.FUTURE and any(row["transit_lot"] is not None for row in rows):
-        raise SalesValidationError("A Future sale cannot consume company-owned Transit goods.")
     if not document_number:
         from documents.services import next_document_number
         from core.dates import gregorian_to_jalali
@@ -146,8 +133,7 @@ def create_sale(*, customer, sale_date, currency, channel, payment_mode,
         for row in rows:
             SaleLine.objects.create(sale=sale, product=row["product"], unit=row["unit"],
                                     quantity=row["quantity"], unit_price=row["unit_price"],
-                                    discount=row["discount"], line_total=row["gross"], net_total=row["net"],
-                                    transit_lot=row["transit_lot"])
+                                    discount=row["discount"], line_total=row["gross"], net_total=row["net"])
     return sale
 
 
@@ -174,54 +160,17 @@ def finalize_sale(*, sale, user=None, idempotency_key=None):
         )
         if sale.payment_mode == PaymentMode.CREDIT:
             attribute_journal_line(journal.lines.get(account__code=RECEIVABLE_ACCOUNT), party=sale.customer, user=actor)
-
-        from goods_in_transit.models import GoodsInTransitLot, TransitLotStatus
-        transit_lines = list(
-            SaleLine.objects.select_for_update().filter(
-                sale_id=sale.pk, transit_lot__isnull=False
-            ).order_by("id")
-        )
-        from .models import TransitSaleAllocation
-        for line in transit_lines:
-            lot = GoodsInTransitLot.objects.select_for_update(of=("self",)).get(pk=line.transit_lot_id)
-            if lot.status != TransitLotStatus.OPEN:
-                raise SalesValidationError("Transit lot is not open.")
-            if sale.sale_date < lot.ownership_date:
-                raise SalesValidationError("Sale date cannot precede Transit ownership date.")
-            if line.quantity > lot.remaining_quantity:
-                raise SalesValidationError("Sale exceeds remaining Transit quantity.")
-            if line.product_id != lot.product_id:
-                raise SalesValidationError("Transit lot product does not match SaleLine.")
-            cogs_value = quantize_half_up(Decimal(line.quantity) * lot.unit_cost, 2)
-            cogs_journal = post_journal(
-                number=f"JE-TCOGS-{hashlib.sha256(f'{sale.pk}:{line.pk}'.encode()).hexdigest()[:20]}",
-                posting_date=sale.sale_date,
-                description=f"COGS for Transit Sale {sale.document_number} line {line.pk}",
-                lines=[
-                    {"account": Account.objects.get(code=COGS_ACCOUNT), "debit": cogs_value, "reference": sale.document_number},
-                    {"account": Account.objects.get(code="1430"), "credit": cogs_value, "reference": sale.document_number},
-                ],
-                source_type="SALES_COGS_TRANSIT",
-                source_id=f"{sale.document_number}:LINE:{line.pk}",
-                currency=lot.currency,
-                rate=lot.rate,
-                rate_date=lot.rate_date,
-                created_by=actor,
-                idempotency_key=f"sale:{sale.pk}:transit-cogs:{line.pk}",
-            )
-            remaining = lot.remaining_quantity - line.quantity
-            lot.remaining_quantity = remaining
-            lot.status = TransitLotStatus.CLOSED if remaining == 0 else TransitLotStatus.OPEN
-            lot.save(allow_state_transition=True, update_fields={"remaining_quantity", "status"})
-            TransitSaleAllocation.objects.create(
-                sale_line=line, transit_lot=lot, quantity=line.quantity,
-                unit_cost=lot.unit_cost, cogs_journal=cogs_journal,
-                idempotency_key=f"sale:{sale.pk}:transit-allocation:{line.pk}",
-            )
         sale.status = SaleStatus.FINALIZED
         sale.finalized_at = timezone.now()
         sale.journal_entry = journal
         sale.save(update_fields=["status", "finalized_at", "journal_entry"])
+        if sale.sale_type == SaleType.AVAILABLE:
+            for line in SaleLine.objects.filter(sale=sale).order_by("id"):
+                create_ownership_entitlement(
+                    sale_line=line,
+                    user=actor,
+                    idempotency_key=f"sale:{sale.pk}:line:{line.pk}:ownership",
+                )
     return sale
 
 
@@ -268,15 +217,38 @@ def finalize_warehouse_check(*, check, user=None, acknowledge_negative=False,
         if check.quantity > line.quantity - used:
             raise SalesValidationError("Warehouse Check exceeds remaining Invoice Line quantity")
         assert_posting_date_open(check.sale.sale_date)
-        movement = issue_stock(
-            product=line.product, warehouse=check.warehouse, quantity=check.quantity,
-            movement_date=check.sale.sale_date, reference=check.number,
-            description=f"Warehouse Check {check.number}", user=actor,
-            idempotency_key=idempotency_key or f"warehouse-check:{check.pk}:issue",
-            acknowledge_negative=acknowledge_negative, temporary_unit_cost=temporary_unit_cost,
-            temporary_currency=temporary_currency, temporary_rate=temporary_rate,
-            temporary_rate_date=temporary_rate_date, party=check.sale.customer,
+        movement_holder = {}
+        def _issue_customer_owned_stock(*, quantity, warehouse, entitlement):
+            movement_holder["movement"] = issue_stock(
+                product=line.product, warehouse=warehouse, quantity=quantity,
+                movement_date=check.sale.sale_date, reference=check.number,
+                description=f"Warehouse Check {check.number}", user=actor,
+                idempotency_key=idempotency_key or f"warehouse-check:{check.pk}:issue",
+                acknowledge_negative=acknowledge_negative, temporary_unit_cost=temporary_unit_cost,
+                temporary_currency=temporary_currency, temporary_rate=temporary_rate,
+                temporary_rate_date=temporary_rate_date, party=check.sale.customer,
+            )
+        entitlement = CustomerOwnershipEntitlement.objects.get(sale_line=line)
+        available_here = custody_balance(entitlement=entitlement, warehouse=check.warehouse)
+        if available_here < check.quantity:
+            unallocated = unallocated_custody_balance(entitlement=entitlement)
+            needed = check.quantity - available_here
+            if needed > unallocated:
+                raise SalesValidationError("Warehouse Check exceeds customer custody available for this warehouse")
+            place_customer_custody(
+                entitlement=entitlement, warehouse=check.warehouse, quantity=needed,
+                event_date=check.sale.sale_date, reference=check.number, user=actor,
+                idempotency_key=idempotency_key or f"warehouse-check:{check.pk}:custody-place",
+            )
+        release_event = release_customer_custody(
+            entitlement=entitlement, warehouse=check.warehouse, quantity=check.quantity,
+            event_date=check.sale.sale_date, reference=check.number, user=actor,
+            idempotency_key=idempotency_key or f"warehouse-check:{check.pk}:custody-release",
+            stock_issue=_issue_customer_owned_stock,
         )
+        movement = movement_holder.get("movement")
+        if movement is None:
+            raise SalesValidationError("Customer custody release did not create the required stock issue")
         base = movement.currency if movement.currency.is_base else __import__("currencies.models", fromlist=["Currency"]).Currency.objects.get(is_base=True)
         inv_account = resolve_warehouse_account(check.warehouse)
         cogs_value = cogs_amount(check.quantity, movement.unit_cost_afn)
@@ -289,8 +261,6 @@ def finalize_warehouse_check(*, check, user=None, acknowledge_negative=False,
             rate=Decimal("1.0000"), rate_date=check.sale.sale_date, created_by=actor,
             idempotency_key=idempotency_key or f"warehouse-check:{check.pk}:cogs",
         )
-        OwnershipEvent.objects.create(warehouse_check=check, sale_line=line, customer=check.sale.customer,
-                                      product=line.product, warehouse=check.warehouse, quantity=check.quantity)
         check.stock_movement = movement
         check.cogs_journal = cogs_entry
         check.status = CheckStatus.FINALIZED
