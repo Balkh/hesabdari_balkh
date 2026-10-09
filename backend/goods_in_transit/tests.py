@@ -339,6 +339,96 @@ class GoodsInTransitTests(TestCase):
         self.assertEqual(stock_for(self.product, self.warehouse), 80)
 
 
+    def test_released_transit_custody_does_not_allow_duplicate_physical_receipt(self):
+        purchase = self._purchase(document_number="PI-TR-RELEASE-001")
+        post_purchase(purchase=purchase, user=self.user)
+        lot = GoodsInTransitLot.objects.get(purchase_line=purchase.lines.get())
+        sale = create_sale(
+            customer=self.customer, sale_date=date(2026, 2, 10),
+            currency=self.usd, channel=SalesChannel.WHOLESALE,
+            payment_mode=PaymentMode.CREDIT,
+            lines=[{
+                "product": self.product, "unit": self.product.primary_uom,
+                "quantity": 20, "unit_price": "120", "transit_lot": lot,
+            }],
+            user=self.user, document_number="SI-TR-RELEASE-001",
+        )
+        finalize_sale(sale=sale, user=self.user)
+        first = receive_transit(
+            lot=lot, quantity=90, receipt_date=date(2026, 2, 12),
+            user=self.user, idempotency_key="transit-release-receipt-001a",
+        )
+        self.assertEqual(first.company_quantity, 80)
+        self.assertEqual(first.customer_custody_quantity, 10)
+        entitlement = sale.lines.get().customer_ownership_entitlement
+        check = prepare_warehouse_check(
+            sale_line=sale.lines.get(), warehouse=self.warehouse,
+            quantity=10, number="WC-TR-RELEASE-001",
+        )
+        finalize_warehouse_check(check=check, user=self.user)
+        self.assertEqual(custody_balance(entitlement=entitlement, warehouse=self.warehouse), 0)
+        with self.assertRaises(TransitValidationError):
+            receive_transit(
+                lot=lot, quantity=20, receipt_date=date(2026, 2, 13),
+                user=self.user, idempotency_key="transit-release-overreceipt-001",
+            )
+        second = receive_transit(
+            lot=lot, quantity=10, receipt_date=date(2026, 2, 13),
+            user=self.user, idempotency_key="transit-release-receipt-001b",
+        )
+        lot.refresh_from_db()
+        self.assertEqual(second.company_quantity, 0)
+        self.assertEqual(second.customer_custody_quantity, 10)
+        self.assertEqual(lot.remaining_quantity, 0)
+        self.assertEqual(lot.status, TransitLotStatus.CLOSED)
+        self.assertEqual(custody_balance(entitlement=entitlement, warehouse=self.warehouse), 10)
+        self.assertEqual(stock_for(self.product, self.warehouse), 80)
+
+    def test_legacy_custody_bridge_is_not_double_counted_as_transit_receipt(self):
+        purchase = self._purchase(document_number="PI-TR-LEGACY-001")
+        post_purchase(purchase=purchase, user=self.user)
+        lot = GoodsInTransitLot.objects.get(purchase_line=purchase.lines.get())
+        sale = create_sale(
+            customer=self.customer, sale_date=date(2026, 2, 10),
+            currency=self.usd, channel=SalesChannel.WHOLESALE,
+            payment_mode=PaymentMode.CREDIT,
+            lines=[{
+                "product": self.product, "unit": self.product.primary_uom,
+                "quantity": 20, "unit_price": "120", "transit_lot": lot,
+            }],
+            user=self.user, document_number="SI-TR-LEGACY-001",
+        )
+        finalize_sale(sale=sale, user=self.user)
+        receipt = TransitReceipt.objects.create(
+            lot=lot, warehouse=self.warehouse, quantity=90,
+            company_quantity=80, customer_custody_quantity=10,
+            receipt_date=date(2026, 2, 12),
+            idempotency_key="legacy-transit-receipt-001", created_by=self.user,
+        )
+        TransitCustomerCustody.objects.create(
+            receipt=receipt, sale_line=sale.lines.get(), customer=self.customer,
+            warehouse=self.warehouse, quantity=10, receipt_date=date(2026, 2, 12),
+        )
+        lot.remaining_quantity = 0
+        lot.status = TransitLotStatus.OPEN
+        lot.save(allow_state_transition=True, update_fields={"remaining_quantity", "status"})
+        check = prepare_warehouse_check(
+            sale_line=sale.lines.get(), warehouse=self.warehouse,
+            quantity=5, number="WC-TR-LEGACY-001",
+        )
+        finalize_warehouse_check(check=check, user=self.user)
+        entitlement = sale.lines.get().customer_ownership_entitlement
+        self.assertEqual(custody_balance(entitlement=entitlement, warehouse=self.warehouse), 5)
+        second = receive_transit(
+            lot=lot, quantity=10, receipt_date=date(2026, 2, 13),
+            user=self.user, idempotency_key="legacy-transit-receipt-002",
+        )
+        lot.refresh_from_db()
+        self.assertEqual(second.company_quantity, 0)
+        self.assertEqual(second.customer_custody_quantity, 10)
+        self.assertEqual(lot.status, TransitLotStatus.CLOSED)
+        self.assertEqual(custody_balance(entitlement=entitlement, warehouse=self.warehouse), 15)
+
     def test_transit_destination_transfer_preserves_owned_quantity_and_changes_destination(self):
         purchase = self._purchase(document_number="PI-TRANSIT-MOVE-001")
         post_purchase(purchase=purchase, user=self.user)
