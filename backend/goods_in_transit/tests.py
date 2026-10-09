@@ -292,6 +292,53 @@ class GoodsInTransitTests(TestCase):
             JournalEntry.objects.filter(source_type="SALES_COGS").count(), 0
         )
 
+
+    def test_partial_receipts_keep_transit_open_until_sold_customer_goods_arrive(self):
+        purchase = self._purchase(document_number="PI-TRANSIT-CUSTODY-PARTIAL-001")
+        post_purchase(purchase=purchase, user=self.user)
+        lot = GoodsInTransitLot.objects.get(purchase_line=purchase.lines.get())
+        sale = create_sale(
+            customer=self.customer, sale_date=date(2026, 2, 10),
+            currency=self.usd, channel=SalesChannel.WHOLESALE,
+            payment_mode=PaymentMode.CREDIT,
+            lines=[{
+                "product": self.product, "unit": self.product.primary_uom,
+                "quantity": 20, "unit_price": "120", "transit_lot": lot,
+            }],
+            user=self.user, document_number="SI-TRANSIT-CUSTODY-PARTIAL-001",
+        )
+        finalize_sale(sale=sale, user=self.user)
+
+        first = receive_transit(
+            lot=lot, quantity=90, receipt_date=date(2026, 2, 12),
+            user=self.user, idempotency_key="transit-custody-partial-001a",
+        )
+        lot.refresh_from_db()
+        self.assertEqual(first.company_quantity, 80)
+        self.assertEqual(first.customer_custody_quantity, 10)
+        self.assertEqual(lot.remaining_quantity, 0)
+        self.assertEqual(lot.status, TransitLotStatus.OPEN)
+
+        second = receive_transit(
+            lot=lot, quantity=10, receipt_date=date(2026, 2, 13),
+            user=self.user, idempotency_key="transit-custody-partial-001b",
+        )
+        lot.refresh_from_db()
+        self.assertEqual(second.company_quantity, 0)
+        self.assertEqual(second.customer_custody_quantity, 10)
+        self.assertIsNone(second.stock_movement_id)
+        self.assertIsNone(second.journal_entry_id)
+        self.assertEqual(lot.status, TransitLotStatus.CLOSED)
+        entitlement = sale.lines.get().customer_ownership_entitlement
+        self.assertEqual(
+            CustomerCustodyEvent.objects.filter(
+                entitlement=entitlement, event_type=CustodyEventType.PLACED
+            ).count(), 2
+        )
+        self.assertEqual(custody_balance(entitlement=entitlement, warehouse=self.warehouse), 20)
+        self.assertEqual(stock_for(self.product, self.warehouse), 80)
+
+
     def test_transit_destination_transfer_preserves_owned_quantity_and_changes_destination(self):
         purchase = self._purchase(document_number="PI-TRANSIT-MOVE-001")
         post_purchase(purchase=purchase, user=self.user)
