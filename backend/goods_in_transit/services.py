@@ -15,6 +15,9 @@ from inventory.services import receive_stock, resolve_warehouse_account
 from security.models import AuditAction
 from security.services import record_audit_event
 
+from customer_custody.models import CustomerCustodyEvent, CustomerOwnershipEntitlement, CustodyEventType
+from customer_custody.services import place_customer_custody
+
 from .models import GoodsInTransitLot, TransitCustomerCustody, TransitDestinationTransfer, TransitLotStatus, TransitReceipt
 
 
@@ -218,10 +221,34 @@ def _receive_transit_core(*, lot, quantity, receipt_date, user=None, idempotency
                 raise TransitValidationError("Transit lot is not open.")
             assert_posting_date_open(receipt_date)
             allocations = list(TransitSaleAllocation.objects.select_related("sale_line__sale__customer").filter(transit_lot=lot).order_by("id"))
-            custody_by_line = {x["sale_line_id"]: x["total"] or 0 for x in TransitCustomerCustody.objects.filter(sale_line__in=[a.sale_line_id for a in allocations]).values("sale_line_id").annotate(total=Sum("quantity"))}
-            outstanding = sum(a.quantity - custody_by_line.get(a.sale_line_id, 0) for a in allocations)
-            if quantity > lot.remaining_quantity + outstanding:
-                raise TransitValidationError("Physical receipt exceeds remaining owned Transit plus sold customer custody.")
+            sale_line_ids = [a.sale_line_id for a in allocations]
+            # Legacy rows remain readable for historical receipts, while all new
+            # receipts write to the unified customer-custody event ledger only.
+            # Track cumulative physical receipts, not current custody balance.
+            # Releasing customer goods does not return them to Transit. Include legacy
+            # receipt rows, but exclude their bridge events to avoid double counting.
+            custody_by_line = {
+                row["sale_line_id"]: int(row["total"] or 0)
+                for row in TransitCustomerCustody.objects.filter(
+                    sale_line_id__in=sale_line_ids
+                ).values("sale_line_id").annotate(total=Sum("quantity"))
+            }
+            receipt_totals = {}
+            for row in CustomerCustodyEvent.objects.filter(
+                entitlement__sale_line_id__in=sale_line_ids,
+                event_type=CustodyEventType.PLACED,
+                reference__startswith="TRANSIT:",
+            ).exclude(
+                idempotency_key__startswith="legacy-transit-custody:"
+            ).values("entitlement__sale_line_id").annotate(total=Sum("quantity")):
+                line_id = row["entitlement__sale_line_id"]
+                receipt_totals[line_id] = int(row["total"] or 0)
+            for line_id, total in receipt_totals.items():
+                custody_by_line[line_id] = custody_by_line.get(line_id, 0) + total
+            outstanding = sum(
+                max(0, allocation.quantity - custody_by_line.get(allocation.sale_line_id, 0))
+                for allocation in allocations
+            )
             company_qty = min(quantity, lot.remaining_quantity)
             custody_qty = quantity - company_qty
             if custody_qty > outstanding:
@@ -238,7 +265,12 @@ def _receive_transit_core(*, lot, quantity, receipt_date, user=None, idempotency
                 entry = post_journal(number=f"JE-TR-{lot.pk}-{hashlib.sha256(idempotency_key.encode()).hexdigest()[:12]}", posting_date=receipt_date, description=f"Goods in Transit receipt {lot.purchase.document_number}", lines=[{"account": resolve_warehouse_account(warehouse), "debit": amount, "reference": reference}, {"account": Account.objects.get(code=TRANSIT_ACCOUNT), "credit": amount, "reference": reference}], source_type="GOODS_IN_TRANSIT_RECEIPT", source_id=reference, currency=lot.currency, rate=lot.rate, rate_date=lot.rate_date, created_by=actor, idempotency_key=f"{idempotency_key}:journal")
             before = lot.remaining_quantity
             lot.remaining_quantity = before - company_qty
-            lot.status = TransitLotStatus.CLOSED if lot.remaining_quantity == 0 else TransitLotStatus.OPEN
+            outstanding_after_receipt = outstanding - custody_qty
+            lot.status = (
+                TransitLotStatus.CLOSED
+                if lot.remaining_quantity == 0 and outstanding_after_receipt == 0
+                else TransitLotStatus.OPEN
+            )
             lot.save(allow_state_transition=True, update_fields={"remaining_quantity", "status"})
             receipt = TransitReceipt.objects.create(lot=lot, warehouse=warehouse, quantity=quantity, company_quantity=company_qty, customer_custody_quantity=custody_qty, receipt_date=receipt_date, stock_movement=movement, journal_entry=entry, idempotency_key=idempotency_key, created_by=actor)
             left = custody_qty
@@ -246,7 +278,21 @@ def _receive_transit_core(*, lot, quantity, receipt_date, user=None, idempotency
                 available = allocation.quantity - custody_by_line.get(allocation.sale_line_id, 0)
                 take = min(available, left)
                 if take:
-                    TransitCustomerCustody.objects.create(receipt=receipt, sale_line=allocation.sale_line, customer=allocation.sale_line.sale.customer, warehouse=warehouse, quantity=take, receipt_date=receipt_date)
+                    entitlement = CustomerOwnershipEntitlement.objects.get(
+                        sale_line_id=allocation.sale_line_id
+                    )
+                    place_customer_custody(
+                        entitlement=entitlement,
+                        warehouse=warehouse,
+                        quantity=take,
+                        event_date=receipt_date,
+                        reference=reference,
+                        user=actor,
+                        idempotency_key=(
+                            f"transit-receipt:{receipt.pk}:line:"
+                            f"{allocation.sale_line_id}:custody"
+                        ),
+                    )
                     left -= take
                 if left == 0:
                     break

@@ -11,7 +11,7 @@ from core.money import cogs as cogs_amount, line_total, quantize_half_up, normal
 from fiscal_periods.services import assert_posting_date_open
 from inventory.models import StockMovement
 from inventory.services import issue_stock, resolve_warehouse_account
-from customer_custody.models import CustomerOwnershipEntitlement
+from customer_custody.models import CustomerCustodyEvent, CustomerOwnershipEntitlement
 from customer_custody.services import create_ownership_entitlement, custody_balance, place_customer_custody, release_customer_custody, unallocated_custody_balance
 from party_ledger.services import attribute_journal_line
 from parties.services import resolve_party
@@ -277,6 +277,46 @@ def finalize_warehouse_check(*, check, user=None, acknowledge_negative=False,
         if check.quantity > line.quantity - used:
             raise SalesValidationError("Warehouse Check exceeds remaining Invoice Line quantity")
         assert_posting_date_open(check.sale.sale_date)
+        from sales.models import TransitSaleAllocation
+        if TransitSaleAllocation.objects.filter(sale_line=line).exists():
+            entitlement = CustomerOwnershipEntitlement.objects.get(sale_line=line)
+            # Transit-sale COGS was posted against 1430 at Sale finalization.
+            # A Warehouse Check only releases physical customer custody.
+            from goods_in_transit.models import TransitCustomerCustody
+            from django.db.models import Sum
+            legacy_total = TransitCustomerCustody.objects.filter(
+                sale_line=line, warehouse=check.warehouse
+            ).aggregate(total=Sum("quantity"))["total"] or 0
+            previously_released = WarehouseCheck.objects.filter(
+                sale_line=line, warehouse=check.warehouse,
+                status=CheckStatus.FINALIZED,
+            ).aggregate(total=Sum("quantity"))["total"] or 0
+            legacy_outstanding = max(0, int(legacy_total) - int(previously_released))
+            legacy_key = f"legacy-transit-custody:{line.pk}:{check.warehouse_id}"
+            if legacy_outstanding and not CustomerCustodyEvent.objects.filter(
+                idempotency_key=legacy_key
+            ).exists():
+                place_customer_custody(
+                    entitlement=entitlement, warehouse=check.warehouse,
+                    quantity=legacy_outstanding, event_date=check.sale.sale_date,
+                    reference=f"LEGACY-TRANSIT:{line.pk}:{check.warehouse_id}",
+                    user=actor, idempotency_key=legacy_key,
+                )
+            if custody_balance(entitlement=entitlement, warehouse=check.warehouse) < check.quantity:
+                raise SalesValidationError(
+                    "Warehouse Check exceeds customer-owned Transit quantity physically received into this warehouse"
+                )
+            release_customer_custody(
+                entitlement=entitlement, warehouse=check.warehouse,
+                quantity=check.quantity, event_date=check.sale.sale_date,
+                reference=check.number, user=actor,
+                idempotency_key=idempotency_key or f"warehouse-check:{check.pk}:custody-release",
+            )
+            check.status = CheckStatus.FINALIZED
+            check.finalized_at = timezone.now()
+            check.save(update_fields=["status", "finalized_at"])
+            return check
+
         movement_holder = {}
         def _issue_customer_owned_stock(*, quantity, warehouse, entitlement):
             movement_holder["movement"] = issue_stock(
