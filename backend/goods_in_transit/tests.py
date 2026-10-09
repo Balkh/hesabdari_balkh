@@ -6,6 +6,8 @@ from django.test import TestCase
 
 from accounting.coa import seed_chart_of_accounts
 from accounting.models import JournalEntry
+from customer_custody.models import CustomerCustodyEvent, CustodyEventType
+from customer_custody.services import custody_balance
 from categories.services import create_category
 from currencies.models import Currency
 from inventory.models import StockMovement, WarehouseInventoryAccount
@@ -18,7 +20,10 @@ from warehouses.services import create_warehouse
 from purchases.models import PurchaseDeliveryMode
 from purchases.services import create_purchase, post_purchase
 from sales.models import PaymentMode, SalesChannel, SaleStatus, TransitSaleAllocation
-from sales.services import SalesValidationError, create_sale, finalize_sale
+from sales.services import (
+    SalesValidationError, create_sale, finalize_sale,
+    finalize_warehouse_check, prepare_warehouse_check,
+)
 
 from .models import GoodsInTransitLot, TransitCustomerCustody, TransitDestinationTransfer, TransitLotStatus, TransitReceipt
 from .services import TransitValidationError, receive_transit, transfer_transit_destination
@@ -261,10 +266,31 @@ class GoodsInTransitTests(TestCase):
         self.assertEqual(receipt.customer_custody_quantity, 20)
         self.assertEqual(lot.remaining_quantity, 0)
         self.assertEqual(stock_for(self.product, self.warehouse), 80)
-        custody = TransitCustomerCustody.objects.get(receipt=receipt)
+        entitlement = sale.lines.get().customer_ownership_entitlement
+        custody = CustomerCustodyEvent.objects.get(
+            entitlement=entitlement, event_type=CustodyEventType.PLACED
+        )
         self.assertEqual(custody.quantity, 20)
         self.assertEqual(custody.customer_id, self.customer.pk)
         self.assertEqual(custody.warehouse_id, self.warehouse.pk)
+        self.assertEqual(TransitCustomerCustody.objects.filter(receipt=receipt).count(), 0)
+
+        check = prepare_warehouse_check(
+            sale_line=sale.lines.get(), warehouse=self.warehouse,
+            quantity=20, number="WC-TRANSIT-CUSTODY-001",
+        )
+        finalized_check = finalize_warehouse_check(check=check, user=self.user)
+        self.assertEqual(finalized_check.status, "FINALIZED")
+        self.assertIsNone(finalized_check.stock_movement_id)
+        self.assertIsNone(finalized_check.cogs_journal_id)
+        self.assertEqual(stock_for(self.product, self.warehouse), 80)
+        self.assertEqual(custody_balance(entitlement=entitlement, warehouse=self.warehouse), 0)
+        self.assertEqual(
+            JournalEntry.objects.filter(source_type="SALES_COGS_TRANSIT").count(), 1
+        )
+        self.assertEqual(
+            JournalEntry.objects.filter(source_type="SALES_COGS").count(), 0
+        )
 
     def test_transit_destination_transfer_preserves_owned_quantity_and_changes_destination(self):
         purchase = self._purchase(document_number="PI-TRANSIT-MOVE-001")
