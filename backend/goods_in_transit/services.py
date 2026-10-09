@@ -15,7 +15,7 @@ from inventory.services import receive_stock, resolve_warehouse_account
 from security.models import AuditAction
 from security.services import record_audit_event
 
-from customer_custody.models import CustomerCustodyEvent, CustodyEventType
+from customer_custody.models import CustomerCustodyEvent, CustomerOwnershipEntitlement, CustodyEventType
 from customer_custody.services import place_customer_custody
 
 from .models import GoodsInTransitLot, TransitCustomerCustody, TransitDestinationTransfer, TransitLotStatus, TransitReceipt
