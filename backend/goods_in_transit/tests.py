@@ -294,7 +294,7 @@ class GoodsInTransitTests(TestCase):
 
 
     def test_partial_receipts_keep_transit_open_until_sold_customer_goods_arrive(self):
-        purchase = self._purchase(document_number="PI-TRANSIT-CUSTODY-PARTIAL-001")
+        purchase = self._purchase(document_number="PI-TR-CUST-PART-001")
         post_purchase(purchase=purchase, user=self.user)
         lot = GoodsInTransitLot.objects.get(purchase_line=purchase.lines.get())
         sale = create_sale(
@@ -305,7 +305,7 @@ class GoodsInTransitTests(TestCase):
                 "product": self.product, "unit": self.product.primary_uom,
                 "quantity": 20, "unit_price": "120", "transit_lot": lot,
             }],
-            user=self.user, document_number="SI-TRANSIT-CUSTODY-PARTIAL-001",
+            user=self.user, document_number="SI-TR-CUST-PART-001",
         )
         finalize_sale(sale=sale, user=self.user)
 
