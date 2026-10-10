@@ -224,24 +224,32 @@ def _receive_transit_core(*, lot, quantity, receipt_date, user=None, idempotency
             sale_line_ids = [a.sale_line_id for a in allocations]
             # Legacy rows remain readable for historical receipts, while all new
             # receipts write to the unified customer-custody event ledger only.
+            # Receipt history is not the same as current custody balance.
+            # Releasing customer-owned goods must not make already-received
+            # transit quantity appear outstanding again. Count legacy receipt
+            # rows plus placements created by transit receipts only; exclude
+            # legacy bridge placements (legacy-transit-custody:...) because
+            # their original receipt quantities are already in the legacy rows.
             custody_by_line = {
-                row["sale_line_id"]: row["total"] or 0
+                row["sale_line_id"]: int(row["total"] or 0)
                 for row in TransitCustomerCustody.objects.filter(
                     sale_line_id__in=sale_line_ids
                 ).values("sale_line_id").annotate(total=Sum("quantity"))
             }
-            event_totals = {}
-            for row in CustomerCustodyEvent.objects.filter(
-                entitlement__sale_line_id__in=sale_line_ids
-            ).values("entitlement__sale_line_id", "event_type").annotate(total=Sum("quantity")):
+            transit_receipt_totals = CustomerCustodyEvent.objects.filter(
+                entitlement__sale_line_id__in=sale_line_ids,
+                event_type=CustodyEventType.PLACED,
+                idempotency_key__startswith="transit-receipt:",
+            ).values("entitlement__sale_line_id").annotate(total=Sum("quantity"))
+            for row in transit_receipt_totals:
                 line_id = row["entitlement__sale_line_id"]
-                sign = -1 if row["event_type"] in (
-                    CustodyEventType.RELEASED, CustodyEventType.PLACEMENT_REVERSAL
-                ) else 1
-                event_totals[line_id] = event_totals.get(line_id, 0) + sign * int(row["total"] or 0)
-            for line_id, balance in event_totals.items():
-                custody_by_line[line_id] = custody_by_line.get(line_id, 0) + balance
-            outstanding = sum(a.quantity - custody_by_line.get(a.sale_line_id, 0) for a in allocations)
+                custody_by_line[line_id] = (
+                    custody_by_line.get(line_id, 0) + int(row["total"] or 0)
+                )
+            outstanding = sum(
+                max(0, a.quantity - custody_by_line.get(a.sale_line_id, 0))
+                for a in allocations
+            )
             if quantity > lot.remaining_quantity + outstanding:
                 raise TransitValidationError("Physical receipt exceeds remaining owned Transit plus sold customer custody.")
             company_qty = min(quantity, lot.remaining_quantity)
