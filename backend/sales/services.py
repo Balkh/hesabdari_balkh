@@ -422,7 +422,6 @@ def cancel_warehouse_check(*, check, reversal_date, reason, user=None,
             raise SalesValidationError("Only a finalized Warehouse Check can be cancelled")
 
         from sales.models import TransitSaleAllocation
-        from sales.returns_models import SalesReturn
         if locked.stock_movement_id and InventoryReturn.objects.filter(
             source_movement_id=locked.stock_movement_id
         ).exists():
