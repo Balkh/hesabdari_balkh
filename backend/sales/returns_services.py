@@ -301,7 +301,7 @@ def create_sales_return(*, sale_line, warehouse, quantity, return_date,
                 product=line.product, warehouse=warehouse, customer=sale.customer,
                 quantity=quantity, unit_cost=allocation.unit_cost,
                 currency=lot.currency, rate=lot.rate, rate_date=lot.rate_date,
-                movement_date=day, reference=document_number or f"TRANSIT-SR:{line.pk}:{day.isoformat()}",
+                movement_date=day, reference=document_number,
                 description=reason, user=actor,
                 idempotency_key=_child_idempotency_key("transit-sales-return-stock", idempotency_key)
                 if idempotency_key else None,
@@ -365,9 +365,9 @@ def create_sales_return(*, sale_line, warehouse, quantity, return_date,
         base = Currency.objects.filter(is_base=True).first()
         if base is None:
             raise ReturnValidationError("No base currency is configured")
-        inventory_account = resolve_warehouse_account(warehouse_obj)
+        inventory_account = resolve_warehouse_account(warehouse)
         cogs_account = _usable("5100")
-        cogs_value = quantize_half_up(inv.return_movement.unit_cost_afn * Decimal(quantity), 2)
+        cogs_value = quantize_half_up(return_movement.unit_cost_afn * Decimal(quantity), 2)
         cogs_entry = post_journal(
             number=next_document_number("JE", _jalali_year(day)),
             posting_date=day,
