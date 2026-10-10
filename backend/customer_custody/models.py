@@ -109,6 +109,11 @@ class CustomerCustodyEvent(models.Model):
                 condition=models.Q(quantity__gt=0),
                 name="custody_event_qty_gt0",
             ),
+            models.UniqueConstraint(
+                fields=["reversal_of"],
+                condition=models.Q(reversal_of__isnull=False),
+                name="custody_one_reversal_per_event",
+            ),
         ]
 
     def save(self, *args, **kwargs):
