@@ -273,6 +273,12 @@ def create_sales_return(*, sale_line, warehouse, quantity, return_date,
                     raise ReturnValidationError("This idempotency key was used for a different return")
                 return existing
 
+        amount = _returned_entitlement_amount(line, quantity)
+        if document_number is None:
+            document_number = next_document_number("SR", _jalali_year(day))
+        if SalesReturn.objects.filter(document_number=document_number).exists():
+            raise ReturnValidationError("Sales return document number already exists")
+
         allocation = TransitSaleAllocation.objects.select_related(
             "transit_lot"
         ).filter(sale_line=line).first()
@@ -351,12 +357,6 @@ def create_sales_return(*, sale_line, warehouse, quantity, return_date,
             cogs_value = quantize_half_up(
                 return_movement.unit_cost_afn * Decimal(quantity), 2
             )
-
-        amount = _returned_entitlement_amount(line, quantity)
-        if document_number is None:
-            document_number = next_document_number("SR", _jalali_year(day))
-        if SalesReturn.objects.filter(document_number=document_number).exists():
-            raise ReturnValidationError("Sales return document number already exists")
 
         entry, receivable_amount, refundable_amount = _post_entitlement_journal(
             sale=sale, customer=sale.customer, amount=amount,
