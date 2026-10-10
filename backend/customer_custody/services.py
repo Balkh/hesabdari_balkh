@@ -220,6 +220,13 @@ def reverse_customer_custody_event(*, event, reversal_date, reason, reference,
         raise CustomerCustodyValidationError("A reversal idempotency key is required")
     assert_posting_date_open(day)
     event_id = getattr(event, "pk", event)
+    prior = CustomerCustodyEvent.objects.filter(idempotency_key=idempotency_key).first()
+    if prior is not None:
+        if prior.reversal_of_id != event_id:
+            raise CustomerCustodyValidationError(
+                "This idempotency key was used for a different custody reversal"
+            )
+        return prior
     try:
         with idempotent_operation(key=idempotency_key, operation=CUSTODY_REVERSAL_OPERATION):
             with transaction.atomic():
