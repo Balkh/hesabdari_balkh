@@ -293,7 +293,7 @@ def finalize_warehouse_check(*, check, user=None, acknowledge_negative=False,
             ).aggregate(total=Sum("quantity"))["total"] or 0
             previously_released = WarehouseCheck.objects.filter(
                 sale_line=line, warehouse=check.warehouse,
-                status=CheckStatus.FINALIZED,
+                status=CheckStatus.FINALIZED, reversal__isnull=True,
             ).aggregate(total=Sum("quantity"))["total"] or 0
             legacy_outstanding = max(0, int(legacy_total) - int(previously_released))
             legacy_key = f"legacy-transit-custody:{line.pk}:{check.warehouse_id}"
