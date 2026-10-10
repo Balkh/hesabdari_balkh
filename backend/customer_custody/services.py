@@ -199,6 +199,76 @@ def release_customer_custody(*, entitlement, warehouse, quantity, event_date,
         return CustomerCustodyEvent.objects.get(idempotency_key=idempotency_key)
 
 
+
+def reverse_customer_custody_event(*, event, reversal_date, reason, reference,
+                                   user=None, idempotency_key=None,
+                                   compensate=None):
+    """Reverse one custody event through a new immutable compensating event.
+
+    Reversing a release associated with a finalized Warehouse Check requires
+    a caller-supplied callback that compensates the other business ledgers in
+    the same transaction. A plain custody reversal is never allowed to leave
+    inventory/COGS untouched for a sales release.
+    """
+    actor = _actor(user)
+    day = _day(reversal_date)
+    if not isinstance(reason, str) or not reason.strip():
+        raise CustomerCustodyValidationError("A reversal reason is required")
+    if not isinstance(reference, str) or not reference.strip():
+        raise CustomerCustodyValidationError("A reversal reference is required")
+    if not isinstance(idempotency_key, str) or not idempotency_key.strip() or len(idempotency_key) > 128:
+        raise CustomerCustodyValidationError("A reversal idempotency key is required")
+    assert_posting_date_open(day)
+    event_id = getattr(event, "pk", event)
+    try:
+        with idempotent_operation(key=idempotency_key, operation=CUSTODY_REVERSAL_OPERATION):
+            with transaction.atomic():
+                original = CustomerCustodyEvent.objects.select_for_update().select_related(
+                    "entitlement", "warehouse"
+                ).get(pk=event_id)
+                existing = CustomerCustodyEvent.objects.filter(reversal_of=original).first()
+                if existing:
+                    if existing.idempotency_key != idempotency_key:
+                        raise CustomerCustodyValidationError("This custody event has already been reversed")
+                    return existing
+                if original.event_type not in (CustodyEventType.PLACED, CustodyEventType.RELEASED):
+                    raise CustomerCustodyValidationError("Only original placement or release events can be reversed")
+                entitlement = CustomerOwnershipEntitlement.objects.select_for_update().get(
+                    pk=original.entitlement_id
+                )
+                warehouse = original.warehouse.__class__.objects.select_for_update().get(
+                    pk=original.warehouse_id
+                )
+                if original.event_type == CustodyEventType.PLACED:
+                    if _balance(entitlement, warehouse) < original.quantity:
+                        raise CustomerCustodyValidationError(
+                            "Placement cannot be reversed because some quantity is no longer in custody"
+                        )
+                    reversal_type = CustodyEventType.PLACEMENT_REVERSAL
+                else:
+                    from sales.models import WarehouseCheck, CheckStatus
+                    is_sales_check = WarehouseCheck.objects.filter(
+                        number=original.reference, status=CheckStatus.FINALIZED
+                    ).exists()
+                    if is_sales_check and compensate is None:
+                        raise CustomerCustodyValidationError(
+                            "A Warehouse Check release must be reversed through the coordinated Sales operation"
+                        )
+                    if compensate is not None:
+                        compensate(original=original, actor=actor, reversal_date=day,
+                                   reason=reason.strip(), idempotency_key=idempotency_key)
+                    reversal_type = CustodyEventType.RELEASE_REVERSAL
+                return _event(
+                    entitlement=entitlement, warehouse=warehouse,
+                    event_type=reversal_type, quantity=original.quantity,
+                    event_date=day, reference=reference.strip(),
+                    idempotency_key=idempotency_key, user=actor,
+                    reversal_of=original,
+                )
+    except DuplicateOperationError:
+        return CustomerCustodyEvent.objects.get(idempotency_key=idempotency_key)
+
+
 def custody_balance(*, entitlement, warehouse):
     return _balance(entitlement, warehouse)
 
