@@ -632,6 +632,8 @@ def reverse_sales_issue_stock(*, source_movement, movement_date, reference,
     Warehouse Check and ensure this is a pre-delivery cancellation.
     """
     actor = _require_actor(user, "reverse sales issue stock")
+    if not isinstance(idempotency_key, str) or not idempotency_key.strip() or len(idempotency_key) > 128:
+        raise InventoryValidationError("A valid sales issue reversal idempotency key is required.")
     day = _coerce_day(movement_date)
     assert_posting_date_open(day)
     clean_reference = _clean_reference(reference)
