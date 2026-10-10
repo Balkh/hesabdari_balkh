@@ -10,7 +10,8 @@ from inventory.services import assign_warehouse_account, receive_stock
 from inventory.stock import stock_for
 from parties.services import create_party
 from products.services import create_product
-from sales.models import PaymentMode, SalesChannel
+from sales.models import PaymentMode, SalesChannel, SalesReturnStatus, WarehouseCheckReversal
+from sales.returns_services import create_sales_return
 from sales.services import (
     SalesValidationError,
     cancel_warehouse_check,
@@ -103,3 +104,30 @@ class WarehouseCheckReversalTests(TestCase):
                 idempotency_key="wc-reversal-confirm-key",
             )
         self.assertEqual(stock_for(self.product, self.warehouse), 0)
+
+    def test_post_delivery_sales_return_is_independent_and_blocks_pre_delivery_cancel(self):
+        sale, check = self._finalized_check("WC-REV-RETURN")
+
+        returned = create_sales_return(
+            sale_line=sale.lines.get(),
+            warehouse=self.warehouse,
+            quantity=1,
+            return_date=date(2026, 1, 11),
+            reason="One unit was physically returned after delivery",
+            idempotency_key="wc-reversal-return-key",
+        )
+
+        self.assertEqual(returned.status, SalesReturnStatus.POSTED)
+        self.assertEqual(stock_for(self.product, self.warehouse), 1)
+        self.assertFalse(
+            WarehouseCheckReversal.objects.filter(warehouse_check=check).exists()
+        )
+        with self.assertRaises(SalesValidationError):
+            cancel_warehouse_check(
+                check=check,
+                reversal_date=date(2026, 1, 12),
+                reason="Attempted cancellation after a physical return",
+                idempotency_key="wc-reversal-return-cancel-key",
+                confirm_not_delivered=True,
+            )
+        self.assertEqual(stock_for(self.product, self.warehouse), 1)
