@@ -32,7 +32,7 @@ class SalesReturn(models.Model):
         "inventory.InventoryReturn", null=True, blank=True,
         on_delete=models.PROTECT, related_name="sales_return"
     )
-    return_movement = models.ForeignKey(
+    return_movement = models.OneToOneField(
         "inventory.StockMovement", null=True, blank=True, on_delete=models.PROTECT,
         related_name="transit_sales_returns",
     )
