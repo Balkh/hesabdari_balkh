@@ -24,6 +24,7 @@ from fiscal_periods.services import assert_posting_date_open
 from inventory.models import InventoryReturn, MovementType, StockMovement
 from inventory.services import sales_return as inventory_sales_return
 from inventory.services import _reverse_sales_return_stock
+from inventory.services import transit_sales_return, reverse_transit_sales_return_stock
 from inventory.services import resolve_warehouse_account
 from warehouses.services import resolve_warehouse
 
@@ -33,7 +34,7 @@ from security.services import record_audit_event
 
 from .models import (
     CrossCurrencyRefund, CrossCurrencyRefundStatus, SalesReturnReversal,
-    PaymentMode, Refund, RefundStatus,
+    PaymentMode, Refund, RefundStatus, TransitSaleAllocation, WarehouseCheck,
     SaleStatus, SalesReturn, SalesReturnStatus,
 )
 
@@ -110,25 +111,26 @@ def _jalali_year(day):
     return int(gregorian_to_jalali(day).split("/")[0])
 
 
-def _remaining_released_quantity(sale_line):
-    """Released quantity less physical returns, never invoice custody."""
-    released = StockMovement.objects.filter(
-        movement_type=MovementType.SALES_ISSUE,
-        source_party=sale_line.sale.customer,
-        product=sale_line.product,
-    ).filter(
-        warehouse_checks__sale_line=sale_line,
-        warehouse_checks__status="FINALIZED",
-    ).aggregate(v=Sum("quantity"))["v"] or 0
-    returned = InventoryReturn.objects.filter(
-        return_type="SALES_RETURN",
-        product=sale_line.product,
-        party=sale_line.sale.customer,
-        source_movement__warehouse_checks__sale_line=sale_line,
-    ).exclude(sales_return__status=SalesReturnStatus.REVERSED).aggregate(
-        v=Sum("quantity")
-    )["v"] or 0
-    return int(abs(released)) - int(returned)
+def _remaining_released_quantity(sale_line, warehouse=None):
+    """Finalized physical releases less non-reversed returns.
+
+    A Transit Warehouse Check has no SALES_ISSUE movement because the goods
+    were customer-owned while in custody. Count finalized checks as the
+    release authority for both ordinary and Transit sales.
+    """
+    checks = WarehouseCheck.objects.filter(
+        sale_line=sale_line, status="FINALIZED"
+    )
+    if warehouse is not None:
+        checks = checks.filter(warehouse=warehouse)
+    released = checks.aggregate(v=Sum("quantity"))["v"] or 0
+    returned = SalesReturn.objects.filter(
+        sale_line=sale_line, status=SalesReturnStatus.POSTED
+    )
+    if warehouse is not None:
+        returned = returned.filter(warehouse=warehouse)
+    returned_qty = returned.aggregate(v=Sum("quantity"))["v"] or 0
+    return int(released) - int(returned_qty)
 
 
 def _remaining_invoice_receivable(sale):
@@ -271,57 +273,84 @@ def create_sales_return(*, sale_line, warehouse, quantity, return_date,
                     raise ReturnValidationError("This idempotency key was used for a different return")
                 return existing
 
-        released_remaining = _remaining_released_quantity(line)
+        allocation = TransitSaleAllocation.objects.select_related(
+            "transit_lot"
+        ).filter(sale_line=line).first()
+        released_remaining = _remaining_released_quantity(
+            line, warehouse=warehouse if allocation is not None else None
+        )
         if quantity > released_remaining:
             raise ReturnValidationError(
                 f"Return quantity exceeds actually released quantity ({released_remaining})"
             )
 
-        # One physical return is tied to one already-finalized Warehouse Check.
-        # The selected source movement is resolved from the check with enough
-        # remaining released quantity, never from invoice custody quantity.
-        source_rows = list(
-            StockMovement.objects.select_for_update().filter(
-                movement_type=MovementType.SALES_ISSUE,
-                product=line.product,
-                source_party=sale.customer,
-                warehouse=warehouse,
-                warehouse_checks__sale_line=line,
-                warehouse_checks__status="FINALIZED",
-            ).order_by("id")
-        )
-        source = None
-        for candidate in source_rows:
-            used = InventoryReturn.objects.filter(
-                source_movement=candidate
-            ).exclude(sales_return__status=SalesReturnStatus.REVERSED).aggregate(
-                v=Sum("quantity")
-            )["v"] or 0
-            if abs(candidate.quantity) - int(used) >= quantity:
-                source = candidate
-                break
-        if source is None:
-            raise ReturnValidationError(
-                "No single released warehouse issue has enough remaining quantity for this return"
+        inv = None
+        return_movement = None
+        if allocation is not None:
+            # Transit sales have no company SALES_ISSUE movement. A finalized
+            # Warehouse Check proves the customer physically received the goods.
+            checks = WarehouseCheck.objects.select_for_update().filter(
+                sale_line=line, warehouse=warehouse, status="FINALIZED"
             )
-
-        warehouse_obj = source.warehouse
-        inventory_key = (
-            _child_idempotency_key("sales-return-inventory", idempotency_key)
-            if idempotency_key else None
-        )
-        inv = inventory_sales_return(
-            product=line.product,
-            warehouse=warehouse_obj,
-            customer=sale.customer,
-            source_movement=source,
-            quantity=quantity,
-            source_document=source.reference,
-            movement_date=day,
-            description=reason,
-            user=actor,
-            idempotency_key=inventory_key,
-        )
+            if not checks.exists():
+                raise ReturnValidationError(
+                    "Transit goods can only be returned to a warehouse from which they were physically released"
+                )
+            lot = allocation.transit_lot
+            return_movement = transit_sales_return(
+                product=line.product, warehouse=warehouse, customer=sale.customer,
+                quantity=quantity, unit_cost=allocation.unit_cost,
+                currency=lot.currency, rate=lot.rate, rate_date=lot.rate_date,
+                movement_date=day, reference=document_number or f"TRANSIT-SR:{line.pk}:{day.isoformat()}",
+                description=reason, user=actor,
+                idempotency_key=_child_idempotency_key("transit-sales-return-stock", idempotency_key)
+                if idempotency_key else None,
+            )
+            cogs_value = quantize_half_up(
+                return_movement.unit_cost_afn * Decimal(quantity), 2
+            )
+        else:
+            # Ordinary stock sales remain tied to the original SALES_ISSUE
+            # movement; never manufacture a source movement for Transit.
+            source_rows = list(
+                StockMovement.objects.select_for_update().filter(
+                    movement_type=MovementType.SALES_ISSUE,
+                    product=line.product,
+                    source_party=sale.customer,
+                    warehouse=warehouse,
+                    warehouse_checks__sale_line=line,
+                    warehouse_checks__status="FINALIZED",
+                ).order_by("id")
+            )
+            source = None
+            for candidate in source_rows:
+                used = InventoryReturn.objects.filter(
+                    source_movement=candidate
+                ).exclude(sales_return__status=SalesReturnStatus.REVERSED).aggregate(
+                    v=Sum("quantity")
+                )["v"] or 0
+                if abs(candidate.quantity) - int(used) >= quantity:
+                    source = candidate
+                    break
+            if source is None:
+                raise ReturnValidationError(
+                    "No single released warehouse issue has enough remaining quantity for this return"
+                )
+            inventory_key = (
+                _child_idempotency_key("sales-return-inventory", idempotency_key)
+                if idempotency_key else None
+            )
+            inv = inventory_sales_return(
+                product=line.product, warehouse=source.warehouse,
+                customer=sale.customer, source_movement=source,
+                quantity=quantity, source_document=source.reference,
+                movement_date=day, description=reason, user=actor,
+                idempotency_key=inventory_key,
+            )
+            return_movement = inv.return_movement
+            cogs_value = quantize_half_up(
+                return_movement.unit_cost_afn * Decimal(quantity), 2
+            )
 
         amount = _returned_entitlement_amount(line, quantity)
         if document_number is None:
@@ -355,7 +384,8 @@ def create_sales_return(*, sale_line, warehouse, quantity, return_date,
         )
         record = SalesReturn.objects.create(
             document_number=document_number, sale=sale, sale_line=line,
-            inventory_return=inv, warehouse=warehouse_obj, return_date=day,
+            inventory_return=inv, return_movement=return_movement if allocation is not None else None,
+            warehouse=warehouse, return_date=day,
             quantity=quantity, entitlement_currency=sale.currency,
             entitlement_amount=amount, refundable_amount=refundable_amount, entitlement_journal=entry,
             cogs_journal=cogs_entry,
@@ -368,7 +398,7 @@ def create_sales_return(*, sale_line, warehouse, quantity, return_date,
             previous_state=None,
             new_state={"sale_id": sale.pk, "sale_line_id": line.pk, "quantity": quantity,
                        "entitlement_amount": str(amount), "refundable_amount": str(refundable_amount), "currency": sale.currency.code,
-                       "inventory_return_id": inv.pk, "journal_entry_id": entry.pk},
+                       "inventory_return_id": inv.pk if inv else None, "return_movement_id": return_movement.pk, "journal_entry_id": entry.pk},
             reason=reason,
         )
         return record
@@ -675,14 +705,21 @@ def reverse_sales_return(sales_return, *, reversal_date, reason, user=None,
 
         key = idempotency_key or f"sales-return-reversal:{document_number}"
         stock_key = _child_idempotency_key("sales-return-reversal-stock", key)
-        movement = _reverse_sales_return_stock(
-            inventory_return=ret.inventory_return,
-            movement_date=day,
-            reference=document_number,
-            description=reason,
-            user=actor,
-            idempotency_key=stock_key,
-        )
+        if ret.inventory_return_id:
+            movement = _reverse_sales_return_stock(
+                inventory_return=ret.inventory_return,
+                movement_date=day,
+                reference=document_number,
+                description=reason,
+                user=actor,
+                idempotency_key=stock_key,
+            )
+        else:
+            movement = reverse_transit_sales_return_stock(
+                return_movement=ret.return_movement,
+                movement_date=day, reference=document_number,
+                description=reason, user=actor, idempotency_key=stock_key,
+            )
         entitlement_reversal = reverse_journal(
             ret.entitlement_journal, reason, actor
         )
