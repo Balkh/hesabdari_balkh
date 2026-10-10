@@ -112,6 +112,45 @@ class WarehouseCheck(models.Model):
         return super().save(*args, **kwargs)
 
 
+class WarehouseCheckReversal(models.Model):
+    """Immutable cancellation of a finalized Warehouse Check before delivery.
+
+    This aggregate records the explicit operator decision that the goods were
+    not physically delivered. It is distinct from SalesReturn, which records
+    goods physically returned after delivery.
+    """
+    warehouse_check = models.OneToOneField(
+        WarehouseCheck, on_delete=models.PROTECT, related_name="reversal"
+    )
+    reversal_date = models.DateField()
+    reason = models.CharField(max_length=500)
+    inventory_movement = models.OneToOneField(
+        "inventory.StockMovement", null=True, blank=True, on_delete=models.PROTECT,
+        related_name="warehouse_check_reversal",
+    )
+    cogs_reversal_journal = models.OneToOneField(
+        "accounting.JournalEntry", null=True, blank=True, on_delete=models.PROTECT,
+        related_name="warehouse_check_cogs_reversal",
+    )
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name="warehouse_check_reversals_created",
+    )
+    idempotency_key = models.CharField(max_length=128, unique=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["reversal_date", "id"]
+
+    def save(self, *args, **kwargs):
+        if self.pk is not None:
+            raise PostedImmutabilityError("Warehouse Check reversals are immutable")
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise PostedImmutabilityError("Warehouse Check reversals cannot be deleted")
+
+
 class OwnershipEvent(models.Model):
     warehouse_check = models.OneToOneField(WarehouseCheck, on_delete=models.PROTECT, related_name="ownership_event")
     sale_line = models.ForeignKey(SaleLine, on_delete=models.PROTECT, related_name="ownership_events")
