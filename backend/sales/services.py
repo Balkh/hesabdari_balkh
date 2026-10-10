@@ -6,23 +6,25 @@ from django.db import models, transaction
 from django.utils import timezone
 
 from accounting.models import Account
-from accounting.services import post_journal
+from accounting.services import post_journal, reverse_journal
 from core.money import cogs as cogs_amount, line_total, quantize_half_up, normalize_rate
 from fiscal_periods.services import assert_posting_date_open
-from inventory.models import StockMovement
-from inventory.services import issue_stock, resolve_warehouse_account
+from inventory.models import InventoryReturn, MovementType, StockMovement
+from inventory.services import issue_stock, reverse_sales_issue_stock, resolve_warehouse_account
 from customer_custody.models import CustomerCustodyEvent, CustomerOwnershipEntitlement
-from customer_custody.services import create_ownership_entitlement, custody_balance, place_customer_custody, release_customer_custody, unallocated_custody_balance
+from customer_custody.services import create_ownership_entitlement, custody_balance, place_customer_custody, release_customer_custody, reverse_customer_custody_event, unallocated_custody_balance
 from party_ledger.services import attribute_journal_line
 from parties.services import resolve_party
 from products.services import resolve_product
 from uom.models import UnitOfMeasure
 from warehouses.services import resolve_warehouse
+from security.models import AuditAction
+from security.services import record_audit_event
 
 from .models import (
     COGSAdjustment, CheckStatus, NegativeCOGSObligation,
     PaymentMode, Sale, SaleLine, SaleStatus, SalesChannel, SaleType,
-    WarehouseCheck,
+    WarehouseCheck, WarehouseCheckReversal,
 )
 
 
@@ -237,7 +239,7 @@ def finalize_sale(*, sale, user=None, idempotency_key=None):
 def remaining_quantity(line):
     line_id = getattr(line, "pk", line)
     line = SaleLine.objects.get(pk=line_id)
-    used = line.warehouse_checks.filter(status=CheckStatus.FINALIZED).aggregate(total=models.Sum("quantity"))["total"] or 0
+    used = line.warehouse_checks.filter(status=CheckStatus.FINALIZED, reversal__isnull=True).aggregate(total=models.Sum("quantity"))["total"] or 0
     return line.quantity - used
 
 
@@ -268,12 +270,14 @@ def finalize_warehouse_check(*, check, user=None, acknowledge_negative=False,
         check = WarehouseCheck.objects.select_for_update().select_related(
             "sale", "sale_line__product", "sale_line__unit", "sale__customer"
         ).get(pk=getattr(check, "pk", check))
+        if WarehouseCheckReversal.objects.filter(warehouse_check=check).exists():
+            raise SalesValidationError("A reversed Warehouse Check cannot be finalized again")
         if check.status == CheckStatus.FINALIZED:
             return check
         line = SaleLine.objects.select_for_update().get(pk=check.sale_line_id)
         if check.sale_id != line.sale_id:
             raise SalesValidationError("Warehouse Check must belong to its Sales Invoice Line")
-        used = WarehouseCheck.objects.filter(sale_line=line, status=CheckStatus.FINALIZED).aggregate(total=models.Sum("quantity"))["total"] or 0
+        used = WarehouseCheck.objects.filter(sale_line=line, status=CheckStatus.FINALIZED, reversal__isnull=True).aggregate(total=models.Sum("quantity"))["total"] or 0
         if check.quantity > line.quantity - used:
             raise SalesValidationError("Warehouse Check exceeds remaining Invoice Line quantity")
         assert_posting_date_open(check.sale.sale_date)
@@ -373,6 +377,126 @@ def finalize_warehouse_check(*, check, user=None, acknowledge_negative=False,
                 temporary_unit_cost_afn=movement.unit_cost_afn, movement_date=check.sale.sale_date,
             )
     return check
+
+
+
+def cancel_warehouse_check(*, check, reversal_date, reason, user=None,
+                           idempotency_key=None, confirm_not_delivered=False):
+    """Cancel a finalized check only when the caller confirms no physical delivery.
+
+    The original Warehouse Check, custody release, movement, and journal remain
+    immutable. A separate reversal aggregate and compensating ledger events are
+    created atomically. Delivered goods must use Sales Return instead.
+    """
+    actor = _actor(user)
+    day = _date(reversal_date)
+    if confirm_not_delivered is not True:
+        raise SalesValidationError(
+            "Explicit confirmation that goods were not physically delivered is required"
+        )
+    if not isinstance(reason, str) or not reason.strip():
+        raise SalesValidationError("A cancellation reason is required")
+    reason = reason.strip()
+    if len(reason) > 500:
+        raise SalesValidationError("Cancellation reason must be at most 500 characters")
+    if not isinstance(idempotency_key, str) or not idempotency_key.strip() or len(idempotency_key) > 128:
+        raise SalesValidationError("A valid cancellation idempotency key is required")
+    assert_posting_date_open(day)
+
+    with transaction.atomic():
+        locked = WarehouseCheck.objects.select_for_update().select_related(
+            "sale", "sale_line__product", "sale__customer", "warehouse"
+        ).get(pk=getattr(check, "pk", check))
+        existing = WarehouseCheckReversal.objects.filter(
+            idempotency_key=idempotency_key
+        ).first()
+        if existing:
+            if (existing.warehouse_check_id != locked.pk or
+                    existing.reversal_date != day or existing.reason != reason):
+                raise SalesValidationError("This idempotency key was used for a different cancellation")
+            return existing
+        already = WarehouseCheckReversal.objects.filter(warehouse_check=locked).first()
+        if already:
+            raise SalesValidationError("This Warehouse Check has already been cancelled")
+        if locked.status != CheckStatus.FINALIZED:
+            raise SalesValidationError("Only a finalized Warehouse Check can be cancelled")
+
+        from sales.models import TransitSaleAllocation
+        from sales.returns_models import SalesReturn
+        if locked.stock_movement_id and InventoryReturn.objects.filter(
+            source_movement_id=locked.stock_movement_id
+        ).exists():
+            raise SalesValidationError(
+                "This issue has Sales Return history; use the Sales Return workflow, not pre-delivery cancellation"
+            )
+        if NegativeCOGSObligation.objects.filter(warehouse_check=locked).exists():
+            raise SalesValidationError(
+                "This check has a negative-cost obligation; coordinated reversal is not supported until that obligation is resolved"
+            )
+
+        release = CustomerCustodyEvent.objects.select_for_update().filter(
+            event_type="RELEASED",
+            reference=locked.number,
+            entitlement__sale_line_id=locked.sale_line_id,
+            warehouse_id=locked.warehouse_id,
+        ).first()
+        if release is None:
+            raise SalesValidationError("The original custody release event was not found")
+        if release.reversal_events.exists():
+            raise SalesValidationError("The original custody release has already been reversed")
+
+        movement_holder = {}
+        journal_holder = {}
+        is_transit = TransitSaleAllocation.objects.filter(
+            sale_line_id=locked.sale_line_id
+        ).exists()
+
+        def _compensate(*, original, actor, reversal_date, reason, idempotency_key):
+            if is_transit:
+                # Transit-sale COGS was posted at Sale finalization; the check
+                # only releases physically received customer-owned custody.
+                return
+            if locked.stock_movement_id is None or locked.cogs_journal_id is None:
+                raise SalesValidationError("A normal Warehouse Check lacks its stock/COGS source records")
+            movement_holder["movement"] = reverse_sales_issue_stock(
+                source_movement=locked.stock_movement,
+                movement_date=reversal_date,
+                reference=f"REV-{locked.number}",
+                description=reason,
+                user=actor,
+                idempotency_key=f"wc-cancel-stock:{hashlib.sha256(idempotency_key.encode()).hexdigest()}",
+            )
+            journal_holder["journal"] = reverse_journal(
+                locked.cogs_journal, reason, actor
+            )
+
+        reversal_event = reverse_customer_custody_event(
+            event=release, reversal_date=day, reason=reason,
+            reference=f"REV-{locked.number}", user=actor,
+            idempotency_key=f"wc-cancel-custody:{hashlib.sha256(idempotency_key.encode()).hexdigest()}",
+            compensate=_compensate,
+        )
+        reversal = WarehouseCheckReversal.objects.create(
+            warehouse_check=locked, reversal_date=day, reason=reason,
+            inventory_movement=movement_holder.get("movement"),
+            cogs_reversal_journal=journal_holder.get("journal"),
+            created_by=actor, idempotency_key=idempotency_key,
+        )
+        record_audit_event(
+            user=actor, action=AuditAction.REVERSE,
+            entity="WarehouseCheck", entity_id=locked.pk,
+            reference=locked.number,
+            previous_state={"status": locked.status, "quantity": locked.quantity},
+            new_state={
+                "reversal_id": reversal.pk,
+                "custody_reversal_event_id": reversal_event.pk,
+                "inventory_movement_id": getattr(movement_holder.get("movement"), "pk", None),
+                "cogs_reversal_journal_id": getattr(journal_holder.get("journal"), "pk", None),
+                "status": "CANCELLED",
+            },
+            reason=reason,
+        )
+        return reversal
 
 
 def resolve_negative_obligations(*, receipt_movement):
