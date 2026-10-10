@@ -273,7 +273,12 @@ def reverse_customer_custody_event(*, event, reversal_date, reason, reference,
                     reversal_of=original,
                 )
     except DuplicateOperationError:
-        return CustomerCustodyEvent.objects.get(idempotency_key=idempotency_key)
+        existing = CustomerCustodyEvent.objects.get(idempotency_key=idempotency_key)
+        if existing.reversal_of_id != event_id:
+            raise CustomerCustodyValidationError(
+                "This idempotency key was used for a different custody reversal"
+            )
+        return existing
 
 
 def custody_balance(*, entitlement, warehouse):
