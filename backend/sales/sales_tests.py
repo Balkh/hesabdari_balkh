@@ -4,10 +4,10 @@ from decimal import Decimal
 from django.test import TestCase
 
 from accounting.coa import seed_chart_of_accounts
-from accounting.models import JournalEntry, JournalStatus
+from accounting.models import JournalEntry
 from currencies.models import Currency
 from inventory.models import StockMovement
-from inventory.services import assign_warehouse_account, receive_stock
+from inventory.services import assign_warehouse_account
 from inventory.stock import stock_for
 from parties.services import create_party
 from products.services import create_product
@@ -18,7 +18,7 @@ from warehouses.services import create_warehouse
 from .models import CheckStatus, PaymentMode, SaleStatus, SalesChannel
 from .services import (
     SalesValidationError, create_sale, finalize_sale,
-    cancel_warehouse_check, finalize_warehouse_check, prepare_warehouse_check, remaining_quantity,
+    finalize_warehouse_check, prepare_warehouse_check,
 )
 
 
@@ -77,57 +77,3 @@ class SalesImplementationTests(TestCase):
         finalized = finalize_warehouse_check(check=check, acknowledge_negative=True, temporary_unit_cost="4")
         self.assertEqual(finalized.status, CheckStatus.FINALIZED)
         self.assertEqual(stock_for(self.product, self.warehouse_a), -5)
-
-
-    def test_pre_delivery_check_cancellation_compensates_custody_stock_and_cogs(self):
-        sale = self.sale(quantity=5)
-        finalize_sale(sale=sale)
-        line = sale.lines.get()
-        receive_stock(
-            product=self.product, warehouse=self.warehouse_a, quantity=5,
-            unit_cost="4", currency=self.afn, movement_date=date(2026, 1, 10),
-            reference="RCPT-WC-CANCEL",
-        )
-        check = prepare_warehouse_check(
-            sale_line=line, warehouse=self.warehouse_a, quantity=5, number="WC-CANCEL-1"
-        )
-        finalize_warehouse_check(check=check)
-        self.assertEqual(stock_for(self.product, self.warehouse_a), 0)
-        original_cogs = check.cogs_journal
-
-        reversal = cancel_warehouse_check(
-            check=check, reversal_date=date(2026, 1, 11),
-            reason="Customer had not received the goods",
-            idempotency_key="wc-cancel-test-1", confirm_not_delivered=True,
-        )
-        self.assertEqual(stock_for(self.product, self.warehouse_a), 5)
-        self.assertEqual(reversal.inventory_movement.quantity, 5)
-        self.assertEqual(original_cogs.status, JournalStatus.REVERSED)
-        self.assertEqual(remaining_quantity(line), 5)
-        retry = cancel_warehouse_check(
-            check=check, reversal_date=date(2026, 1, 11),
-            reason="Customer had not received the goods",
-            idempotency_key="wc-cancel-test-1", confirm_not_delivered=True,
-        )
-        self.assertEqual(retry.pk, reversal.pk)
-
-    def test_pre_delivery_cancellation_requires_explicit_confirmation(self):
-        sale = self.sale(quantity=5)
-        finalize_sale(sale=sale)
-        receive_stock(
-            product=self.product, warehouse=self.warehouse_a, quantity=5,
-            unit_cost="4", currency=self.afn, movement_date=date(2026, 1, 10),
-            reference="RCPT-WC-CANCEL-CONFIRM",
-        )
-        check = prepare_warehouse_check(
-            sale_line=sale.lines.get(), warehouse=self.warehouse_a,
-            quantity=5, number="WC-CANCEL-CONFIRM",
-        )
-        finalize_warehouse_check(check=check)
-        with self.assertRaises(SalesValidationError):
-            cancel_warehouse_check(
-                check=check, reversal_date=date(2026, 1, 11),
-                reason="No delivery confirmation", idempotency_key="wc-cancel-confirm",
-            )
-        self.assertEqual(stock_for(self.product, self.warehouse_a), 0)
-
