@@ -1412,6 +1412,78 @@ def customer_dispatch(*, product, warehouse, customer, quantity,
     )
 
 @transaction.atomic
+
+@transaction.atomic
+def transit_sales_return(*, product, warehouse, customer, quantity, unit_cost,
+                         currency, rate, rate_date, movement_date, reference,
+                         description, user=None, idempotency_key=None):
+    """Receive physically returned customer-owned Transit goods into company stock.
+
+    Unlike an ordinary return, the sold Transit goods never had a company
+    SALES_ISSUE movement. The Transit allocation supplies the historical cost
+    basis; this creates only the positive SALES_RETURN stock movement.
+    """
+    actor = _require_actor(user, "post Transit sales return")
+    day = _coerce_day(movement_date)
+    assert_posting_date_open(day)
+    product = resolve_product(product)
+    warehouse = resolve_warehouse(warehouse)
+    customer = __import__("parties.models", fromlist=["Party"]).Party.objects.get(
+        pk=getattr(customer, "pk", customer)
+    )
+    currency = resolve_currency(currency)
+    _require_active_masters(product, warehouse, currency)
+    units = _coerce_units(quantity, what="Transit sales return quantity")
+    cost = _coerce_unit_cost(unit_cost)
+    rate_value = _coerce_rate(currency, rate)
+    rate_day = _coerce_rate_date(currency, rate_date, day)
+    ref = _clean_reference(reference)
+    desc = _clean_description(description)
+    if not desc:
+        raise InventoryValidationError("A Transit sales return reason is required.")
+    return _post_movement(
+        movement_type=MovementType.SALES_RETURN, product=product,
+        warehouse=warehouse, signed_quantity=units, movement_day=day,
+        currency=currency, unit_cost=cost, rate_value=rate_value,
+        rate_day=rate_day, reference=ref, description=desc, actor=actor,
+        journal_entry=None, is_temporary_cost=False,
+        idempotency_key=idempotency_key, audit_reason="Transit sales return",
+        source_party=customer,
+    )
+
+
+@transaction.atomic
+def reverse_transit_sales_return_stock(*, return_movement, movement_date,
+                                       reference, description, user=None,
+                                       idempotency_key=None):
+    """Compensate a Transit return only if its returned stock still exists."""
+    actor = _require_actor(user, "reverse Transit sales return")
+    source = StockMovement.objects.select_for_update().get(
+        pk=getattr(return_movement, "pk", return_movement)
+    )
+    if source.movement_type != MovementType.SALES_RETURN or source.quantity <= 0:
+        raise InventoryValidationError("Source is not a positive Transit sales return.")
+    day = _coerce_day(movement_date)
+    assert_posting_date_open(day)
+    product, warehouse = _lock_stock_identity(source.product, source.warehouse)
+    units = source.quantity
+    current = stock_for(product, warehouse)
+    if current < units:
+        raise InventoryValidationError(
+            "Cannot reverse Transit return: returned quantity is no longer in warehouse stock."
+        )
+    return _post_movement(
+        movement_type=MovementType.SALES_ISSUE, product=product,
+        warehouse=warehouse, signed_quantity=-units, movement_day=day,
+        currency=source.currency, unit_cost=source.unit_cost,
+        rate_value=source.rate, rate_day=source.rate_date,
+        reference=_clean_reference(reference),
+        description=_clean_description(description), actor=actor,
+        journal_entry=None, is_temporary_cost=source.is_temporary_cost,
+        idempotency_key=idempotency_key, audit_reason="Transit sales return reversal",
+        source_party=source.source_party,
+    )
+
 def _reverse_sales_return_stock(*, inventory_return, movement_date, reference,
                                description, user=None, idempotency_key=None):
     """Compensate a posted sales return with a new immutable outbound movement.
