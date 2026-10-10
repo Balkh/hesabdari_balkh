@@ -64,7 +64,7 @@ class WarehouseCheckReversalTests(TestCase):
             sale_line=sale.lines.get(), warehouse=self.warehouse,
             quantity=5, number=number,
         )
-        finalize_warehouse_check(check=check)
+        check = finalize_warehouse_check(check=check)
         return sale, check
 
     def test_pre_delivery_cancel_compensates_custody_stock_and_cogs_idempotently(self):
