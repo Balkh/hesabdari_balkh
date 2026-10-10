@@ -81,6 +81,7 @@ class WarehouseCheckReversalTests(TestCase):
 
         self.assertEqual(stock_for(self.product, self.warehouse), 5)
         self.assertEqual(reversal.inventory_movement.quantity, 5)
+        original_cogs.refresh_from_db()
         self.assertEqual(original_cogs.status, JournalStatus.REVERSED)
         self.assertEqual(remaining_quantity(sale.lines.get()), 5)
         self.assertEqual(
