@@ -664,8 +664,9 @@ def reverse_sales_return(sales_return, *, reversal_date, reason, user=None,
         raise ReturnValidationError("A valid idempotency key is required")
 
     with transaction.atomic():
-        ret = SalesReturn.objects.select_for_update().select_related(
-            "sale__customer", "inventory_return", "entitlement_journal", "cogs_journal"
+        ret = SalesReturn.objects.select_for_update(of=("self",)).select_related(
+            "sale__customer", "inventory_return", "return_movement",
+            "entitlement_journal", "cogs_journal"
         ).get(pk=getattr(sales_return, "pk", sales_return))
         existing = None
         if idempotency_key:
