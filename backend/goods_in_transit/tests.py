@@ -24,6 +24,7 @@ from sales.services import (
     SalesValidationError, create_sale, finalize_sale,
     finalize_warehouse_check, prepare_warehouse_check,
 )
+from sales.returns_services import create_sales_return, reverse_sales_return
 
 from .models import GoodsInTransitLot, TransitCustomerCustody, TransitDestinationTransfer, TransitLotStatus, TransitReceipt
 from .services import TransitValidationError, receive_transit, transfer_transit_destination
@@ -440,6 +441,71 @@ class GoodsInTransitTests(TestCase):
         self.assertEqual(second.customer_custody_quantity, 10)
         self.assertEqual(lot.status, TransitLotStatus.CLOSED)
         self.assertEqual(custody_balance(entitlement=entitlement, warehouse=self.warehouse), 15)
+
+    def test_transit_sale_return_uses_historical_cost_and_reverses_without_fake_issue(self):
+        purchase = self._purchase(document_number="PI-TR-RETURN-001")
+        post_purchase(purchase=purchase, user=self.user)
+        lot = GoodsInTransitLot.objects.get(purchase_line=purchase.lines.get())
+        sale = create_sale(
+            customer=self.customer, sale_date=date(2026, 2, 10),
+            currency=self.usd, channel=SalesChannel.WHOLESALE,
+            payment_mode=PaymentMode.CREDIT,
+            lines=[{
+                "product": self.product, "unit": self.product.primary_uom,
+                "quantity": 20, "unit_price": "120", "transit_lot": lot,
+            }],
+            user=self.user, document_number="SI-TR-RETURN-001",
+        )
+        finalize_sale(sale=sale, user=self.user)
+        receive_transit(
+            lot=lot, quantity=100, receipt_date=date(2026, 2, 12),
+            user=self.user, idempotency_key="transit-return-receipt-001",
+        )
+        line = sale.lines.get()
+        check = prepare_warehouse_check(
+            sale_line=line, warehouse=self.warehouse, quantity=20,
+            number="WC-TR-RETURN-001",
+        )
+        finalize_warehouse_check(check=check, user=self.user)
+        self.assertEqual(stock_for(self.product, self.warehouse), 80)
+
+        returned = create_sales_return(
+            sale_line=line, warehouse=self.warehouse, quantity=2,
+            return_date=date(2026, 2, 13), reason="Transit customer return",
+            document_number="SR-TR-RETURN-001",
+            idempotency_key="sales-return-transit-001", user=self.user,
+        )
+        self.assertIsNone(returned.inventory_return_id)
+        self.assertEqual(returned.return_movement.movement_type, "SALES_RETURN")
+        self.assertEqual(returned.return_movement.quantity, 2)
+        self.assertEqual(returned.return_movement.unit_cost_afn, Decimal("7000.0000"))
+        self.assertEqual(stock_for(self.product, self.warehouse), 82)
+        self.assertEqual(
+            returned.cogs_journal.lines.get(account__code="1410").debit,
+            Decimal("14000.00"),
+        )
+        self.assertEqual(
+            returned.cogs_journal.lines.get(account__code="5100").credit,
+            Decimal("14000.00"),
+        )
+        self.assertEqual(
+            JournalEntry.objects.filter(source_type="SALES_COGS_TRANSIT").count(), 1
+        )
+        self.assertEqual(
+            StockMovement.objects.filter(
+                product=self.product, movement_type="SALES_ISSUE"
+            ).count(), 0
+        )
+
+        reversal = reverse_sales_return(
+            returned, reversal_date=date(2026, 2, 14),
+            reason="Reverse transit return", document_number="SRV-TR-RETURN-001",
+            idempotency_key="sales-return-transit-reversal-001", user=self.user,
+        )
+        self.assertEqual(reversal.inventory_movement.movement_type, "SALES_ISSUE")
+        self.assertEqual(reversal.inventory_movement.quantity, -2)
+        self.assertEqual(stock_for(self.product, self.warehouse), 80)
+
 
     def test_transit_destination_transfer_preserves_owned_quantity_and_changes_destination(self):
         purchase = self._purchase(document_number="PI-TRANSIT-MOVE-001")
