@@ -225,6 +225,46 @@ class GoodsInTransitTests(TestCase):
         )
         self.assertEqual(stock_for(self.product, self.warehouse), 0)
 
+    def test_fully_sold_transit_lot_stays_open_until_customer_goods_arrive(self):
+        purchase = self._purchase(document_number="PI-TR-FULL-001")
+        post_purchase(purchase=purchase, user=self.user)
+        lot = GoodsInTransitLot.objects.get(purchase_line=purchase.lines.get())
+        sale = create_sale(
+            customer=self.customer, sale_date=date(2026, 2, 10),
+            currency=self.usd, channel=SalesChannel.WHOLESALE,
+            payment_mode=PaymentMode.CREDIT,
+            lines=[{
+                "product": self.product, "unit": self.product.primary_uom,
+                "quantity": 100, "unit_price": "120", "transit_lot": lot,
+            }],
+            user=self.user, document_number="SI-TR-FULL-001",
+        )
+
+        finalize_sale(sale=sale, user=self.user)
+        lot.refresh_from_db()
+        self.assertEqual(lot.remaining_quantity, 0)
+        self.assertEqual(lot.status, TransitLotStatus.OPEN)
+
+        receipt = receive_transit(
+            lot=lot, quantity=100, receipt_date=date(2026, 2, 12),
+            user=self.user, idempotency_key="transit-full-sale-receipt-001",
+        )
+        lot.refresh_from_db()
+        entitlement = sale.lines.get().customer_ownership_entitlement
+        self.assertEqual(receipt.company_quantity, 0)
+        self.assertEqual(receipt.customer_custody_quantity, 100)
+        self.assertIsNone(receipt.stock_movement_id)
+        self.assertIsNone(receipt.journal_entry_id)
+        self.assertEqual(lot.status, TransitLotStatus.CLOSED)
+        self.assertEqual(custody_balance(entitlement=entitlement, warehouse=self.warehouse), 100)
+        self.assertEqual(stock_for(self.product, self.warehouse), 0)
+        self.assertEqual(
+            JournalEntry.objects.filter(source_type="SALES_COGS_TRANSIT").count(), 1
+        )
+        self.assertEqual(
+            JournalEntry.objects.filter(source_type="SALES_COGS").count(), 0
+        )
+
     def test_sale_cannot_consume_more_transit_than_available(self):
         purchase = self._purchase(document_number="PI-TRANSIT-SALE-002")
         post_purchase(purchase=purchase, user=self.user)
