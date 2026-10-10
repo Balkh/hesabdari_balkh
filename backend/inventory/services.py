@@ -621,6 +621,53 @@ def issue_stock(*, product, warehouse, quantity, movement_date, reference,
     )
 
 
+
+@transaction.atomic
+def reverse_sales_issue_stock(*, source_movement, movement_date, reference,
+                              description, user=None, idempotency_key=None):
+    """Compensate an undelivered finalized Sales issue without editing history.
+
+    This is intentionally distinct from SALES_RETURN: no commercial return
+    or customer entitlement is created. The caller must validate the related
+    Warehouse Check and ensure this is a pre-delivery cancellation.
+    """
+    actor = _require_actor(user, "reverse sales issue stock")
+    if not isinstance(idempotency_key, str) or not idempotency_key.strip() or len(idempotency_key) > 128:
+        raise InventoryValidationError("A valid sales issue reversal idempotency key is required.")
+    day = _coerce_day(movement_date)
+    assert_posting_date_open(day)
+    clean_reference = _clean_reference(reference)
+    clean_description = _clean_description(description)
+    if not clean_description:
+        raise InventoryValidationError("A reversal reason/description is required.")
+    source_id = getattr(source_movement, "pk", source_movement)
+    try:
+        original = StockMovement.objects.select_for_update().select_related(
+            "product", "warehouse", "currency"
+        ).get(pk=source_id)
+    except (StockMovement.DoesNotExist, ValueError, TypeError):
+        raise InventoryValidationError("Source stock movement does not exist.") from None
+    if original.movement_type != MovementType.SALES_ISSUE or original.quantity >= 0:
+        raise InventoryValidationError("Only an outbound Sales issue can be reversed.")
+    if original.journal_entry_id is not None:
+        raise InventoryValidationError(
+            "This Sales issue has a linked journal; reverse the coordinated business event instead."
+        )
+    product, warehouse = _lock_stock_identity(original.product, original.warehouse)
+    return _post_movement(
+        movement_type=MovementType.SALES_ISSUE_REVERSAL,
+        product=product, warehouse=warehouse,
+        signed_quantity=abs(original.quantity), movement_day=day,
+        currency=original.currency, unit_cost=original.unit_cost,
+        rate_value=original.rate, rate_day=original.rate_date,
+        reference=clean_reference, description=clean_description,
+        actor=actor, is_temporary_cost=original.is_temporary_cost,
+        idempotency_key=idempotency_key,
+        audit_reason="Pre-delivery Sales issue reversal; original cost basis preserved",
+        source_party=original.source_party,
+    )
+
+
 def _jalali_year(value):
     return int(gregorian_to_jalali(value).split("/")[0])
 

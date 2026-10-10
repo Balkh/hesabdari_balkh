@@ -31,6 +31,7 @@ class MovementType(models.TextChoices):
 
     PURCHASE_RECEIPT = "PURCHASE_RECEIPT", "Purchase Receipt"
     SALES_ISSUE = "SALES_ISSUE", "Sales Issue"
+    SALES_ISSUE_REVERSAL = "SALES_ISSUE_REVERSAL", "Sales Issue Reversal"
     SALES_RETURN = "SALES_RETURN", "Sales Return"
     PURCHASE_RETURN = "PURCHASE_RETURN", "Purchase Return"
     TRANSFER_IN = "TRANSFER_IN", "Transfer In"
@@ -46,6 +47,7 @@ class MovementType(models.TextChoices):
 IN_MOVEMENT_TYPES = frozenset({
     MovementType.PURCHASE_RECEIPT,
     MovementType.SALES_RETURN,
+    MovementType.SALES_ISSUE_REVERSAL,
     MovementType.TRANSFER_IN,
     MovementType.ADJUSTMENT_IN,
     MovementType.OPENING,
