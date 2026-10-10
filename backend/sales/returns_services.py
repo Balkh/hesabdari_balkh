@@ -119,7 +119,7 @@ def _remaining_released_quantity(sale_line):
     ).filter(
         warehouse_checks__sale_line=sale_line,
         warehouse_checks__status="FINALIZED",
-    ).aggregate(v=Sum("quantity"))["v"] or 0
+    ).exclude(warehouse_checks__reversal__isnull=False).aggregate(v=Sum("quantity"))["v"] or 0
     returned = InventoryReturn.objects.filter(
         return_type="SALES_RETURN",
         product=sale_line.product,
@@ -288,7 +288,7 @@ def create_sales_return(*, sale_line, warehouse, quantity, return_date,
                 warehouse=warehouse,
                 warehouse_checks__sale_line=line,
                 warehouse_checks__status="FINALIZED",
-            ).order_by("id")
+            ).exclude(warehouse_checks__reversal__isnull=False).order_by("id")
         )
         source = None
         for candidate in source_rows:
