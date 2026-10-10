@@ -265,6 +265,52 @@ class GoodsInTransitTests(TestCase):
             JournalEntry.objects.filter(source_type="SALES_COGS").count(), 0
         )
 
+    def test_fully_sold_transit_lot_supports_partial_receipts_until_closed(self):
+        purchase = self._purchase(document_number="PI-TR-FULL-PART-001")
+        post_purchase(purchase=purchase, user=self.user)
+        lot = GoodsInTransitLot.objects.get(purchase_line=purchase.lines.get())
+        sale = create_sale(
+            customer=self.customer, sale_date=date(2026, 2, 10),
+            currency=self.usd, channel=SalesChannel.WHOLESALE,
+            payment_mode=PaymentMode.CREDIT,
+            lines=[{
+                "product": self.product, "unit": self.product.primary_uom,
+                "quantity": 100, "unit_price": "120", "transit_lot": lot,
+            }],
+            user=self.user, document_number="SI-TR-FULL-PART-001",
+        )
+        finalize_sale(sale=sale, user=self.user)
+
+        first = receive_transit(
+            lot=lot, quantity=60, receipt_date=date(2026, 2, 12),
+            user=self.user, idempotency_key="transit-full-part-receipt-001a",
+        )
+        lot.refresh_from_db()
+        self.assertEqual(first.company_quantity, 0)
+        self.assertEqual(first.customer_custody_quantity, 60)
+        self.assertEqual(lot.remaining_quantity, 0)
+        self.assertEqual(lot.status, TransitLotStatus.OPEN)
+        entitlement = sale.lines.get().customer_ownership_entitlement
+        self.assertEqual(custody_balance(entitlement=entitlement, warehouse=self.warehouse), 60)
+        self.assertEqual(stock_for(self.product, self.warehouse), 0)
+
+        second = receive_transit(
+            lot=lot, quantity=40, receipt_date=date(2026, 2, 13),
+            user=self.user, idempotency_key="transit-full-part-receipt-001b",
+        )
+        lot.refresh_from_db()
+        self.assertEqual(second.company_quantity, 0)
+        self.assertEqual(second.customer_custody_quantity, 40)
+        self.assertEqual(lot.status, TransitLotStatus.CLOSED)
+        self.assertEqual(custody_balance(entitlement=entitlement, warehouse=self.warehouse), 100)
+        self.assertEqual(stock_for(self.product, self.warehouse), 0)
+        self.assertEqual(
+            JournalEntry.objects.filter(source_type="SALES_COGS_TRANSIT").count(), 1
+        )
+        self.assertEqual(
+            JournalEntry.objects.filter(source_type="SALES_COGS").count(), 0
+        )
+
     def test_sale_cannot_consume_more_transit_than_available(self):
         purchase = self._purchase(document_number="PI-TRANSIT-SALE-002")
         post_purchase(purchase=purchase, user=self.user)
