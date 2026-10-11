@@ -38,7 +38,6 @@ class PurchaseValidationError(ValueError):
 
 
 PURCHASE_POST_OPERATION = "purchase.post"
-FREIGHT_ACCOUNT = "6200"
 PAYABLE_ACCOUNT = "2110"
 
 
@@ -85,6 +84,18 @@ def _quantity(value):
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise PurchaseValidationError("Quantity must be a positive integer.")
     return value
+
+
+def _weight_kg(value):
+    if value is None or value == "":
+        return None
+    try:
+        weight = quantize_half_up(to_decimal(value), 4)
+    except (InvalidOperation, TypeError, ValueError, ArithmeticError) as exc:
+        raise PurchaseValidationError("Measured weight must be a valid positive kg value.") from exc
+    if weight <= 0:
+        raise PurchaseValidationError("Measured weight must be positive.")
+    return weight
 
 
 def _resolve_supplier(ref):
@@ -181,9 +192,37 @@ def _prepare_lines(lines):
         product = _resolve_product(item.get("product"))
         quantity = _quantity(item.get("quantity"))
         unit_price = _price(item.get("unit_price"))
+        measured_weight_kg = _weight_kg(item.get("measured_weight_kg"))
         rows.append({"product": product, "quantity": quantity, "unit_price": unit_price,
+                     "measured_weight_kg": measured_weight_kg,
                      "gross": quantize_half_up(unit_price * quantity, 2)})
     return rows
+
+
+def _allocate_freight(rows, freight):
+    """Allocate shared freight by measured shipment weight, with exact cents reconciliation."""
+    allocated = Decimal("0.00")
+    if not rows:
+        return
+    if freight == 0:
+        for row in rows:
+            row["freight_allocated"] = Decimal("0.00")
+        return
+    if len(rows) == 1:
+        rows[0]["freight_allocated"] = freight
+        return
+    if any(row.get("measured_weight_kg") is None or row["measured_weight_kg"] <= 0 for row in rows):
+        raise PurchaseValidationError(
+            "Positive shared freight across multiple lines requires a positive measured_weight_kg on every line."
+        )
+    total_weight = sum((row["measured_weight_kg"] for row in rows), Decimal("0.0000"))
+    for index, row in enumerate(rows):
+        if index == len(rows) - 1:
+            share = freight - allocated
+        else:
+            share = quantize_half_up(freight * row["measured_weight_kg"] / total_weight, 2)
+        row["freight_allocated"] = share
+        allocated += share
 
 
 def _totals(rows, discount, freight):
@@ -191,6 +230,7 @@ def _totals(rows, discount, freight):
     freight = _money(freight, "Freight")
     subtotal = sum((row["gross"] for row in rows), Decimal("0.00"))
     _allocate(rows, discount)
+    _allocate_freight(rows, freight)
     return subtotal, discount, freight, subtotal - discount + freight
 
 
@@ -230,6 +270,7 @@ def create_purchase(*, supplier, purchase_date, currency, warehouse, lines,
                 purchase=purchase, product=row["product"], quantity=row["quantity"],
                 unit_price=row["unit_price"], line_total=row["gross"],
                 discount_allocated=row["discount"], net_total=row["net"],
+                measured_weight_kg=row["measured_weight_kg"], freight_allocated=row["freight_allocated"],
             )
         record_audit_event(user=actor, action=AuditAction.CREATE, entity="Purchase",
                            entity_id=purchase.pk, reference=purchase.document_number,
@@ -270,7 +311,7 @@ def update_purchase(purchase, *, supplier=_UNSET, purchase_date=_UNSET, currency
             new_discount = current.discount if discount is _UNSET else discount
             new_freight = current.freight if freight is _UNSET else freight
             if lines is _UNSET:
-                lines = list(current.lines.order_by("id").values("product", "quantity", "unit_price"))
+                lines = list(current.lines.order_by("id").values("product", "quantity", "unit_price", "measured_weight_kg"))
                 lines = [{**row, "product": row["product"]} for row in lines]
             rows = _prepare_lines(lines)
             subtotal, new_discount, new_freight, total = _totals(rows, new_discount, new_freight)
@@ -348,14 +389,18 @@ def validate_purchase(purchase):
         gross = quantize_half_up(unit_price * quantity, 2)
         if line.line_total != gross:
             raise PurchaseValidationError("Purchase line total is inconsistent.")
-        rows.append({"product": product, "quantity": quantity, "unit_price": unit_price, "gross": gross})
+        rows.append({"product": product, "quantity": quantity, "unit_price": unit_price,
+                     "measured_weight_kg": _weight_kg(line.measured_weight_kg), "gross": gross})
     discount = _money(purchase.discount, "Discount")
     freight = _money(purchase.freight, "Freight")
     subtotal = sum((row["gross"] for row in rows), Decimal("0.00"))
     _allocate(rows, discount)
+    _allocate_freight(rows, freight)
     for row, line in zip(rows, lines):
         if line.discount_allocated != row["discount"] or line.net_total != row["net"]:
             raise PurchaseValidationError("Purchase line discount allocation is inconsistent.")
+        if line.freight_allocated != row["freight_allocated"]:
+            raise PurchaseValidationError("Purchase line freight allocation is inconsistent.")
     total = subtotal - discount + freight
     if purchase.subtotal != subtotal or purchase.total != total:
         raise PurchaseValidationError("Purchase totals are inconsistent.")
@@ -374,7 +419,7 @@ def _fingerprint(purchase):
             "warehouse_id": purchase.warehouse_id, "delivery_mode": purchase.delivery_mode,
             "discount": str(purchase.discount),
             "freight": str(purchase.freight), "description": purchase.description,
-            "lines": list(purchase.lines.values("product_id", "quantity", "unit_price", "net_total")),
+            "lines": list(purchase.lines.values("product_id", "quantity", "unit_price", "net_total", "measured_weight_kg", "freight_allocated")),
         }
     return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()
 
@@ -407,14 +452,10 @@ def _post_effects(purchase, actor, idempotency_key):
         inventory_account = resolve_warehouse_account(purchase.warehouse)
         inventory_description = f"Inventory receipt {purchase.document_number}"
     payable = Account.objects.get(code=PAYABLE_ACCOUNT)
-    freight_account = Account.objects.get(code=FREIGHT_ACCOUNT)
-    journal_lines = [{"account": inventory_account, "debit": purchase.subtotal - purchase.discount,
+    journal_lines = [{"account": inventory_account, "debit": purchase.total,
                       "description": inventory_description, "reference": purchase.document_number},
                      {"account": payable, "credit": purchase.total,
                       "description": f"Supplier payable {purchase.document_number}", "reference": purchase.document_number}]
-    if purchase.freight:
-        journal_lines.insert(1, {"account": freight_account, "debit": purchase.freight,
-                                 "description": f"Freight {purchase.document_number}", "reference": purchase.document_number})
     journal = post_journal(
         number=next_document_number("JE", int(gregorian_to_jalali(purchase.purchase_date).split("/")[0])),
         posting_date=purchase.purchase_date, description=purchase.description or f"Purchase {purchase.document_number}",
@@ -429,7 +470,7 @@ def _post_effects(purchase, actor, idempotency_key):
     transit_lot_ids = []
     if purchase.delivery_mode == PurchaseDeliveryMode.IMMEDIATE:
         for line in purchase.lines.select_related("product"):
-            unit_cost = quantize_half_up(line.net_total / Decimal(line.quantity), 4)
+            unit_cost = quantize_half_up((line.net_total + line.freight_allocated) / Decimal(line.quantity), 4)
             movement_reference = f"{purchase.document_number}:LINE:{line.pk}"
             movement = receive_stock(product=line.product, warehouse=purchase.warehouse, quantity=line.quantity,
                                      unit_cost=unit_cost, currency=purchase.currency,
