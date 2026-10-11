@@ -4,7 +4,7 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-    dependencies = [("purchases", "0001_initial")]
+    dependencies = [("purchases", "0005_merge_phase11_purchases")]
 
     operations = [
         migrations.AddField(
