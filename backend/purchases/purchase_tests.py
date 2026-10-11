@@ -84,14 +84,14 @@ class PurchaseFoundationTests(TestCase):
         self.assertEqual(purchase.total, Decimal("10500.00"))
         self.assertEqual(journal.total_debit, Decimal("10500.00"))
         self.assertEqual(journal.total_credit, Decimal("10500.00"))
-        self.assertEqual(journal.lines.get(account__code="1410").debit, Decimal("9500.00"))
-        self.assertEqual(journal.lines.get(account__code="6200").debit, Decimal("1000.00"))
+        self.assertEqual(journal.lines.get(account__code="1410").debit, Decimal("10500.00"))
+        self.assertFalse(journal.lines.filter(account__code="6200").exists())
         self.assertEqual(journal.lines.get(account__code="2110").credit, Decimal("10500.00"))
         line = purchase.lines.get()
         movement = StockMovement.objects.get(reference=f"{purchase.document_number}:LINE:{line.pk}")
-        self.assertEqual(movement.unit_cost, Decimal("95.0000"))
-        self.assertEqual(movement.unit_cost_afn, Decimal("95.0000"))
-        self.assertEqual(avco_for(self.product, self.warehouse), Decimal("95.0000"))
+        self.assertEqual(movement.unit_cost, Decimal("105.0000"))
+        self.assertEqual(movement.unit_cost_afn, Decimal("105.0000"))
+        self.assertEqual(avco_for(self.product, self.warehouse), Decimal("105.0000"))
         balance = party_balance(self.supplier, currency=self.afn, balance_type="PAYABLE")
         self.assertEqual(balance["balance"], Decimal("10500.00"))
 
@@ -113,8 +113,8 @@ class PurchaseFoundationTests(TestCase):
         self.assertEqual(journal.rate, Decimal("70.0000"))
         self.assertEqual(movement.currency, self.usd)
         self.assertEqual(movement.rate, Decimal("70.0000"))
-        self.assertEqual(movement.unit_cost, Decimal("95.0000"))
-        self.assertEqual(movement.unit_cost_afn, Decimal("6650.0000"))
+        self.assertEqual(movement.unit_cost, Decimal("97.0000"))
+        self.assertEqual(movement.unit_cost_afn, Decimal("6790.0000"))
         balance = party_balance(self.supplier, currency=self.usd, balance_type="PAYABLE")
         self.assertEqual(balance["balance"], Decimal("970.00"))
 
@@ -156,7 +156,7 @@ class PurchaseFoundationTests(TestCase):
         self.assertEqual(journal.lines.get(account__code="2110").credit, Decimal("370.00"))
         self.assertEqual(movement.product, self.product2)
         self.assertEqual(movement.warehouse, warehouse_b)
-        self.assertEqual(movement.unit_cost, Decimal("87.5000"))
+        self.assertEqual(movement.unit_cost, Decimal("92.5000"))
         self.assertEqual(movement.rate, Decimal("72.0000"))
         self.assertEqual(
             PartyLedgerAttribution.objects.get(journal_line=journal.lines.get(account__code="2110")).party,
@@ -181,16 +181,31 @@ class PurchaseFoundationTests(TestCase):
         purchase = self._purchase(
             discount="40", freight="25",
             lines=[
-                {"product": self.product, "quantity": 10, "unit_price": "100"},
-                {"product": self.product2, "quantity": 30, "unit_price": "100"},
+                {"product": self.product, "quantity": 10, "unit_price": "100", "measured_weight_kg": "10"},
+                {"product": self.product2, "quantity": 30, "unit_price": "100", "measured_weight_kg": "30"},
             ],
         )
         lines = list(purchase.lines.all())
         self.assertEqual(purchase.subtotal, Decimal("4000.00"))
         self.assertEqual(sum((line.discount_allocated for line in lines), Decimal("0")), Decimal("40.00"))
         self.assertEqual([line.net_total for line in lines], [Decimal("990.00"), Decimal("2970.00")])
+        self.assertEqual([line.freight_allocated for line in lines], [Decimal("6.25"), Decimal("18.75")])
+        self.assertEqual(sum((line.freight_allocated for line in lines), Decimal("0.00")), purchase.freight)
         self.assertEqual(purchase.total, Decimal("3985.00"))
         self.assertEqual(purchase.status, PurchaseStatus.DRAFT)
+        self.assertEqual(StockMovement.objects.count(), 0)
+
+
+    def test_shared_freight_rejects_missing_measured_weight_before_posting(self):
+        with self.assertRaises(PurchaseValidationError):
+            self._purchase(
+                lines=[
+                    {"product": self.product, "quantity": 2, "unit_price": "10"},
+                    {"product": self.product2, "quantity": 3, "unit_price": "20"},
+                ],
+                freight="7", document_number="PI-MISSING-WEIGHT",
+            )
+        self.assertEqual(JournalEntry.objects.count(), 0)
         self.assertEqual(StockMovement.objects.count(), 0)
 
     def test_full_discount_is_permitted_but_over_discount_is_rejected(self):
@@ -249,8 +264,8 @@ class PurchaseFoundationTests(TestCase):
     def test_stage73_line_traceability_and_post_audit_effect_references(self):
         purchase = self._purchase(
             lines=[
-                {"product": self.product, "quantity": 2, "unit_price": "10"},
-                {"product": self.product, "quantity": 3, "unit_price": "20"},
+                {"product": self.product, "quantity": 2, "unit_price": "10", "measured_weight_kg": "2"},
+                {"product": self.product, "quantity": 3, "unit_price": "20", "measured_weight_kg": "3"},
             ],
             discount="10", freight="7",
             document_number="PI-TRACE-001",
@@ -264,7 +279,7 @@ class PurchaseFoundationTests(TestCase):
         self.assertEqual([movement.product_id for movement in movements], [self.product.pk, self.product.pk])
         self.assertEqual([movement.quantity for movement in movements], [2, 3])
         self.assertEqual([movement.warehouse_id for movement in movements], [self.warehouse.pk, self.warehouse.pk])
-        self.assertEqual([movement.unit_cost for movement in movements], [Decimal("8.7500"), Decimal("17.5000")])
+        self.assertEqual([movement.unit_cost for movement in movements], [Decimal("10.1500"), Decimal("18.9000")])
         journal = JournalEntry.objects.get(source_type="PURCHASE", source_id=purchase.document_number)
         payable_line = journal.lines.get(account__code="2110")
         self.assertEqual(payable_line.party_ledger_attribution.party_id, self.supplier.pk)
@@ -273,14 +288,16 @@ class PurchaseFoundationTests(TestCase):
         self.assertEqual(post_event.new_state["stock_movement_ids"], [movement.pk for movement in movements])
         self.assertEqual(post_event.new_state["stock_movement_references"], [movement.reference for movement in movements])
 
-    def test_freight_is_expense_and_not_inventory_cost(self):
+    def test_freight_is_capitalized_into_inventory_cost(self):
         purchase = self._purchase(freight="30")
         post_purchase(purchase=purchase, user=self.user)
         journal = JournalEntry.objects.get(source_type="PURCHASE", source_id=purchase.document_number)
-        self.assertEqual(journal.lines.get(account__code="6200").debit, Decimal("30.00"))
-        self.assertEqual(journal.lines.get(account__code="1410").debit, Decimal("120.00"))
+        self.assertFalse(journal.lines.filter(account__code="6200").exists())
+        self.assertEqual(journal.lines.get(account__code="1410").debit, Decimal("150.00"))
+        movement = StockMovement.objects.get(reference=f"${purchase.document_number}:LINE:{purchase.lines.get().pk}")
+        self.assertEqual(movement.unit_cost, Decimal("15.0000"))
         self.assertEqual(stock_for(self.product, self.warehouse), 10)
-        self.assertEqual(avco_for(self.product, self.warehouse), Decimal("12.0000"))
+        self.assertEqual(avco_for(self.product, self.warehouse), Decimal("15.0000"))
 
     def test_foreign_currency_context_is_preserved(self):
         purchase = self._purchase(currency=self.usd, rate="70", rate_date=self.day, lines=[{"product": self.product, "quantity": 2, "unit_price": "10"}])
@@ -297,9 +314,9 @@ class PurchaseFoundationTests(TestCase):
     def test_stage77_multiline_repeated_product_retry_preserves_line_traceability(self):
         purchase = self._purchase(
             lines=[
-                {"product": self.product, "quantity": 2, "unit_price": "10"},
-                {"product": self.product, "quantity": 3, "unit_price": "20"},
-                {"product": self.product2, "quantity": 4, "unit_price": "5"},
+                {"product": self.product, "quantity": 2, "unit_price": "10", "measured_weight_kg": "2"},
+                {"product": self.product, "quantity": 3, "unit_price": "20", "measured_weight_kg": "3"},
+                {"product": self.product2, "quantity": 4, "unit_price": "5", "measured_weight_kg": "4"},
             ],
             discount="10", freight="7", document_number="PI-MULTI-RETRY",
         )
