@@ -59,7 +59,17 @@ Weight must be an explicit, auditable measurement associated with each purchase 
 | LC-17 | Revenue and customer balances | Landed-cost-only changes do not alter sales revenue, customer receivables, or payments. |
 | LC-18 | PostgreSQL and SQLite | Relevant contract tests pass on both configured database engines, including transaction/idempotency behavior. |
 
-## 5. Implementation sequence
+## 5.1 Branch implementation checkpoint (not final evidence)
+
+The current draft branch adds the measured-weight and freight-allocation fields, validates weights for multi-line shared freight, capitalizes freight in the purchase journal, and includes allocated freight in immediate receipt and transit-lot unit costs. Focused purchase assertions were updated accordingly.
+
+This is only the first implementation slice. CI evidence must be read from the latest PR head before accepting it. The following are still open and block completion/freeze:
+- late costs discovered after posting, including the immutable adjustment journal workflow;
+- full quantity/cost allocation across remaining stock, transit, sold COGS, customer-owned custody, and returns;
+- representation and accounting treatment for direct-cost categories beyond the existing freight field;
+- final SQLite/PostgreSQL and full-suite evidence for the latest head.
+
+## 6. Implementation sequence
 
 1. Add explicit measured weight to purchase-line input, validation, persistence, and migration; preserve draft-edit semantics and posted immutability.
 2. Add one deterministic landed-cost allocation function and contract tests for direct and weight-based allocation.
@@ -69,7 +79,7 @@ Weight must be an explicit, auditable measurement associated with each purchase 
 6. Run focused Purchase/Sales/Transit tests, full backend suite, Django checks, and frontend build if affected; inspect CI results.
 7. Stop for user review with exact commit SHA, changed-file summary, test commands/results, and any unresolved limitations. No merge without explicit approval.
 
-## 6. Non-goals and safeguards
+## 7. Non-goals and safeguards
 
 - Do not change frozen Product master-data or Inventory identity contracts.
 - Do not change posted history or backdate a new journal into a closed period.
