@@ -29,7 +29,12 @@ class SalesReturn(models.Model):
     sale = models.ForeignKey("sales.Sale", on_delete=models.PROTECT, related_name="sales_returns")
     sale_line = models.ForeignKey("sales.SaleLine", on_delete=models.PROTECT, related_name="sales_returns")
     inventory_return = models.OneToOneField(
-        "inventory.InventoryReturn", on_delete=models.PROTECT, related_name="sales_return"
+        "inventory.InventoryReturn", null=True, blank=True,
+        on_delete=models.PROTECT, related_name="sales_return"
+    )
+    return_movement = models.OneToOneField(
+        "inventory.StockMovement", null=True, blank=True, on_delete=models.PROTECT,
+        related_name="transit_sales_returns",
     )
     warehouse = models.ForeignKey("warehouses.Warehouse", on_delete=models.PROTECT, related_name="sales_returns")
     return_date = models.DateField()
@@ -61,6 +66,13 @@ class SalesReturn(models.Model):
             models.CheckConstraint(condition=models.Q(entitlement_amount__gt=0), name="sales_return_entitlement_gt0"),
             models.CheckConstraint(condition=models.Q(refundable_amount__gte=0), name="sales_return_refundable_gte0"),
             models.CheckConstraint(condition=models.Q(refundable_amount__lte=models.F("entitlement_amount")), name="sales_return_refundable_lte_entitlement"),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(inventory_return__isnull=False, return_movement__isnull=True)
+                    | models.Q(inventory_return__isnull=True, return_movement__isnull=False)
+                ),
+                name="sales_return_exactly_one_stock_source",
+            ),
         ]
 
     def save(self, *args, **kwargs):
