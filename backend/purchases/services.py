@@ -336,6 +336,7 @@ def update_purchase(purchase, *, supplier=_UNSET, purchase_date=_UNSET, currency
                     purchase=current, product=row["product"], quantity=row["quantity"],
                     unit_price=row["unit_price"], line_total=row["gross"],
                     discount_allocated=row["discount"], net_total=row["net"],
+                    measured_weight_kg=row["measured_weight_kg"], freight_allocated=row["freight_allocated"],
                 )
             record_audit_event(user=actor, action=AuditAction.UPDATE, entity="Purchase",
                                entity_id=current.pk, reference=current.document_number,
@@ -485,7 +486,7 @@ def _post_effects(purchase, actor, idempotency_key):
     else:
         from goods_in_transit.services import create_transit_lot
         for line in purchase.lines.select_related("product"):
-            unit_cost = quantize_half_up(line.net_total / Decimal(line.quantity), 4)
+            unit_cost = quantize_half_up((line.net_total + line.freight_allocated) / Decimal(line.quantity), 4)
             lot = create_transit_lot(
                 purchase=purchase, purchase_line=line, unit_cost=unit_cost,
                 user=actor, journal_entry=journal,
