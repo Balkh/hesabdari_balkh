@@ -92,6 +92,9 @@ class WarehouseCheckReversalTests(TestCase):
         self.assertEqual(sale.journal_entry.status, JournalStatus.POSTED)
         self.assertEqual(sale.status, "FINALIZED")
         self.assertEqual(remaining_quantity(sale.lines.get()), 5)
+        with self.assertRaises(SalesValidationError):
+            finalize_warehouse_check(check=check)
+        self.assertEqual(stock_for(self.product, self.warehouse), 0)
         self.assertEqual(
             cancel_warehouse_check(
                 check=check, reversal_date=date(2026, 1, 11),
