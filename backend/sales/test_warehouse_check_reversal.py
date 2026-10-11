@@ -70,7 +70,7 @@ class WarehouseCheckReversalTests(TestCase):
         check = finalize_warehouse_check(check=check)
         return sale, check
 
-    def test_pre_delivery_cancel_compensates_custody_stock_and_cogs_idempotently(self):
+    def test_pre_delivery_cancel_restores_custody_preserves_stock_and_cogs_idempotently(self):
         sale, check = self._finalized_check("WC-REV-CANCEL")
         self.assertEqual(stock_for(self.product, self.warehouse), 0)
         original_cogs = check.cogs_journal
