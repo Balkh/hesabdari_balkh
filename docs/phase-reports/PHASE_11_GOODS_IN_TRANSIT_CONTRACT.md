@@ -1,6 +1,6 @@
 # Phase 11 — Goods in Transit Contract
 
-**Status:** APPROVED FOR IMPLEMENTATION  
+**Status:** IMPLEMENTED / CI VERIFIED / FROZEN (2026-10-11)  
 **Branch:** `phase/11-goods-in-transit`
 
 ## Core rule
@@ -93,3 +93,18 @@ This phase does not change:
 - posted-history immutability;
 - reversal-only correction principle;
 - Phase 8 PR #19.
+
+## Verification and closeout — 2026-10-11
+
+Phase 11 implementation fixes for Transit receipt, destination-transfer quantity integrity, physically returned Transit sales, and pre-delivery Warehouse Check cancellation have been merged into `main`:
+
+- [PR #24 — fully sold Transit lot receipt lifecycle](https://github.com/Balkh/hesabdari_balkh/pull/24)
+- [PR #25 — Transit destination transfer quantity](https://github.com/Balkh/hesabdari_balkh/pull/25)
+- [PR #26 — returns of physically released Transit sales](https://github.com/Balkh/hesabdari_balkh/pull/26)
+- [PR #27 — safe Warehouse Check cancellation reversals](https://github.com/Balkh/hesabdari_balkh/pull/27)
+
+**Post-merge evidence:** [main CI run](https://github.com/Balkh/hesabdari_balkh/actions/runs/38160953156) completed successfully for Backend, PostgreSQL, Frontend, and Tauri at main commit `1bf105543a057d8c4380e01314ca6599abeda256`.
+
+The cancellation decision is recorded in [PHASE_11_WAREHOUSE_CHECK_CANCELLATION_DECISION.md](PHASE_11_WAREHOUSE_CHECK_CANCELLATION_DECISION.md). Cancellation before physical delivery reverses the release authorization and restores customer-owned custody only; it does not cancel ownership or reverse the finalized Sale, revenue, original stock movement, or posted COGS. A post-delivery return remains an independent Sales Return.
+
+This closeout freezes the Phase 11 Goods-in-Transit implementation contract. It does not resolve or override separate accounting-policy questions explicitly left open by the Phase 8 master contract.
