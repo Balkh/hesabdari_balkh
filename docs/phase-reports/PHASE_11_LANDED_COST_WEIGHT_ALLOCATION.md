@@ -13,9 +13,10 @@
    `allocated freight = shared freight × line measured weight ÷ total measured weight`.
 4. Monetary rounding uses the existing Half-Up money utilities. Any allocation remainder is assigned deterministically so line allocations sum exactly to the source cost.
 5. For one-line purchases, the freight belongs entirely to that line; no comparative weight allocation is needed.
-6. Purchase currency and the purchase's recorded historical exchange rate/date remain authoritative. Do not silently re-rate historical purchases.
-7. Posted source documents and posted journals remain immutable. Later cost information must be represented by a traceable, atomic, idempotent adjustment—not by rewriting old entries.
-8. Revenue, customer balances, and cash/payment records must not change when cost alone is corrected.
+6. Purchase currency and the purchase's recorded historical exchange rate/date remain authoritative for the original purchase. Each later direct-cost document stores its own transaction currency, manually approved historical rate, rate date, and AFN valuation; never silently re-rate either document.
+7. A later direct cost is recorded as its own immutable cost document, attributed to the party that charged it (for example, the freight carrier). Posting credits supplier/creditor payable account `2110`; payment is a separate settlement and must not be fabricated as part of cost posting.
+8. Posted source documents and posted journals remain immutable. Later cost information must be represented by a traceable, atomic, idempotent adjustment—not by rewriting old entries.
+9. Revenue, customer balances, and cash/payment records must not change when cost alone is corrected.
 
 ## 2. Existing-code findings
 
@@ -23,7 +24,9 @@
 - `PurchaseLine` currently stores quantity, unit price, line total, discount allocation, and net total; no measured-weight field is present in the inspected model.
 - Current purchase posting debits the warehouse/Goods-in-Transit inventory account for `subtotal - discount`, debits account `6200` for freight, and credits supplier payable for the purchase total.
 - Current immediate-receipt and transit-lot unit costs are calculated from `PurchaseLine.net_total / quantity`, so freight is excluded from the unit cost.
-- Current negative-COGS resolution compares a temporary cost with the receipt movement's unit cost and records an adjustment. It does not, by itself, establish a general recalculation mechanism for later-added landed costs across all remaining stock, transit, custody, and returns.
+- The current negative-COGS resolver compares a temporary cost with a receipt movement's unit cost. It does not establish a general recalculation mechanism for later-added landed costs across all remaining stock, transit, custody, and returns.
+- Account `2110` is already the supplier-payable account in Purchase and Supplier Refund workflows. The approved later-cost rule is to credit `2110` against the cost adjustment's own payee; payment remains a separate workflow.
+- Immediate inventory uses a pooled, chronological AVCO replay over immutable stock movements. Therefore, simply estimating "sold quantity = purchase quantity minus current stock" is not valid when the same product has multiple receipts, transfers, or returns. The late-cost implementation must preserve the existing AVCO truth and propagate valuation deltas to linked posted events through new adjustment records.
 
 ## 3. Required design boundary
 
@@ -64,9 +67,9 @@ Weight must be an explicit, auditable measurement associated with each purchase 
 The current draft branch adds the measured-weight and freight-allocation fields, validates weights for multi-line shared freight, capitalizes freight in the purchase journal, and includes allocated freight in immediate receipt and transit-lot unit costs. Focused purchase assertions were updated accordingly.
 
 This is only the first implementation slice. CI evidence must be read from the latest PR head before accepting it. The following are still open and block completion/freeze:
-- late costs discovered after posting, including the immutable adjustment journal workflow;
-- full quantity/cost allocation across remaining stock, transit, sold COGS, customer-owned custody, and returns;
-- representation and accounting treatment for direct-cost categories beyond the existing freight field;
+- late costs discovered after posting, including a separate cost document, creditor/payable posting to `2110`, and payment kept separate;
+- an AVCO-safe valuation replay/adjustment strategy that reconciles remaining stock, transit, sold COGS, customer-owned custody, transfers, and returns without mutating posted history;
+- direct-cost allocation rows, historical-rate handling, and duplicate/atomicity protections;
 - final SQLite/PostgreSQL and full-suite evidence for the latest head.
 
 ## 6. Implementation sequence
@@ -74,10 +77,11 @@ This is only the first implementation slice. CI evidence must be read from the l
 1. Add explicit measured weight to purchase-line input, validation, persistence, and migration; preserve draft-edit semantics and posted immutability.
 2. Add one deterministic landed-cost allocation function and contract tests for direct and weight-based allocation.
 3. Update purchase journal and immediate/transit cost basis consistently.
-4. Design and implement late-cost adjustments as a separate immutable posting workflow. It must reconcile quantity/cost across inventory, transit, customer-owned custody, sales COGS, and returns; do not treat a simple negative-COGS resolver as sufficient.
-5. Add retry, atomic rollback, historical-rate, and dual-database evidence.
-6. Run focused Purchase/Sales/Transit tests, full backend suite, Django checks, and frontend build if affected; inspect CI results.
-7. Stop for user review with exact commit SHA, changed-file summary, test commands/results, and any unresolved limitations. No merge without explicit approval.
+4. Implement later direct costs as a separate immutable cost document: payee/creditor, cost date, currency, manual rate/date, category/description, weight-based or direct-line allocation, and a journal crediting `2110`. Payment is separate.
+5. Before posting cost adjustments, extend the existing valuation flow (do not create a competing AVCO engine) so late costs can propagate to remaining stock, transit, sold COGS, customer-owned custody, transfers, and returns through traceable adjustment records. Reconcile each adjustment to the source cost exactly.
+6. Add retry, atomic rollback, historical-rate, immutability, and dual-database evidence.
+7. Run focused Purchase/Sales/Transit tests, full backend suite, Django checks, and frontend build if affected; inspect CI results.
+8. Stop for user review with exact commit SHA, changed-file summary, test commands/results, and any unresolved limitations. No merge without explicit approval.
 
 ## 7. Non-goals and safeguards
 
