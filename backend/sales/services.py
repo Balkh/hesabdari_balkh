@@ -213,7 +213,11 @@ def finalize_sale(*, sale, user=None, idempotency_key=None):
             )
             remaining = lot.remaining_quantity - line.quantity
             lot.remaining_quantity = remaining
-            lot.status = TransitLotStatus.CLOSED if remaining == 0 else TransitLotStatus.OPEN
+            # A finalized Transit Sale transfers ownership, but does not mean
+            # the sold goods have physically arrived. Keep the lot open until
+            # receipts account for both remaining company-owned goods and sold
+            # customer-owned goods still in transit.
+            lot.status = TransitLotStatus.OPEN
             lot.save(allow_state_transition=True, update_fields={"remaining_quantity", "status"})
             TransitSaleAllocation.objects.create(
                 sale_line=line, transit_lot=lot, quantity=line.quantity,
