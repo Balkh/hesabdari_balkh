@@ -441,15 +441,31 @@ class GoodsInTransitTests(TestCase):
         self.assertEqual(lot.status, TransitLotStatus.CLOSED)
         self.assertEqual(custody_balance(entitlement=entitlement, warehouse=self.warehouse), 15)
 
-    def test_transit_destination_transfer_preserves_owned_quantity_and_changes_destination(self):
+    def test_transit_destination_transfer_rejects_partial_quantity_for_single_destination_lot(self):
         purchase = self._purchase(document_number="PI-TRANSIT-MOVE-001")
         post_purchase(purchase=purchase, user=self.user)
         lot = GoodsInTransitLot.objects.get(purchase_line=purchase.lines.get())
         second = create_warehouse(name="Transit Destination 2", user=self.user)
         WarehouseInventoryAccount.objects.create(warehouse=second, account_id=self._account_id("1420"))
-        row = transfer_transit_destination(lot=lot, warehouse=second, quantity=40, transfer_date=date(2026, 2, 3), user=self.user, idempotency_key="transit-move-001")
+
+        with self.assertRaisesRegex(TransitValidationError, "full remaining Transit quantity"):
+            transfer_transit_destination(
+                lot=lot, warehouse=second, quantity=40,
+                transfer_date=date(2026, 2, 3), user=self.user,
+                idempotency_key="transit-move-partial-001",
+            )
         lot.refresh_from_db()
-        self.assertEqual(row.quantity, 40)
+        self.assertEqual(lot.destination_warehouse_id, self.warehouse.pk)
+        self.assertEqual(lot.remaining_quantity, 100)
+        self.assertEqual(TransitDestinationTransfer.objects.filter(lot=lot).count(), 0)
+
+        row = transfer_transit_destination(
+            lot=lot, warehouse=second, quantity=100,
+            transfer_date=date(2026, 2, 3), user=self.user,
+            idempotency_key="transit-move-full-001",
+        )
+        lot.refresh_from_db()
+        self.assertEqual(row.quantity, 100)
         self.assertEqual(row.from_warehouse_id, self.warehouse.pk)
         self.assertEqual(row.to_warehouse_id, second.pk)
         self.assertEqual(lot.destination_warehouse_id, second.pk)

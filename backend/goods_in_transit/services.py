@@ -192,6 +192,16 @@ def transfer_transit_destination(*, lot, warehouse, quantity, transfer_date, use
                 raise TransitValidationError("Transit lot is not open.")
             if quantity > lot.remaining_quantity:
                 raise TransitValidationError("Transfer exceeds remaining Transit quantity.")
+            # A lot has exactly one destination warehouse. Recording a partial
+            # quantity while changing that single destination would falsely
+            # imply that the entire lot moved. Until lots can be split into
+            # independently tracked destination segments, require the transfer
+            # quantity to cover all remaining company-owned Transit quantity.
+            if quantity != lot.remaining_quantity:
+                raise TransitValidationError(
+                    "Transfer quantity must equal the full remaining Transit quantity "
+                    "because a Transit lot has one destination."
+                )
             if target.pk == lot.destination_warehouse_id:
                 raise TransitValidationError("Destination warehouse is unchanged.")
             assert_posting_date_open(transfer_date)
