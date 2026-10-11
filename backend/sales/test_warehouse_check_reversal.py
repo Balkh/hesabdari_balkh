@@ -6,6 +6,8 @@ from accounting.coa import seed_chart_of_accounts
 from accounting.models import JournalStatus
 from categories.services import create_category
 from currencies.models import Currency
+from customer_custody.models import CustomerOwnershipEntitlement
+from customer_custody.services import custody_balance
 from inventory.services import assign_warehouse_account, receive_stock
 from inventory.stock import stock_for
 from parties.services import create_party
@@ -80,8 +82,10 @@ class WarehouseCheckReversalTests(TestCase):
             confirm_not_delivered=True,
         )
 
-        self.assertEqual(stock_for(self.product, self.warehouse), 5)
-        self.assertEqual(reversal.inventory_movement.quantity, 5)
+        self.assertEqual(stock_for(self.product, self.warehouse), 0)
+        self.assertIsNone(reversal.inventory_movement)
+        entitlement = CustomerOwnershipEntitlement.objects.get(sale_line=sale.lines.get())
+        self.assertEqual(custody_balance(entitlement=entitlement, warehouse=self.warehouse), 5)
         original_cogs.refresh_from_db()
         sale.journal_entry.refresh_from_db()
         self.assertEqual(original_cogs.status, JournalStatus.POSTED)
