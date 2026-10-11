@@ -330,7 +330,7 @@ class PurchaseFoundationTests(TestCase):
         self.assertEqual(len(set(references)), 3)
         self.assertEqual(StockMovement.objects.count(), 3)
         self.assertEqual(JournalEntry.objects.filter(source_type="PURCHASE").count(), 1)
-        self.assertEqual(JournalLine.objects.count(), 3)
+        self.assertEqual(JournalLine.objects.count(), 2)
         self.assertEqual(PartyLedgerAttribution.objects.count(), 1)
         self.assertEqual(AuditEvent.objects.filter(
             entity="Purchase", entity_id=purchase.pk, action="POST"
