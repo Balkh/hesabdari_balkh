@@ -206,9 +206,9 @@ def reverse_customer_custody_event(*, event, reversal_date, reason, reference,
     """Reverse one custody event through a new immutable compensating event.
 
     Reversing a release associated with a finalized Warehouse Check requires
-    a caller-supplied callback that compensates the other business ledgers in
-    the same transaction. A plain custody reversal is never allowed to leave
-    inventory/COGS untouched for a sales release.
+    a caller-supplied callback that applies the approved cross-ledger policy in
+    the same transaction. Depending on ownership state, that policy may
+    compensate ledgers or explicitly preserve customer-owned stock/COGS history.
     """
     actor = _actor(user)
     day = _day(reversal_date)
