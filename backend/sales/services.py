@@ -384,9 +384,9 @@ def cancel_warehouse_check(*, check, reversal_date, reason, user=None,
                            idempotency_key=None, confirm_not_delivered=False):
     """Cancel a finalized check only when the caller confirms no physical delivery.
 
-    The original Warehouse Check, custody release, movement, and journal remain
-    immutable. A separate reversal aggregate and compensating ledger events are
-    created atomically. Delivered goods must use Sales Return instead.
+    The original Warehouse Check, sale, ownership, revenue, and COGS remain
+    unchanged. The physical stock issue and custody release are compensated
+    atomically because goods were not delivered. Delivered goods must use Sales Return.
     """
     actor = _actor(user)
     day = _date(reversal_date)
@@ -466,9 +466,6 @@ def cancel_warehouse_check(*, check, reversal_date, reason, user=None,
                 description=reason,
                 user=actor,
                 idempotency_key=f"wc-cancel-stock:{hashlib.sha256(idempotency_key.encode()).hexdigest()}",
-            )
-            journal_holder["journal"] = reverse_journal(
-                locked.cogs_journal, reason, actor
             )
 
         reversal_event = reverse_customer_custody_event(
