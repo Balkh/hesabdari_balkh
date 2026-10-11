@@ -120,7 +120,7 @@ def _remaining_released_quantity(sale_line, warehouse=None):
     """
     checks = WarehouseCheck.objects.filter(
         sale_line=sale_line, status="FINALIZED"
-    )
+    ).exclude(reversal__isnull=False)
     if warehouse is not None:
         checks = checks.filter(warehouse=warehouse)
     released = checks.aggregate(v=Sum("quantity"))["v"] or 0
@@ -326,7 +326,7 @@ def create_sales_return(*, sale_line, warehouse, quantity, return_date,
                     warehouse=warehouse,
                     warehouse_checks__sale_line=line,
                     warehouse_checks__status="FINALIZED",
-                ).order_by("id")
+                ).exclude(warehouse_checks__reversal__isnull=False).order_by("id")
             )
             source = None
             for candidate in source_rows:
