@@ -86,6 +86,7 @@ class WarehouseCheckReversalTests(TestCase):
         entitlement = CustomerOwnershipEntitlement.objects.get(sale_line=sale.lines.get())
         self.assertEqual(custody_balance(entitlement=entitlement, warehouse=self.warehouse), 5)
         original_cogs.refresh_from_db()
+        sale.refresh_from_db()
         sale.journal_entry.refresh_from_db()
         self.assertEqual(original_cogs.status, JournalStatus.POSTED)
         self.assertEqual(sale.journal_entry.status, JournalStatus.POSTED)
