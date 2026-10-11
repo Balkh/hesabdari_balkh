@@ -124,14 +124,6 @@ class WarehouseCheckReversal(models.Model):
     )
     reversal_date = models.DateField()
     reason = models.CharField(max_length=500)
-    inventory_movement = models.OneToOneField(
-        "inventory.StockMovement", null=True, blank=True, on_delete=models.PROTECT,
-        related_name="warehouse_check_reversal",
-    )
-    cogs_reversal_journal = models.OneToOneField(
-        "accounting.JournalEntry", null=True, blank=True, on_delete=models.PROTECT,
-        related_name="warehouse_check_cogs_reversal",
-    )
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL,
         related_name="warehouse_check_reversals_created",
