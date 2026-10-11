@@ -221,6 +221,7 @@ def _allocate_freight(rows, freight):
             share = freight - allocated
         else:
             share = quantize_half_up(freight * row["measured_weight_kg"] / total_weight, 2)
+            share = min(max(share, Decimal("0.00")), freight - allocated)
         row["freight_allocated"] = share
         allocated += share
 
@@ -346,7 +347,7 @@ def update_purchase(purchase, *, supplier=_UNSET, purchase_date=_UNSET, currency
         raise PurchaseValidationError("Purchase does not exist.") from exc
 
 
-def update_purchase_line(line, *, product=_UNSET, quantity=_UNSET, unit_price=_UNSET, user=None):
+def update_purchase_line(line, *, product=_UNSET, quantity=_UNSET, unit_price=_UNSET, measured_weight_kg=_UNSET, user=None):
     """Edit one draft line through the Purchase recalculation boundary."""
     try:
         current = line if isinstance(line, PurchaseLine) else PurchaseLine.objects.get(pk=line)
@@ -359,6 +360,7 @@ def update_purchase_line(line, *, product=_UNSET, quantity=_UNSET, unit_price=_U
             "product": item.product if item.pk != current.pk or product is _UNSET else product,
             "quantity": item.quantity if item.pk != current.pk or quantity is _UNSET else quantity,
             "unit_price": item.unit_price if item.pk != current.pk or unit_price is _UNSET else unit_price,
+            "measured_weight_kg": item.measured_weight_kg if item.pk != current.pk or measured_weight_kg is _UNSET else measured_weight_kg,
         })
     return update_purchase(purchase, lines=rows, user=user)
 
