@@ -123,6 +123,8 @@ class PurchaseLine(models.Model):
             models.CheckConstraint(condition=models.Q(line_total__gte=0), name="purchase_line_total_gte0"),
             models.CheckConstraint(condition=models.Q(discount_allocated__gte=0), name="purchase_line_discount_gte0"),
             models.CheckConstraint(condition=models.Q(net_total__gte=0), name="purchase_line_net_gte0"),
+            models.CheckConstraint(condition=models.Q(measured_weight_kg__isnull=True) | models.Q(measured_weight_kg__gt=0), name="purchase_line_weight_kg_gt0"),
+            models.CheckConstraint(condition=models.Q(freight_allocated__gte=0), name="purchase_line_freight_allocated_gte0"),
         ]
 
     def save(self, *args, **kwargs):
