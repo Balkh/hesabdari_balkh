@@ -294,7 +294,7 @@ class PurchaseFoundationTests(TestCase):
         journal = JournalEntry.objects.get(source_type="PURCHASE", source_id=purchase.document_number)
         self.assertFalse(journal.lines.filter(account__code="6200").exists())
         self.assertEqual(journal.lines.get(account__code="1410").debit, Decimal("150.00"))
-        movement = StockMovement.objects.get(reference=f"${purchase.document_number}:LINE:{purchase.lines.get().pk}")
+        movement = StockMovement.objects.get(reference=f"{purchase.document_number}:LINE:{purchase.lines.get().pk}")
         self.assertEqual(movement.unit_cost, Decimal("15.0000"))
         self.assertEqual(stock_for(self.product, self.warehouse), 10)
         self.assertEqual(avco_for(self.product, self.warehouse), Decimal("15.0000"))
