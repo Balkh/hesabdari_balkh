@@ -179,10 +179,21 @@ def _snapshot(purchase):
         "total": str(purchase.total),
         "status": purchase.status,
         "line_ids": list(purchase.lines.values_list("id", flat=True)),
-        "lines": list(purchase.lines.order_by("id").values(
-            "id", "product_id", "quantity", "unit_price", "line_total",
-            "discount_allocated", "net_total", "measured_weight_kg", "freight_allocated",
-        )),
+        "lines": [
+            {
+                **line,
+                "unit_price": str(line["unit_price"]),
+                "line_total": str(line["line_total"]),
+                "discount_allocated": str(line["discount_allocated"]),
+                "net_total": str(line["net_total"]),
+                "measured_weight_kg": str(line["measured_weight_kg"]) if line["measured_weight_kg"] is not None else None,
+                "freight_allocated": str(line["freight_allocated"]),
+            }
+            for line in purchase.lines.order_by("id").values(
+                "id", "product_id", "quantity", "unit_price", "line_total",
+                "discount_allocated", "net_total", "measured_weight_kg", "freight_allocated",
+            )
+        ],
     }
 
 
