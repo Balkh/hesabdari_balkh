@@ -6,7 +6,7 @@ from django.db import models, transaction
 from django.utils import timezone
 
 from accounting.models import Account
-from accounting.services import post_journal, reverse_journal
+from accounting.services import post_journal
 from core.money import cogs as cogs_amount, line_total, quantize_half_up, normalize_rate
 from fiscal_periods.services import assert_posting_date_open
 from inventory.models import InventoryReturn, MovementType, StockMovement
