@@ -9,7 +9,7 @@ from accounting.models import Account
 from accounting.services import post_journal
 from core.money import cogs as cogs_amount, line_total, quantize_half_up, normalize_rate
 from fiscal_periods.services import assert_posting_date_open
-from inventory.models import InventoryReturn, MovementType, StockMovement
+from inventory.models import InventoryReturn, StockMovement
 from inventory.services import issue_stock, resolve_warehouse_account
 from customer_custody.models import CustomerCustodyEvent, CustomerOwnershipEntitlement
 from customer_custody.services import create_ownership_entitlement, custody_balance, place_customer_custody, release_customer_custody, reverse_customer_custody_event, unallocated_custody_balance
