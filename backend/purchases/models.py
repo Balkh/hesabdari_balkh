@@ -110,6 +110,8 @@ class PurchaseLine(models.Model):
     line_total = models.DecimalField(max_digits=20, decimal_places=2)
     discount_allocated = models.DecimalField(max_digits=20, decimal_places=2, default=Decimal("0.00"))
     net_total = models.DecimalField(max_digits=20, decimal_places=2)
+    measured_weight_kg = models.DecimalField(max_digits=20, decimal_places=4, null=True, blank=True)
+    freight_allocated = models.DecimalField(max_digits=20, decimal_places=2, default=Decimal("0.00"))
 
     objects = PurchaseLineQuerySet.as_manager()
 
