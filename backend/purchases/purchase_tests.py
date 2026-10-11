@@ -208,6 +208,21 @@ class PurchaseFoundationTests(TestCase):
         self.assertEqual(JournalEntry.objects.count(), 0)
         self.assertEqual(StockMovement.objects.count(), 0)
 
+    def test_stage76_line_edit_preserves_measured_weight_and_reallocates_freight(self):
+        purchase = self._purchase(
+            lines=[
+                {"product": self.product, "quantity": 10, "unit_price": "100", "measured_weight_kg": "10"},
+                {"product": self.product2, "quantity": 30, "unit_price": "100", "measured_weight_kg": "30"},
+            ],
+            freight="25", document_number="PI-WEIGHT-EDIT",
+        )
+        update_purchase_line(purchase.lines.order_by("id").first(), quantity=20, user=self.user)
+        lines = list(purchase.lines.order_by("id"))
+        self.assertEqual([line.measured_weight_kg for line in lines], [Decimal("10.0000"), Decimal("30.0000")])
+        self.assertEqual([line.freight_allocated for line in lines], [Decimal("6.25"), Decimal("18.75")])
+        self.assertEqual(JournalEntry.objects.count(), 0)
+        self.assertEqual(StockMovement.objects.count(), 0)
+
     def test_full_discount_is_permitted_but_over_discount_is_rejected(self):
         purchase = self._purchase(
             discount="1000",
