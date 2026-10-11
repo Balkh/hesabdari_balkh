@@ -471,8 +471,6 @@ def cancel_warehouse_check(*, check, reversal_date, reason, user=None,
         )
         reversal = WarehouseCheckReversal.objects.create(
             warehouse_check=locked, reversal_date=day, reason=reason,
-            inventory_movement=None,
-            cogs_reversal_journal=None,
             created_by=actor, idempotency_key=idempotency_key,
         )
         record_audit_event(
@@ -483,8 +481,6 @@ def cancel_warehouse_check(*, check, reversal_date, reason, user=None,
             new_state={
                 "reversal_id": reversal.pk,
                 "custody_reversal_event_id": reversal_event.pk,
-                "inventory_movement_id": None,
-                "cogs_reversal_journal_id": None,
                 "status": "CANCELLED",
             },
             reason=reason,
