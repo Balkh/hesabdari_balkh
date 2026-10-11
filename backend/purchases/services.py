@@ -179,6 +179,10 @@ def _snapshot(purchase):
         "total": str(purchase.total),
         "status": purchase.status,
         "line_ids": list(purchase.lines.values_list("id", flat=True)),
+        "lines": list(purchase.lines.order_by("id").values(
+            "id", "product_id", "quantity", "unit_price", "line_total",
+            "discount_allocated", "net_total", "measured_weight_kg", "freight_allocated",
+        )),
     }
 
 
