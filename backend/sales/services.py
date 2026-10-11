@@ -384,9 +384,9 @@ def cancel_warehouse_check(*, check, reversal_date, reason, user=None,
                            idempotency_key=None, confirm_not_delivered=False):
     """Cancel a finalized check only when the caller confirms no physical delivery.
 
-    The original Warehouse Check, sale, ownership, revenue, and COGS remain
-    unchanged. The physical stock issue and custody release are compensated
-    atomically because goods were not delivered. Delivered goods must use Sales Return.
+    The original Warehouse Check, sale, ownership, revenue, stock movement,
+    and COGS remain unchanged. Only the customer-custody release is reversed,
+    restoring the goods to customer-owned custody. Delivered goods must use Sales Return.
     """
     actor = _actor(user)
     day = _date(reversal_date)
