@@ -10,7 +10,7 @@ from accounting.services import post_journal, reverse_journal
 from core.money import cogs as cogs_amount, line_total, quantize_half_up, normalize_rate
 from fiscal_periods.services import assert_posting_date_open
 from inventory.models import InventoryReturn, MovementType, StockMovement
-from inventory.services import issue_stock, reverse_sales_issue_stock, resolve_warehouse_account
+from inventory.services import issue_stock, resolve_warehouse_account
 from customer_custody.models import CustomerCustodyEvent, CustomerOwnershipEntitlement
 from customer_custody.services import create_ownership_entitlement, custody_balance, place_customer_custody, release_customer_custody, reverse_customer_custody_event, unallocated_custody_balance
 from party_ledger.services import attribute_journal_line
@@ -446,38 +446,33 @@ def cancel_warehouse_check(*, check, reversal_date, reason, user=None,
         if release.reversal_events.exists():
             raise SalesValidationError("The original custody release has already been reversed")
 
-        movement_holder = {}
-        journal_holder = {}
         is_transit = TransitSaleAllocation.objects.filter(
             sale_line_id=locked.sale_line_id
         ).exists()
 
-        def _compensate(*, original, actor, reversal_date, reason, idempotency_key):
+        def _coordinate_approved_cancellation(*, original, actor, reversal_date, reason, idempotency_key):
             if is_transit:
-                # Transit-sale COGS was posted at Sale finalization; the check
-                # only releases physically received customer-owned custody.
+                # Transit-sale COGS was posted at Sale finalization. Cancelling
+                # the check restores customer custody without touching stock.
                 return
             if locked.stock_movement_id is None or locked.cogs_journal_id is None:
                 raise SalesValidationError("A normal Warehouse Check lacks its stock/COGS source records")
-            movement_holder["movement"] = reverse_sales_issue_stock(
-                source_movement=locked.stock_movement,
-                movement_date=reversal_date,
-                reference=f"REV-{locked.number}",
-                description=reason,
-                user=actor,
-                idempotency_key=f"wc-cancel-stock:{hashlib.sha256(idempotency_key.encode()).hexdigest()}",
-            )
+            # Ownership transferred at Sale finalization. These goods remain
+            # customer-owned while physically held here, so do not restore them
+            # to company inventory or reverse the posted COGS journal.
+            if locked.cogs_journal.status != "POSTED":
+                raise SalesValidationError("The original COGS journal is not posted; cancellation is blocked")
 
         reversal_event = reverse_customer_custody_event(
             event=release, reversal_date=day, reason=reason,
             reference=f"REV-{locked.number}", user=actor,
             idempotency_key=f"wc-cancel-custody:{hashlib.sha256(idempotency_key.encode()).hexdigest()}",
-            compensate=_compensate,
+            compensate=_coordinate_approved_cancellation,
         )
         reversal = WarehouseCheckReversal.objects.create(
             warehouse_check=locked, reversal_date=day, reason=reason,
-            inventory_movement=movement_holder.get("movement"),
-            cogs_reversal_journal=journal_holder.get("journal"),
+            inventory_movement=None,
+            cogs_reversal_journal=None,
             created_by=actor, idempotency_key=idempotency_key,
         )
         record_audit_event(
@@ -488,8 +483,8 @@ def cancel_warehouse_check(*, check, reversal_date, reason, user=None,
             new_state={
                 "reversal_id": reversal.pk,
                 "custody_reversal_event_id": reversal_event.pk,
-                "inventory_movement_id": getattr(movement_holder.get("movement"), "pk", None),
-                "cogs_reversal_journal_id": getattr(journal_holder.get("journal"), "pk", None),
+                "inventory_movement_id": None,
+                "cogs_reversal_journal_id": None,
                 "status": "CANCELLED",
             },
             reason=reason,
