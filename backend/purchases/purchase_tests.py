@@ -22,7 +22,7 @@ from security.models import AuditEvent
 from uom.services import create_uom
 from warehouses.services import create_warehouse
 
-from .models import Purchase, PurchaseLine, PurchaseStatus
+from .models import (\n    LandedCostAllocation, LandedCostAllocationMethod, LandedCostDocument,\n    LandedCostStatus, Purchase, PurchaseLine, PurchaseStatus,\n)
 from .services import PurchaseValidationError, create_purchase, post_purchase, update_purchase, update_purchase_line
 
 
@@ -551,3 +551,73 @@ class PurchaseFoundationTests(TestCase):
     def test_missing_foreign_rate_rejected(self):
         with self.assertRaises(PurchaseValidationError):
             self._purchase(currency=self.usd)
+
+
+    def test_landed_cost_source_and_allocation_preserve_historical_context(self):
+        purchase = self._purchase(document_number="PI-LC-SCHEMA-001")
+        line = purchase.lines.get()
+        cost = LandedCostDocument.objects.create(
+            document_number="LC-SCHEMA-001",
+            payee=self.supplier,
+            cost_date=self.day,
+            currency=self.usd,
+            amount=Decimal("25.00"),
+            exchange_rate=Decimal("70.0000"),
+            rate_date=self.day,
+            afn_amount=Decimal("1750.00"),
+            category="FREIGHT",
+            description="Carrier freight",
+            idempotency_key="lc-schema-idempotency-001",
+            created_by=self.user,
+        )
+        allocation = LandedCostAllocation.objects.create(
+            cost_document=cost,
+            purchase_line=line,
+            method=LandedCostAllocationMethod.DIRECT,
+            amount=Decimal("25.00"),
+            afn_amount=Decimal("1750.00"),
+        )
+        allocation.amount = Decimal("24.00")
+        allocation.save(update_fields=["amount"])
+        allocation.refresh_from_db()
+        self.assertEqual(allocation.amount, Decimal("24.00"))
+        self.assertEqual(cost.exchange_rate, Decimal("70.0000"))
+        self.assertEqual(cost.rate_date, self.day)
+        self.assertEqual(cost.payee_id, self.supplier.pk)
+
+    def test_posted_landed_cost_and_allocations_are_immutable(self):
+        purchase = self._purchase(document_number="PI-LC-SCHEMA-002")
+        cost = LandedCostDocument.objects.create(
+            document_number="LC-SCHEMA-002",
+            payee=self.supplier,
+            cost_date=self.day,
+            currency=self.afn,
+            amount=Decimal("100.00"),
+            exchange_rate=Decimal("1.0000"),
+            rate_date=self.day,
+            afn_amount=Decimal("100.00"),
+            category="FREIGHT",
+            idempotency_key="lc-schema-idempotency-002",
+            created_by=self.user,
+        )
+        allocation = LandedCostAllocation.objects.create(
+            cost_document=cost,
+            purchase_line=purchase.lines.get(),
+            method=LandedCostAllocationMethod.WEIGHT,
+            amount=Decimal("100.00"),
+            afn_amount=Decimal("100.00"),
+            measured_weight_kg=Decimal("10.0000"),
+        )
+        cost.status = LandedCostStatus.POSTED
+        cost.save(update_fields=["status"])
+        with self.assertRaises(PostedImmutabilityError):
+            cost.save()
+        with self.assertRaises(PostedImmutabilityError):
+            LandedCostDocument.objects.filter(pk=cost.pk).update(description="rewritten")
+        allocation.amount = Decimal("99.00")
+        with self.assertRaises(PostedImmutabilityError):
+            allocation.save(update_fields=["amount"])
+        with self.assertRaises(PostedImmutabilityError):
+            LandedCostAllocation.objects.filter(pk=allocation.pk).update(amount=Decimal("99.00"))
+        with self.assertRaises(PostedImmutabilityError):
+            allocation.delete()
