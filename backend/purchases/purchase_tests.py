@@ -22,7 +22,10 @@ from security.models import AuditEvent
 from uom.services import create_uom
 from warehouses.services import create_warehouse
 
-from .models import (\n    LandedCostAllocation, LandedCostAllocationMethod, LandedCostDocument,\n    LandedCostStatus, Purchase, PurchaseLine, PurchaseStatus,\n)
+from .models import (
+    LandedCostAllocation, LandedCostAllocationMethod, LandedCostDocument,
+    LandedCostStatus, Purchase, PurchaseLine, PurchaseStatus,
+)
 from .services import PurchaseValidationError, create_purchase, post_purchase, update_purchase, update_purchase_line
 
 
