@@ -460,14 +460,22 @@ class LandedCostAllocation(models.Model):
 
     def save(self, *args, **kwargs):
         if self.pk is not None:
-            raise PostedImmutabilityError("Landed-cost allocations are immutable")
+            original_document_id = type(self).objects.filter(pk=self.pk).values_list(
+                "cost_document_id", flat=True
+            ).first()
+            if original_document_id and LandedCostDocument.objects.filter(
+                pk=original_document_id, status=LandedCostStatus.POSTED
+            ).exists():
+                raise PostedImmutabilityError("Allocations of posted landed-cost documents are immutable")
         if self.cost_document_id and LandedCostDocument.objects.filter(
             pk=self.cost_document_id, status=LandedCostStatus.POSTED
         ).exists():
-            raise PostedImmutabilityError("Cannot add allocations to a posted landed-cost document")
+            raise PostedImmutabilityError("Cannot add or move allocations into a posted landed-cost document")
         return super().save(*args, **kwargs)
 
     def delete(self, *args, **kwargs):
-        if self.pk is not None:
-            raise PostedImmutabilityError("Landed-cost allocations are immutable")
+        if self.pk is not None and type(self).objects.filter(
+            pk=self.pk, cost_document__status=LandedCostStatus.POSTED
+        ).exists():
+            raise PostedImmutabilityError("Allocations of posted landed-cost documents cannot be deleted")
         return super().delete(*args, **kwargs)
