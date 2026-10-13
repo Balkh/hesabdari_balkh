@@ -114,6 +114,9 @@ def create_landed_cost_draft(
         raise LandedCostValidationError("A valid document number is required.")
     if not isinstance(category, str) or not category.strip() or len(category) > 40:
         raise LandedCostValidationError("A cost category is required.")
+    normalized_category = category.strip().casefold()
+    if "insurance" in normalized_category or "بیمه" in normalized_category:
+        raise LandedCostValidationError("Insurance is outside the approved landed-cost contract.")
     if not isinstance(description, str) or len(description) > 500:
         raise LandedCostValidationError("Description must be text up to 500 characters.")
     if user is not None and not getattr(user, "is_authenticated", False):
