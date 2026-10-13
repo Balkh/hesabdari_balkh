@@ -1,9 +1,8 @@
-"""Phase 11 late landed-cost draft creation and deterministic allocation.
+"""Phase 11 late landed-cost draft creation and posting entry point.
 
-Posting is intentionally separate: this module only creates auditable DRAFT
-source documents and allocation snapshots. It does not post a journal or
-claim valuation finalization; that requires the traceable valuation-adjustment
-ledger and its reconciliation gate.
+Draft creation only stores an auditable source document and allocation
+snapshots. Posting is handled by the companion service, which capitalizes the
+invoice and posts traceable downstream valuation adjustments.
 """
 from datetime import date as date_class
 from decimal import Decimal, InvalidOperation
@@ -261,3 +260,7 @@ def create_landed_cost_draft(
         reason="",
     )
     return document
+
+
+# Keep the public Phase 11 service API together for callers and tests.
+from .landed_cost_posting import LandedCostPostingError, post_landed_cost  # noqa: E402
