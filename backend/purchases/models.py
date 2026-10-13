@@ -479,3 +479,48 @@ class LandedCostAllocation(models.Model):
         ).exists():
             raise PostedImmutabilityError("Allocations of posted landed-cost documents cannot be deleted")
         return super().delete(*args, **kwargs)
+
+
+class LandedCostValuationAdjustment(models.Model):
+    """Immutable posted reallocation of a late landed cost to its final destination.
+
+    The source invoice journal capitalizes the complete cost first. These
+    linked journals then reclassify the amount to COGS, another warehouse,
+    supplier-return claim, or returned inventory without rewriting history.
+    """
+    cost_document = models.ForeignKey(
+        LandedCostDocument, on_delete=models.PROTECT,
+        related_name="valuation_adjustments",
+    )
+    source_reference = models.CharField(max_length=200)
+    adjustment_type = models.CharField(max_length=40)
+    movement = models.ForeignKey(
+        "inventory.StockMovement", null=True, blank=True,
+        on_delete=models.PROTECT, related_name="landed_cost_valuation_adjustments",
+    )
+    amount_afn = models.DecimalField(max_digits=20, decimal_places=2)
+    journal_entry = models.OneToOneField(
+        "accounting.JournalEntry", on_delete=models.PROTECT,
+        related_name="landed_cost_valuation_adjustment",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["cost_document_id", "id"]
+        constraints = [
+            models.CheckConstraint(condition=models.Q(amount_afn__gt=0), name="landed_cost_adjustment_afn_gt0"),
+            models.UniqueConstraint(
+                fields=["cost_document", "source_reference", "adjustment_type"],
+                name="uniq_lc_valuation_adjustment_ref",
+            ),
+        ]
+
+    def save(self, *args, **kwargs):
+        if self.pk is not None:
+            raise PostedImmutabilityError("Landed-cost valuation adjustments are immutable")
+        if self.cost_document_id and self.cost_document.status != LandedCostStatus.POSTED:
+            raise PostedImmutabilityError("Valuation adjustments require a posted landed-cost document")
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise PostedImmutabilityError("Landed-cost valuation adjustments cannot be deleted")
