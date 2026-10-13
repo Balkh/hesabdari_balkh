@@ -1026,3 +1026,75 @@ class PurchaseFoundationTests(TestCase):
             )
         self.assertEqual(LandedCostDocument.objects.count(), before_documents)
         self.assertEqual(JournalEntry.objects.count(), before_journals)
+
+
+    def test_sequential_late_costs_replay_prior_layers_before_reallocating_cogs(self):
+        from accounting.models import Account
+        from accounting.services import post_journal
+        from inventory.services import issue_stock
+        from purchases.landed_cost_services import post_landed_cost
+
+        purchase = self._purchase(document_number="PI-LC-MULTI-001")
+        post_purchase(purchase=purchase, user=self.user)
+        line = purchase.lines.get()
+        issue = issue_stock(
+            product=self.product, warehouse=self.warehouse, quantity=4,
+            movement_date=self.day, reference="ISSUE-LC-MULTI-001",
+            description="Sequential landed-cost evidence", user=self.user,
+            party=self.customer, idempotency_key="issue-lc-multi-001",
+        )
+        original_cogs = post_journal(
+            number="JE-LC-MULTI-COGS", posting_date=self.day,
+            description="Original COGS before late costs",
+            lines=[
+                {"account": Account.objects.get(code="5100"), "debit": Decimal("48.00"), "reference": issue.reference},
+                {"account": Account.objects.get(code="1410"), "credit": Decimal("48.00"), "reference": issue.reference},
+            ],
+            source_type="SALES_COGS", source_id=issue.reference, currency=self.afn,
+            rate=Decimal("1.0000"), rate_date=self.day, created_by=self.user,
+            idempotency_key="je-lc-multi-cogs",
+        )
+
+        def post_cost(number, amount, key):
+            draft = create_landed_cost_draft(
+                document_number=number, payee=self.supplier, cost_date=self.day,
+                currency=self.afn, amount=amount, exchange_rate="1",
+                rate_date=self.day, category="FREIGHT",
+                purchase_line_ids=[line.pk],
+                allocation_method=LandedCostAllocationMethod.DIRECT, user=self.user,
+                idempotency_key=key,
+            )
+            return post_landed_cost(cost_document=draft, user=self.user)
+
+        first = post_cost("LC-MULTI-001", "10.00", "lc-multi-001")
+        first_adjustment = first.valuation_adjustments.get(
+            adjustment_type="SALES_ISSUE", movement=issue,
+        )
+        self.assertEqual(first_adjustment.amount_afn, Decimal("4.00"))
+        self.assertEqual(avco_for(self.product, self.warehouse), Decimal("13.0000"))
+
+        second = post_cost("LC-MULTI-002", "20.00", "lc-multi-002")
+        second_adjustment = second.valuation_adjustments.get(
+            adjustment_type="SALES_ISSUE", movement=issue,
+        )
+        self.assertEqual(second_adjustment.amount_afn, Decimal("8.00"))
+        self.assertEqual(avco_for(self.product, self.warehouse), Decimal("15.0000"))
+
+        # The original posted journal and Kardex remain immutable; adjustments
+        # account for both deltas: original COGS 48 + 4 + 8 = 60, and 6 units
+        # remain at the final AVCO of 15 (= 90 inventory value).
+        original_cogs.refresh_from_db()
+        self.assertEqual(original_cogs.lines.get(account__code="5100").debit, Decimal("48.00"))
+        self.assertEqual(issue.unit_cost_afn, Decimal("12.0000"))
+        self.assertEqual(
+            first_adjustment.journal_entry.lines.get(account__code="5100").debit,
+            Decimal("4.00"),
+        )
+        self.assertEqual(
+            second_adjustment.journal_entry.lines.get(account__code="5100").debit,
+            Decimal("8.00"),
+        )
+        self.assertEqual(
+            first_adjustment.journal_entry.total_debit + second_adjustment.journal_entry.total_debit,
+            Decimal("12.00"),
+        )
