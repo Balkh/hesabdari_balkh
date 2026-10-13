@@ -1376,6 +1376,7 @@ class PurchaseFoundationTests(TestCase):
         )
         self.assertEqual(sale_adjustment.amount_afn, Decimal("3.00"))
         self.assertEqual(return_adjustment.amount_afn, Decimal("1.00"))
+        lot.refresh_from_db()
         self.assertEqual(lot.remaining_quantity, 7)
         self.assertEqual(stock_for(self.product, self.warehouse), 1)
         self.assertEqual(avco_for(self.product, self.warehouse), Decimal("13.0000"))
