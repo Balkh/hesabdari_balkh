@@ -104,7 +104,8 @@ def create_landed_cost_draft(
     """Create a DRAFT later-cost document and reconciled allocation snapshots.
 
     DIRECT must select exactly one source line. WEIGHT uses measured kg on all
-    selected source lines. No journals or valuation effects are posted here.
+    selected source lines. Cost dates before the source purchase are rejected.
+    No journals or valuation effects are posted here.
     An exact retry returns the existing draft; key reuse with changed payload
     is rejected.
     """
