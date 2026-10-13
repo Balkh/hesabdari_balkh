@@ -1098,3 +1098,55 @@ class PurchaseFoundationTests(TestCase):
             first_adjustment.journal_entry.total_debit + second_adjustment.journal_entry.total_debit,
             Decimal("12.00"),
         )
+
+
+    def test_late_landed_cost_reconciles_purchase_return_supplier_claim(self):
+        from purchases.services import post_purchase_return
+        from purchases.landed_cost_services import post_landed_cost
+
+        purchase = self._purchase(document_number="PI-LC-RETURN-001")
+        post_purchase(purchase=purchase, user=self.user)
+        line = purchase.lines.get()
+        source = StockMovement.objects.get(reference=f"{purchase.document_number}:LINE:{line.pk}")
+        returned = post_purchase_return(
+            purchase=purchase, product=self.product, quantity=2,
+            source_movement=source, return_date=self.day,
+            reason="Damaged units returned to supplier", user=self.user,
+            document_number="PRTN-LC-RETURN-001",
+            idempotency_key="prtn-lc-return-001",
+        )
+
+        cost = create_landed_cost_draft(
+            document_number="LC-RETURN-001", payee=self.supplier,
+            cost_date=self.day, currency=self.afn, amount="10.00",
+            exchange_rate="1", rate_date=self.day, category="FREIGHT",
+            purchase_line_ids=[line.pk],
+            allocation_method=LandedCostAllocationMethod.DIRECT,
+            user=self.user, idempotency_key="lc-return-001",
+        )
+        posted_cost = post_landed_cost(cost_document=cost, user=self.user)
+
+        adjustment = posted_cost.valuation_adjustments.get(
+            adjustment_type="PURCHASE_RETURN",
+            movement=returned.inventory_return.return_movement,
+        )
+        self.assertEqual(adjustment.journal_entry.total_debit, Decimal("2.00"))
+        self.assertEqual(adjustment.journal_entry.total_credit, Decimal("2.00"))
+        self.assertEqual(
+            adjustment.journal_entry.lines.get(account__code="2110").debit,
+            Decimal("2.00"),
+        )
+        self.assertEqual(
+            adjustment.journal_entry.lines.get(account__code="1410").credit,
+            Decimal("2.00"),
+        )
+        # 10 units received at AFN 12, 2 returned, and AFN 10 freight
+        # allocated over the original 10 units: remaining stock is 8 × 13.
+        self.assertEqual(stock_for(self.product, self.warehouse), 8)
+        self.assertEqual(avco_for(self.product, self.warehouse), Decimal("13.0000"))
+        # Posted purchase-return journal is not rewritten by the later cost.
+        returned.refresh_from_db()
+        self.assertEqual(
+            returned.journal_entry.lines.get(account__code="2110").debit,
+            Decimal("24.00"),
+        )
