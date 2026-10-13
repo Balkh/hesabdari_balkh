@@ -852,3 +852,67 @@ class PurchaseFoundationTests(TestCase):
         self.assertEqual(avco_for(self.product, self.warehouse), Decimal("13.0000"))
         lot.refresh_from_db()
         self.assertEqual(lot.remaining_quantity, 6)
+
+
+    def test_landed_cost_posted_before_transit_receipt_reclassifies_when_received(self):
+        from goods_in_transit.models import GoodsInTransitLot
+        from goods_in_transit.services import receive_transit
+        from purchases.landed_cost_services import post_landed_cost
+        purchase = self._purchase(
+            document_number="PI-LC-TRANSIT-LATE-001", delivery_mode="IN_TRANSIT",
+        )
+        post_purchase(purchase=purchase, user=self.user)
+        line = purchase.lines.get()
+        lot = GoodsInTransitLot.objects.get(purchase_line=line)
+        cost = create_landed_cost_draft(
+            document_number="LC-TRANSIT-LATE-001", payee=self.supplier, cost_date=self.day,
+            currency=self.afn, amount="10.00", exchange_rate="1", rate_date=self.day,
+            category="FREIGHT", purchase_line_ids=[line.pk],
+            allocation_method=LandedCostAllocationMethod.DIRECT, user=self.user,
+            idempotency_key="lc-transit-late-001",
+        )
+        posted = post_landed_cost(cost_document=cost, user=self.user)
+        self.assertEqual(posted.valuation_adjustments.count(), 0)
+        receipt = receive_transit(
+            lot=lot, quantity=4, receipt_date=self.day, user=self.user,
+            idempotency_key="lc-transit-late-receipt-001",
+        )
+        adjustment = posted.valuation_adjustments.get(adjustment_type="TRANSIT_RECEIPT")
+        self.assertEqual(adjustment.movement_id, receipt.stock_movement_id)
+        self.assertEqual(adjustment.amount_afn, Decimal("4.00"))
+        self.assertEqual(avco_for(self.product, self.warehouse), Decimal("13.0000"))
+
+    def test_landed_cost_posted_before_transit_sale_reallocates_future_sale_cogs(self):
+        from goods_in_transit.models import GoodsInTransitLot
+        from purchases.landed_cost_services import post_landed_cost
+        from sales.services import create_sale, finalize_sale
+        from uom.models import UnitOfMeasure
+        purchase = self._purchase(
+            document_number="PI-LC-TRANSIT-SALE-001", delivery_mode="IN_TRANSIT",
+        )
+        post_purchase(purchase=purchase, user=self.user)
+        line = purchase.lines.get()
+        lot = GoodsInTransitLot.objects.get(purchase_line=line)
+        cost = create_landed_cost_draft(
+            document_number="LC-TRANSIT-SALE-001", payee=self.supplier, cost_date=self.day,
+            currency=self.afn, amount="10.00", exchange_rate="1", rate_date=self.day,
+            category="FREIGHT", purchase_line_ids=[line.pk],
+            allocation_method=LandedCostAllocationMethod.DIRECT, user=self.user,
+            idempotency_key="lc-transit-sale-001",
+        )
+        posted = post_landed_cost(cost_document=cost, user=self.user)
+        sale = create_sale(
+            customer=self.customer, sale_date=self.day, currency=self.afn,
+            channel="WHOLESALE", payment_mode="CREDIT",
+            lines=[{
+                "product": self.product, "unit": UnitOfMeasure.objects.get(name="Purchase Unit"),
+                "quantity": 3, "unit_price": "20", "transit_lot": lot,
+            }],
+            user=self.user, document_number="SI-LC-TRANSIT-SALE-001",
+        )
+        finalize_sale(sale=sale, user=self.user)
+        adjustment = posted.valuation_adjustments.get(adjustment_type="TRANSIT_SALE")
+        self.assertEqual(adjustment.source_reference, f"TRANSIT-SALE:{sale.lines.get().pk}")
+        self.assertEqual(adjustment.amount_afn, Decimal("3.00"))
+        self.assertEqual(adjustment.journal_entry.lines.get(account__code="5100").debit, Decimal("3.00"))
+        self.assertEqual(adjustment.journal_entry.lines.get(account__code="1430").credit, Decimal("3.00"))
