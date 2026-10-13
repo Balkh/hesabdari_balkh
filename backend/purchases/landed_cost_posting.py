@@ -73,17 +73,20 @@ def _account(code):
     return account
 
 
-def _source_movement(line):
+def _source_movement(line, *, lock=True):
     from .models import PurchaseDeliveryMode
     purchase = line.purchase
     if purchase.delivery_mode == PurchaseDeliveryMode.IN_TRANSIT:
         return None
     reference = f"{purchase.document_number}:LINE:{line.pk}"
-    rows = list(StockMovement.objects.select_for_update().filter(
+    queryset = StockMovement.objects.filter(
         movement_type=MovementType.PURCHASE_RECEIPT,
         reference=reference, product_id=line.product_id,
         warehouse_id=purchase.warehouse_id,
-    ))
+    )
+    if lock:
+        queryset = queryset.select_for_update()
+    rows = list(queryset)
     if len(rows) != 1:
         raise LandedCostPostingError(
             f"Purchase line {line.pk} must resolve to exactly one immutable receipt movement."
@@ -110,7 +113,7 @@ def _posted_prior_allocations(line_ids):
     ))
 
 
-def _extra_cost_map(lines, allocations):
+def _extra_cost_map(lines, allocations, *, lock=True):
     """Map immutable warehouse movement IDs to additional AFN/unit from posted costs."""
     from goods_in_transit.models import GoodsInTransitLot, TransitReceipt
     from sales.models import SalesReturn, TransitSaleAllocation
@@ -130,7 +133,7 @@ def _extra_cost_map(lines, allocations):
             continue
         lot = GoodsInTransitLot.objects.filter(purchase_line_id=line_id).first()
         if lot is None:
-            movement = _source_movement(line)
+            movement = _source_movement(line, lock=lock)
             extra[movement.pk] += delta_per_unit
             continue
         receipts = TransitReceipt.objects.filter(lot=lot).exclude(stock_movement__isnull=True).select_related("stock_movement")
@@ -186,7 +189,7 @@ def _transfer_pairs(movements):
     return out_for_in, in_for_out
 
 
-def _simulate_product(product_id, baseline_extra_costs, revised_extra_costs, earliest_date):
+def _simulate_product(product_id, baseline_extra_costs, revised_extra_costs, earliest_date, *, strict=True):
     """Replay the existing 4dp AVCO rule without changing any posted movement."""
     movements = list(StockMovement.objects.filter(
         product_id=product_id
@@ -207,11 +210,11 @@ def _simulate_product(product_id, baseline_extra_costs, revised_extra_costs, ear
             qty, basis = state.get(wid, [0, Decimal("0")])
             signed = movement.quantity
             unit = movement.unit_cost_afn
-            if movement.is_temporary_cost and movement.movement_date >= earliest_date:
+            if strict and movement.is_temporary_cost and movement.movement_date >= earliest_date:
                 raise LandedCostPostingError(
                     f"Movement {movement.reference} uses a temporary cost; late valuation is blocked until resolved."
                 )
-            if movement.movement_type in (MovementType.ADJUSTMENT_OUT, MovementType.SHORTAGE) and movement.movement_date >= earliest_date:
+            if strict and movement.movement_type in (MovementType.ADJUSTMENT_OUT, MovementType.SHORTAGE) and movement.movement_date >= earliest_date:
                 raise LandedCostPostingError(
                     f"Movement {movement.reference} has an unlinked expense/shortage valuation; resolve it before finalizing landed cost."
                 )
@@ -250,7 +253,7 @@ def _simulate_product(product_id, baseline_extra_costs, revised_extra_costs, ear
                 relief = Decimal("0")
                 relief_unit = unit
             else:
-                if qty < 0:
+                if qty < 0 and strict:
                     raise LandedCostPostingError(
                         f"Product {product_id} has negative stock before {movement.reference}; valuation replay is ambiguous."
                     )
@@ -266,12 +269,17 @@ def _simulate_product(product_id, baseline_extra_costs, revised_extra_costs, ear
                         basis = Decimal("0")
                     elif basis < 0:
                         basis = Decimal("0")
-                else:
+                elif strict:
                     raise LandedCostPostingError(
                         f"Product {product_id} has an issue with no positive cost basis at {movement.reference}."
                     )
+                else:
+                    qty -= taken
+                    basis = Decimal("0")
+                    relief = Decimal("0")
+                    relief_unit = movement.unit_cost_afn
                 inbound_value = Decimal("0")
-            if qty < 0:
+            if qty < 0 and strict:
                 raise LandedCostPostingError(
                     f"Product {product_id} becomes negative at {movement.reference}; late valuation is blocked."
                 )
@@ -705,3 +713,54 @@ def post_landed_cost(*, cost_document, user=None):
         reason="",
     )
     return document
+
+
+
+def effective_avco_for_product_warehouse(product, warehouse):
+    """Return (has_posted_landed_cost, effective_AVCO) for existing cost layers.
+
+    This is the read-side counterpart of posting: it replays the exact same
+    stock history with posted landed-cost layers included, while never editing
+    StockMovement snapshots. When no landed costs exist, the caller should use
+    the original lightweight AVCO implementation.
+    """
+    product_id = getattr(product, "pk", product)
+    warehouse_id = getattr(warehouse, "pk", warehouse)
+    allocations = list(LandedCostAllocation.objects.filter(
+        purchase_line__product_id=product_id,
+        cost_document__status=LandedCostStatus.POSTED,
+    ).select_related("purchase_line", "purchase_line__purchase").order_by(
+        "cost_document__cost_date", "id"
+    ))
+    if not allocations:
+        return False, None
+    line_ids = sorted({row.purchase_line_id for row in allocations})
+    lines = list(PurchaseLine.objects.filter(pk__in=line_ids).select_related(
+        "purchase", "purchase__warehouse", "product"
+    ))
+    line_map = {line.pk: line for line in lines}
+    allocations = [row for row in allocations if row.purchase_line_id in line_map]
+    extra = _extra_cost_map(lines, allocations, lock=False)
+    dates = []
+    from .models import PurchaseDeliveryMode
+    for line in lines:
+        if line.purchase.delivery_mode == PurchaseDeliveryMode.IN_TRANSIT:
+            lot = _lot_for_read(line)
+            dates.append(lot.ownership_date)
+        else:
+            movement = _source_movement(line, lock=False)
+            dates.append(movement.movement_date)
+    if not dates:
+        return True, None
+    movements, _baseline, revised, _before, final_state, _pairs = _simulate_product(
+        product_id, extra, extra, min(dates), strict=False
+    )
+    quantity, basis = final_state.get(warehouse_id, [0, Decimal("0")])
+    if quantity <= 0:
+        return True, None
+    return True, _q4(basis / Decimal(quantity))
+
+
+def _lot_for_read(line):
+    from goods_in_transit.models import GoodsInTransitLot
+    return GoodsInTransitLot.objects.get(purchase_line=line)
