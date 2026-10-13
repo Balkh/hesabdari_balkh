@@ -1,6 +1,6 @@
 # Phase 11 — Late Landed-Cost Finalization Contract
 
-**Contract status:** User-approved for implementation. **Implementation status:** Incomplete; not frozen.
+**Contract status:** User-approved for implementation. **Implementation status:** Backend service/API implemented on the work branch; final SQLite/PostgreSQL evidence pending. Not frozen.
 **Base:** `phase/11-landed-cost-weight-allocation`
 **Work branch:** `phase/11-late-landed-cost-finalization`
 **Scope:** Costs received after a purchase receipt or goods-in-transit recognition, without editing posted purchase documents, journals, or stock movements.
@@ -57,3 +57,24 @@ A simplistic split based on current stock quantity is invalid when multiple rece
 Before this draft can be treated as implemented, tests must cover both SQLite and PostgreSQL for allocation reconciliation, historical-rate snapshots, supplier attribution to account 2110, separate payment, idempotency/concurrency, fiscal-period rejection, immutability, AVCO replay, transit, sales/COGS, transfers, returns, and atomic rollback. Existing purchase, inventory, goods-in-transit, sales, accounting, and golden tests must remain green.
 
 **This document does not certify the feature as implemented.** No merge, approval, or freeze is implied.
+
+
+## 6. Current backend implementation
+
+The work branch now includes:
+- `create_landed_cost_draft()` for immutable source/allocation snapshots and `post_landed_cost()` for the source invoice and downstream adjustment journals.
+- `LandedCostValuationAdjustment`, an append-only ledger tying each reallocation to its cost document, source movement/reference, amount in AFN, and posted journal.
+- A shared chronological AVCO replay overlay used by `inventory.stock.avco_for()`; posted stock movement costs and quantities are not edited.
+- Reallocation journals for sales COGS, warehouse transfers, sales returns, purchase returns (including an explicit COGS variance when source-return value differs from AVCO relief), transit receipts, transit sales, and transit sales returns.
+- Follow-on hooks so a landed cost posted before a later Transit receipt/sale/return is reclassified when that event occurs.
+- REST endpoints under `/api/v1/purchases/landed-costs/`: list/create, detail, and explicit `POST /{id}/post/`. There are no update/delete endpoints.
+- Atomic posting, idempotent retries, stable source-row lock order, PostgreSQL-safe document locking, and append-only valuation-adjustment records.
+
+The service intentionally rejects valuation histories with unresolved negative stock, temporary-cost movements, or unlinked adjustment-out/shortage events after the source date. It does not guess an expense mapping that the accounting contract has not approved. These guards are correctness gates, not proof that every possible inventory history is supported.
+
+## 7. Remaining release gates
+
+- Run the newest commit through the complete SQLite/backend, PostgreSQL, frontend, and Tauri CI matrix; fix every failure and rerun after the final code change.
+- Inspect evidence for the newly added REST tests, transfer/COGS/Transit tests, atomic rollback, and append-only enforcement.
+- This branch adds the backend API, not a purchase-screen UI. A UI must use these service-backed endpoints and must not post journals or calculate AVCO in the client.
+- Keep the PR Draft and unmerged until the evidence is reviewed. No main-branch change or freeze is implied.
