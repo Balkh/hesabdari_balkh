@@ -454,15 +454,10 @@ def post_landed_cost(*, cost_document, user=None):
         if line.pk not in seen:
             seen.add(line.pk)
             lines.append(line)
-    line_ids = [line.pk for line in lines]
-    prior = _posted_prior_allocations(line_ids)
-    # The replay baseline includes every previously posted landed-cost layer;
-    # the revised replay adds this document only.
-    baseline_allocations = prior
-    revised_allocations = prior + allocations
-    baseline_extra = _extra_cost_map(lines, baseline_allocations)
-    revised_extra = _extra_cost_map(lines, revised_allocations)
-
+    # Lock all source rows in stable primary-key order before reading the
+    # prior posted cost layers. This serializes two cost documents targeting
+    # the same purchase line and prevents a stale AVCO baseline on retry.
+    lines.sort(key=lambda line: line.pk)
     earliest_by_product = {}
     source_movements = {}
     transit_lots = {}
@@ -478,6 +473,15 @@ def post_landed_cost(*, cost_document, user=None):
             earliest = source.movement_date
         current = earliest_by_product.get(line.product_id)
         earliest_by_product[line.product_id] = min(current, earliest) if current else earliest
+
+    line_ids = [line.pk for line in lines]
+    prior = _posted_prior_allocations(line_ids)
+    # The replay baseline includes every previously posted landed-cost layer;
+    # the revised replay adds this document only.
+    baseline_allocations = prior
+    revised_allocations = prior + allocations
+    baseline_extra = _extra_cost_map(lines, baseline_allocations)
+    revised_extra = _extra_cost_map(lines, revised_allocations)
 
     # Build one replay per affected product, sharing the complete chronology
     # so AVCO effects continue through warehouse transfers and sales returns.
