@@ -73,10 +73,12 @@ def _allocate(total, rows, weights):
     return allocations
 
 
-def _validate_source_line(line):
+def _validate_source_line(line, cost_date):
     purchase = line.purchase
     if purchase.status != PurchaseStatus.POSTED:
         raise LandedCostValidationError("Landed costs can only be allocated to lines of a posted purchase.")
+    if cost_date < purchase.purchase_date:
+        raise LandedCostValidationError("A later landed cost cannot predate its source purchase.")
     reference = f"{purchase.document_number}:LINE:{line.pk}"
     if purchase.delivery_mode == "IN_TRANSIT":
         from goods_in_transit.models import GoodsInTransitLot
@@ -159,7 +161,7 @@ def create_landed_cost_draft(
     by_id = {line.pk: line for line in lines}
     lines = [by_id[line_id] for line_id in line_ids]
     for line in lines:
-        _validate_source_line(line)
+        _validate_source_line(line, day)
 
     if allocation_method == LandedCostAllocationMethod.WEIGHT:
         weights = []
