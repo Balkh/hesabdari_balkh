@@ -419,7 +419,9 @@ def post_landed_cost(*, cost_document, user=None):
     purchase/movement/journal snapshots are never rewritten.
     """
     document_id = getattr(cost_document, "pk", cost_document)
-    document = LandedCostDocument.objects.select_for_update().select_related(
+    # Lock only the document row: journal_entry is nullable until posting,
+    # and PostgreSQL rejects FOR UPDATE across that nullable outer join.
+    document = LandedCostDocument.objects.select_for_update(of=("self",)).select_related(
         "currency", "payee", "journal_entry"
     ).get(pk=document_id)
     if document.status == LandedCostStatus.POSTED:
