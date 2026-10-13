@@ -1218,7 +1218,7 @@ class PurchaseFoundationTests(TestCase):
             user=self.user, document_number="SR-LC-SALES-RETURN-001",
             idempotency_key="sr-lc-sales-return-001",
         )
-        source_issue = StockMovement.objects.get(reference="WC-LC-SALES-RETURN-001")
+        source_issue = StockMovement.objects.get(reference="WC-LC-SALES-RETURN-001", movement_type=MovementType.SALES_ISSUE)
         original_return_cogs = returned.cogs_journal.lines.get(account__code="5100").credit
 
         cost = create_landed_cost_draft(
