@@ -816,6 +816,10 @@ class PurchaseFoundationTests(TestCase):
         self.assertEqual(adjustment.journal_entry.lines.get(account__code="5100").debit, Decimal("4.00"))
         self.assertEqual(adjustment.journal_entry.lines.get(account__code="1410").credit, Decimal("4.00"))
         self.assertEqual(avco_for(self.product, self.warehouse), Decimal("13.0000"))
+        with self.assertRaises(PostedImmutabilityError):
+            type(adjustment).objects.filter(pk=adjustment.pk).update(amount_afn=Decimal("99.00"))
+        with self.assertRaises(PostedImmutabilityError):
+            type(adjustment).objects.filter(pk=adjustment.pk).delete()
         original_cogs.refresh_from_db()
         self.assertEqual(original_cogs.lines.get(account__code="5100").debit, Decimal("48.00"))
 
@@ -976,3 +980,31 @@ class PurchaseFoundationTests(TestCase):
         in_movement.refresh_from_db()
         self.assertEqual(out_movement.unit_cost_afn, Decimal("12.0000"))
         self.assertEqual(in_movement.unit_cost_afn, Decimal("12.0000"))
+
+
+    def test_landed_cost_post_fails_closed_and_rolls_back_on_unmapped_stock_outflow(self):
+        from inventory.services import adjust_stock_out
+        from purchases.landed_cost_services import LandedCostPostingError, post_landed_cost
+        purchase = self._purchase(document_number="PI-LC-UNMAPPED-OUT-001")
+        post_purchase(purchase=purchase, user=self.user)
+        adjust_stock_out(
+            product=self.product, warehouse=self.warehouse, quantity=1,
+            movement_date=self.day, reference="ADJ-OUT-LC-001",
+            description="Unmapped adjustment outflow", user=self.user,
+        )
+        line = purchase.lines.get()
+        cost = create_landed_cost_draft(
+            document_number="LC-UNMAPPED-OUT-001", payee=self.supplier, cost_date=self.day,
+            currency=self.afn, amount="10.00", exchange_rate="1", rate_date=self.day,
+            category="FREIGHT", purchase_line_ids=[line.pk],
+            allocation_method=LandedCostAllocationMethod.DIRECT, user=self.user,
+            idempotency_key="lc-unmapped-out-001",
+        )
+        before_journals = JournalEntry.objects.count()
+        with self.assertRaises(LandedCostPostingError):
+            post_landed_cost(cost_document=cost, user=self.user)
+        cost.refresh_from_db()
+        self.assertEqual(cost.status, LandedCostStatus.DRAFT)
+        self.assertIsNone(cost.journal_entry_id)
+        self.assertEqual(JournalEntry.objects.count(), before_journals)
+        self.assertEqual(cost.valuation_adjustments.count(), 0)
