@@ -1,6 +1,6 @@
 # Phase 11 — Late Landed-Cost Finalization Contract
 
-**Contract status:** User-approved for implementation. **Implementation status:** Backend service/API implemented on the work branch; final SQLite/PostgreSQL evidence pending. Not frozen.
+**Contract status:** User-approved for implementation. **Implementation status:** Backend service/API implemented; not frozen. The release candidate must retain passing SQLite/PostgreSQL and frontend/Tauri evidence on its exact head SHA.
 **Base:** `phase/11-landed-cost-weight-allocation`
 **Work branch:** `phase/11-late-landed-cost-finalization`
 **Scope:** Costs received after a purchase receipt or goods-in-transit recognition, without editing posted purchase documents, journals, or stock movements.
@@ -74,7 +74,7 @@ The service intentionally rejects valuation histories with unresolved negative s
 
 ## 7. Remaining release gates
 
-- Run the newest commit through the complete SQLite/backend, PostgreSQL, frontend, and Tauri CI matrix; fix every failure and rerun after the final code change.
-- Inspect evidence for the newly added REST tests, transfer/COGS/Transit tests, atomic rollback, and append-only enforcement.
+- The release candidate is acceptable for review only when the complete SQLite/backend, PostgreSQL, frontend, and Tauri matrix passes on the exact head SHA; rerun after any code change.
+- Review the REST tests, transfer/COGS/Transit tests, atomic rollback, and append-only enforcement as accounting evidence, not merely CI-green evidence.
 - This branch adds the backend API, not a purchase-screen UI. A UI must use these service-backed endpoints and must not post journals or calculate AVCO in the client.
-- Keep the PR Draft and unmerged until the evidence is reviewed. No main-branch change or freeze is implied.
+- Keep the PR Draft and unmerged until the user reviews the evidence. No main-branch change or freeze is implied.
