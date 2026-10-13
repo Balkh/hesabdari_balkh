@@ -474,11 +474,29 @@ def post_landed_cost(*, cost_document, user=None):
     earliest_by_product = {}
     source_movements = {}
     transit_lots = {}
+    from goods_in_transit.models import TransitReceipt
+    from sales.models import SalesReturn, TransitSaleAllocation
     for line in lines:
         purchase = line.purchase
         if purchase.delivery_mode == "IN_TRANSIT":
             lot = _lot_for(line)
             transit_lots[line.pk] = lot
+            has_company_receipt = TransitReceipt.objects.filter(
+                lot=lot, company_quantity__gt=0, stock_movement__isnull=False
+            ).exists()
+            transit_sale_line_ids = TransitSaleAllocation.objects.filter(
+                transit_lot=lot
+            ).values_list("sale_line_id", flat=True)
+            has_transit_return = SalesReturn.objects.filter(
+                sale_line_id__in=transit_sale_line_ids,
+                return_movement__isnull=False,
+            ).exists()
+            # An unreceived Transit lot has no warehouse AVCO layer yet. Its
+            # remaining asset and in-transit sales are reconciled separately;
+            # replay warehouse Kardex only after a company receipt or physical
+            # Transit return movement exists.
+            if not (has_company_receipt or has_transit_return):
+                continue
             earliest = lot.ownership_date
         else:
             source = _source_movement(line)
