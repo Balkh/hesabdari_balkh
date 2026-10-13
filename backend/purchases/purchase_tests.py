@@ -1199,7 +1199,7 @@ class PurchaseFoundationTests(TestCase):
             customer=self.customer, sale_date=self.day, currency=self.afn,
             channel="WHOLESALE", payment_mode="CREDIT",
             lines=[{
-                "product": self.product, "unit": line.unit,
+                "product": self.product, "unit": self.product.primary_uom,
                 "quantity": 4, "unit_price": "20.00",
             }],
             user=self.user, document_number="SI-LC-SALES-RETURN-001",
@@ -1249,13 +1249,13 @@ class PurchaseFoundationTests(TestCase):
     def test_late_cost_posting_in_closed_period_is_atomic(self):
         from purchases.landed_cost_services import post_landed_cost
 
+        purchase = self._purchase(document_number="PI-LC-CLOSED-001")
+        post_purchase(purchase=purchase, user=self.user)
         period = create_period(
             name="Closed Landed Cost Period", start_date=self.day,
             end_date=self.day, user=self.user,
         )
         close_period(period, user=self.user, reason="Phase 11 closed-period evidence")
-        purchase = self._purchase(document_number="PI-LC-CLOSED-001")
-        post_purchase(purchase=purchase, user=self.user)
         cost = create_landed_cost_draft(
             document_number="LC-CLOSED-001", payee=self.supplier,
             cost_date=self.day, currency=self.afn, amount="10.00",
