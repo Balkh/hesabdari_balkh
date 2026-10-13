@@ -1644,3 +1644,112 @@ class PurchaseFoundationTests(TestCase):
         self.assertEqual(adjustment.journal_entry.lines.get(account__code="1430").credit, Decimal("10.00"))
         self.assertEqual(receipt.company_quantity, 10)
         self.assertEqual(stock_for(self.product, self.warehouse), 0)
+
+
+    def test_landed_cost_reversal_compensates_journals_and_removes_active_avco_layer(self):
+        from accounting.models import Account
+        from accounting.services import post_journal
+        from inventory.services import issue_stock
+        from purchases.landed_cost_posting import post_landed_cost
+        from purchases.landed_cost_reversal import reverse_landed_cost
+        from purchases.models import LandedCostReversalAdjustment
+
+        purchase = self._purchase(document_number="PI-LC-REVERSAL-001")
+        post_purchase(purchase=purchase, user=self.user)
+        line = purchase.lines.get()
+        issue = issue_stock(
+            product=self.product, warehouse=self.warehouse, quantity=4,
+            movement_date=self.day, reference="ISSUE-LC-REVERSAL-001",
+            description="Sale before landed-cost reversal evidence",
+            user=self.user, party=self.customer, idempotency_key="issue-lc-reversal-001",
+        )
+        original_cogs = post_journal(
+            number="JE-LC-REVERSAL-COGS", posting_date=self.day,
+            description="Original COGS remains immutable",
+            lines=[
+                {"account": Account.objects.get(code="5100"), "debit": Decimal("48.00"), "reference": issue.reference},
+                {"account": Account.objects.get(code="1410"), "credit": Decimal("48.00"), "reference": issue.reference},
+            ],
+            source_type="SALES_COGS", source_id=issue.reference, currency=self.afn,
+            rate=Decimal("1.0000"), rate_date=self.day, created_by=self.user,
+            idempotency_key="je-lc-reversal-cogs",
+        )
+        draft = create_landed_cost_draft(
+            document_number="LC-REVERSAL-001", payee=self.supplier,
+            cost_date=self.day, currency=self.afn, amount="10.00",
+            exchange_rate="1", rate_date=self.day, category="FREIGHT",
+            purchase_line_ids=[line.pk],
+            allocation_method=LandedCostAllocationMethod.DIRECT,
+            user=self.user, idempotency_key="lc-reversal-001",
+        )
+        posted = post_landed_cost(cost_document=draft, user=self.user)
+        original_source = posted.journal_entry
+        original_adjustment = posted.valuation_adjustments.get(
+            adjustment_type="SALES_ISSUE", movement=issue,
+        )
+        original_adjustment_journal = original_adjustment.journal_entry
+
+        reversal = reverse_landed_cost(
+            cost_document=posted, reversal_date=self.day,
+            reason="Freight invoice was cancelled by the carrier",
+            user=self.user, idempotency_key="lc-reversal-action-001",
+        )
+        source_mirror = reversal.journal_entry
+        adjustment_mirror = LandedCostReversalAdjustment.objects.get(
+            reversal=reversal, original_adjustment=original_adjustment,
+        ).journal_entry
+        self.assertEqual(source_mirror.lines.get(account__code="2110").debit, Decimal("10.00"))
+        self.assertEqual(source_mirror.lines.get(account__code="1410").credit, Decimal("10.00"))
+        self.assertEqual(adjustment_mirror.lines.get(account__code="1410").debit, Decimal("4.00"))
+        self.assertEqual(adjustment_mirror.lines.get(account__code="5100").credit, Decimal("4.00"))
+        self.assertEqual(original_source.status, "POSTED")
+        self.assertEqual(original_adjustment_journal.status, "POSTED")
+        self.assertEqual(original_cogs.lines.get(account__code="5100").debit, Decimal("48.00"))
+        self.assertEqual(issue.unit_cost_afn, Decimal("12.0000"))
+        self.assertEqual(posted.status, LandedCostStatus.POSTED)
+        self.assertTrue(hasattr(posted, "reversal"))
+        self.assertEqual(stock_for(self.product, self.warehouse), 6)
+        self.assertEqual(avco_for(self.product, self.warehouse), Decimal("12.0000"))
+
+        before = JournalEntry.objects.count()
+        retry = reverse_landed_cost(
+            cost_document=posted, reversal_date=self.day,
+            reason="Freight invoice was cancelled by the carrier",
+            user=self.user, idempotency_key="lc-reversal-action-001",
+        )
+        self.assertEqual(retry.pk, reversal.pk)
+        self.assertEqual(JournalEntry.objects.count(), before)
+
+    def test_landed_cost_reversal_fails_closed_after_a_later_stock_movement(self):
+        from inventory.services import issue_stock
+        from purchases.landed_cost_posting import post_landed_cost
+        from purchases.landed_cost_reversal import reverse_landed_cost, LandedCostPostingError
+        from purchases.models import LandedCostReversal
+
+        purchase = self._purchase(document_number="PI-LC-REVERSAL-GUARD-001")
+        post_purchase(purchase=purchase, user=self.user)
+        draft = create_landed_cost_draft(
+            document_number="LC-REVERSAL-GUARD-001", payee=self.supplier,
+            cost_date=self.day, currency=self.afn, amount="10.00",
+            exchange_rate="1", rate_date=self.day, category="FREIGHT",
+            purchase_line_ids=[purchase.lines.get().pk],
+            allocation_method=LandedCostAllocationMethod.DIRECT,
+            user=self.user, idempotency_key="lc-reversal-guard-001",
+        )
+        posted = post_landed_cost(cost_document=draft, user=self.user)
+        issue_stock(
+            product=self.product, warehouse=self.warehouse, quantity=1,
+            movement_date=self.day, reference="ISSUE-AFTER-LC-REVERSAL-GUARD",
+            description="A later movement depends on the landed-cost layer",
+            user=self.user, party=self.customer,
+            idempotency_key="issue-after-lc-reversal-guard",
+        )
+        before_journals = JournalEntry.objects.count()
+        with self.assertRaises(LandedCostPostingError):
+            reverse_landed_cost(
+                cost_document=posted, reversal_date=self.day,
+                reason="Attempted after dependent movement",
+                user=self.user, idempotency_key="lc-reversal-guard-action",
+            )
+        self.assertFalse(LandedCostReversal.objects.filter(cost_document=posted).exists())
+        self.assertEqual(JournalEntry.objects.count(), before_journals)
