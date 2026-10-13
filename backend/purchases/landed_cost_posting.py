@@ -6,7 +6,7 @@ immutable. This service replays the existing AVCO rule with a virtual cost
 layer, then posts compensating AFN journals for downstream sales, returns,
 transfers and Transit receipts/sales. Unknown/ambiguous flows fail closed.
 """
-from collections import hashlib
+import hashlib
 from collections import defaultdict
 from decimal import Decimal
 
