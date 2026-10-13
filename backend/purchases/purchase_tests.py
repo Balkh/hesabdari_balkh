@@ -1273,3 +1273,117 @@ class PurchaseFoundationTests(TestCase):
         self.assertIsNone(cost.journal_entry_id)
         self.assertEqual(cost.valuation_adjustments.count(), 0)
         self.assertEqual(JournalEntry.objects.count(), before_journals)
+
+
+    def test_late_cost_after_entire_receipt_was_sold_reclassifies_all_cost_to_cogs(self):
+        from accounting.models import Account
+        from accounting.services import post_journal
+        from inventory.services import issue_stock
+        from purchases.landed_cost_services import post_landed_cost
+
+        purchase = self._purchase(document_number="PI-LC-FULLY-SOLD-001")
+        post_purchase(purchase=purchase, user=self.user)
+        line = purchase.lines.get()
+        issue = issue_stock(
+            product=self.product, warehouse=self.warehouse, quantity=10,
+            movement_date=self.day, reference="ISSUE-LC-FULLY-SOLD-001",
+            description="Entire source receipt consumed before late freight",
+            user=self.user, party=self.customer, idempotency_key="issue-lc-fully-sold-001",
+        )
+        original_cogs = post_journal(
+            number="JE-LC-FULLY-SOLD-COGS", posting_date=self.day,
+            description="Original COGS for fully consumed receipt",
+            lines=[
+                {"account": Account.objects.get(code="5100"), "debit": Decimal("120.00"), "reference": issue.reference},
+                {"account": Account.objects.get(code="1410"), "credit": Decimal("120.00"), "reference": issue.reference},
+            ],
+            source_type="SALES_COGS", source_id=issue.reference, currency=self.afn,
+            rate=Decimal("1.0000"), rate_date=self.day, created_by=self.user,
+            idempotency_key="je-lc-fully-sold-cogs",
+        )
+        cost = create_landed_cost_draft(
+            document_number="LC-FULLY-SOLD-001", payee=self.supplier,
+            cost_date=self.day, currency=self.afn, amount="10.00",
+            exchange_rate="1", rate_date=self.day, category="FREIGHT",
+            purchase_line_ids=[line.pk],
+            allocation_method=LandedCostAllocationMethod.DIRECT,
+            user=self.user, idempotency_key="lc-fully-sold-001",
+        )
+        posted = post_landed_cost(cost_document=cost, user=self.user)
+        adjustment = posted.valuation_adjustments.get(
+            adjustment_type="SALES_ISSUE", movement=issue,
+        )
+        self.assertEqual(adjustment.amount_afn, Decimal("10.00"))
+        self.assertEqual(adjustment.journal_entry.lines.get(account__code="5100").debit, Decimal("10.00"))
+        self.assertEqual(stock_for(self.product, self.warehouse), 0)
+        original_cogs.refresh_from_db()
+        self.assertEqual(original_cogs.lines.get(account__code="5100").debit, Decimal("120.00"))
+        self.assertEqual(issue.unit_cost_afn, Decimal("12.0000"))
+
+    def test_late_cost_after_transit_sale_return_reconciles_transit_inventory_and_cogs(self):
+        from goods_in_transit.models import GoodsInTransitLot
+        from purchases.landed_cost_services import post_landed_cost
+        from sales.returns_services import create_sales_return
+        from sales.services import (
+            create_sale, finalize_sale, finalize_warehouse_check, prepare_warehouse_check,
+        )
+
+        purchase = self._purchase(
+            document_number="PI-LC-TRANSIT-RETURN-001", delivery_mode="IN_TRANSIT",
+        )
+        post_purchase(purchase=purchase, user=self.user)
+        line = purchase.lines.get()
+        lot = GoodsInTransitLot.objects.get(purchase_line=line)
+        sale = create_sale(
+            customer=self.customer, sale_date=self.day, currency=self.afn,
+            channel="WHOLESALE", payment_mode="CREDIT",
+            lines=[{
+                "product": self.product, "unit": self.product.primary_uom,
+                "quantity": 3, "unit_price": "20.00", "transit_lot": lot,
+            }],
+            user=self.user, document_number="SI-LC-TRANSIT-RETURN-001",
+        )
+        finalize_sale(sale=sale, user=self.user)
+        sale_line = sale.lines.get()
+        check = prepare_warehouse_check(
+            sale_line=sale_line, warehouse=self.warehouse, quantity=3,
+            number="WC-LC-TRANSIT-RETURN-001",
+        )
+        finalize_warehouse_check(check=check, user=self.user)
+        returned = create_sales_return(
+            sale_line=sale_line, warehouse=self.warehouse, quantity=1,
+            return_date=self.day, reason="Transit goods physically returned",
+            user=self.user, document_number="SR-LC-TRANSIT-RETURN-001",
+            idempotency_key="sr-lc-transit-return-001",
+        )
+
+        cost = create_landed_cost_draft(
+            document_number="LC-TRANSIT-RETURN-001", payee=self.supplier,
+            cost_date=self.day, currency=self.afn, amount="10.00",
+            exchange_rate="1", rate_date=self.day, category="FREIGHT",
+            purchase_line_ids=[line.pk],
+            allocation_method=LandedCostAllocationMethod.DIRECT,
+            user=self.user, idempotency_key="lc-transit-return-001",
+        )
+        posted = post_landed_cost(cost_document=cost, user=self.user)
+        sale_adjustment = posted.valuation_adjustments.get(
+            adjustment_type="TRANSIT_SALE",
+            source_reference=f"TRANSIT-SALE:{sale_line.pk}",
+        )
+        return_adjustment = posted.valuation_adjustments.get(
+            adjustment_type="SALES_RETURN",
+            movement=returned.return_movement,
+        )
+        self.assertEqual(sale_adjustment.amount_afn, Decimal("3.00"))
+        self.assertEqual(return_adjustment.amount_afn, Decimal("1.00"))
+        self.assertEqual(lot.remaining_quantity, 7)
+        self.assertEqual(stock_for(self.product, self.warehouse), 1)
+        self.assertEqual(avco_for(self.product, self.warehouse), Decimal("13.0000"))
+        self.assertEqual(
+            sale_adjustment.journal_entry.lines.get(account__code="5100").debit,
+            Decimal("3.00"),
+        )
+        self.assertEqual(
+            return_adjustment.journal_entry.lines.get(account__code="5100").credit,
+            Decimal("1.00"),
+        )
