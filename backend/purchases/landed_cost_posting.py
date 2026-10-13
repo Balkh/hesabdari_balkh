@@ -578,8 +578,9 @@ def post_landed_cost(*, cost_document, user=None):
     # Transit allocations: invoice source is Dr 1430. Reclass cost for goods
     # already physically received; sold-in-transit goods go directly to COGS.
     transit_delta_by_line = {}
+    transit_negative_cogs_delta = Decimal("0.00")
     from goods_in_transit.models import TransitReceipt
-    from sales.models import SalesReturn, TransitSaleAllocation
+    from sales.models import NegativeCOGSReceiptAllocation, SalesReturn, TransitSaleAllocation
     for row in allocations:
         line = row.purchase_line
         if line.pk not in transit_lots:
@@ -587,10 +588,26 @@ def post_landed_cost(*, cost_document, user=None):
         lot = transit_lots[line.pk]
         per_unit = _q4(row.afn_amount / Decimal(lot.original_quantity))
         transit_delta_by_line[line.pk] = per_unit
-        for receipt in TransitReceipt.objects.filter(
+        receipts = list(TransitReceipt.objects.filter(
             lot=lot, company_quantity__gt=0, stock_movement__isnull=False
-        ).select_related("stock_movement", "warehouse"):
-            value = _q2(per_unit * Decimal(receipt.company_quantity))
+        ).select_related("stock_movement", "warehouse").order_by("id"))
+        resolved_by_obligation = defaultdict(int)
+        resolved_by_receipt = {}
+        for receipt in receipts:
+            links = list(NegativeCOGSReceiptAllocation.objects.filter(
+                receipt_movement=receipt.stock_movement
+            ).select_related("obligation", "obligation__movement").order_by("id"))
+            consumed = sum(link.quantity for link in links)
+            if consumed > receipt.company_quantity:
+                raise LandedCostPostingError(
+                    f"Transit receipt {receipt.stock_movement.reference} resolves more negative stock than its company quantity."
+                )
+            resolved_by_receipt[receipt.pk] = consumed
+            for link in links:
+                resolved_by_obligation[link.obligation_id] += link.quantity
+        for receipt in receipts:
+            remaining_company_qty = receipt.company_quantity - resolved_by_receipt[receipt.pk]
+            value = _q2(per_unit * Decimal(remaining_company_qty))
             _post_adjustment(
                 document=document, adjustment_type="TRANSIT_RECEIPT",
                 reference=receipt.stock_movement.reference,
@@ -599,6 +616,25 @@ def post_landed_cost(*, cost_document, user=None):
                 credit_account=_account(TRANSIT_ACCOUNT), amount=value,
                 posting_day=day, actor=actor,
             )
+        for obligation_id, resolved_quantity in sorted(resolved_by_obligation.items()):
+            link = next(
+                link for receipt in receipts
+                for link in NegativeCOGSReceiptAllocation.objects.filter(
+                    receipt_movement=receipt.stock_movement,
+                    obligation_id=obligation_id,
+                ).select_related("obligation", "obligation__movement", "obligation__warehouse")
+            )
+            amount = _q2(per_unit * Decimal(resolved_quantity))
+            if amount:
+                reference = f"{link.obligation.movement.reference}:NEGATIVE-RECEIPT:{link.receipt_movement_id}"
+                _post_adjustment(
+                    document=document, adjustment_type="NEGATIVE_COGS_OBLIGATION",
+                    reference=reference, movement=link.obligation.movement,
+                    debit_account=_account(COGS_ACCOUNT),
+                    credit_account=_account(TRANSIT_ACCOUNT), amount=amount,
+                    posting_day=day, actor=actor,
+                )
+                transit_negative_cogs_delta += amount
         for sale_allocation in TransitSaleAllocation.objects.filter(
             transit_lot=lot
         ).select_related("sale_line", "cogs_journal"):
@@ -611,7 +647,7 @@ def post_landed_cost(*, cost_document, user=None):
                 posting_day=day, actor=actor,
             )
 
-    cogs_delta = Decimal("0.00")
+    cogs_delta = transit_negative_cogs_delta
     purchase_return_delta = Decimal("0.00")
     inventory_delta = Decimal("0.00")
 
