@@ -33,6 +33,9 @@ class LandedCostAllocationReadSerializer(serializers.ModelSerializer):
 
 
 class LandedCostDocumentReadSerializer(serializers.ModelSerializer):
+    is_reversed = serializers.SerializerMethodField()
+    reversal_date = serializers.DateField(source="reversal.reversal_date", read_only=True, allow_null=True)
+    reversal_journal_entry_id = serializers.IntegerField(source="reversal.journal_entry_id", read_only=True, allow_null=True)
     payee_id = serializers.IntegerField(read_only=True)
     payee_name = serializers.CharField(source="payee.name", read_only=True)
     currency_id = serializers.IntegerField(read_only=True)
@@ -46,9 +49,13 @@ class LandedCostDocumentReadSerializer(serializers.ModelSerializer):
             "cost_date", "currency_id", "currency_code", "amount",
             "exchange_rate", "rate_date", "afn_amount", "category",
             "description", "status", "journal_entry_id", "created_by_id",
-            "created_at", "posted_at", "allocations",
+            "created_at", "posted_at", "is_reversed", "reversal_date",
+            "reversal_journal_entry_id", "allocations",
         ]
         read_only_fields = fields
+
+    def get_is_reversed(self, obj):
+        return hasattr(obj, "reversal")
 
 
 class LandedCostDraftCreateSerializer(serializers.Serializer):
