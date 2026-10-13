@@ -14,7 +14,7 @@ from parties.models import Party
 from security.permissions import IsAuthenticatedForERP
 
 from .models import LandedCostDocument
-from .serializers import LandedCostDocumentReadSerializer, LandedCostDraftCreateSerializer
+from .landed_cost_serializers import LandedCostDocumentReadSerializer, LandedCostDraftCreateSerializer
 from .landed_cost_services import (
     LandedCostPostingError, LandedCostValidationError,
     create_landed_cost_draft, post_landed_cost,
