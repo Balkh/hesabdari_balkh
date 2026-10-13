@@ -485,6 +485,12 @@ class LandedCostValuationAdjustmentQuerySet(models.QuerySet):
     def update(self, **kwargs):
         raise PostedImmutabilityError("Landed-cost valuation adjustments are immutable")
 
+    def bulk_update(self, objs, fields, batch_size=None):
+        raise PostedImmutabilityError("Landed-cost valuation adjustments are immutable")
+
+    def bulk_create(self, objs, **kwargs):
+        raise PostedImmutabilityError("Create valuation adjustments only through the posting service")
+
     def delete(self):
         raise PostedImmutabilityError("Landed-cost valuation adjustments cannot be deleted")
 
