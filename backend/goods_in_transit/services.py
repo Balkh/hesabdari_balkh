@@ -308,6 +308,13 @@ def _receive_transit_core(*, lot, quantity, receipt_date, user=None, idempotency
                     break
             if left:
                 raise TransitValidationError("Customer custody allocation could not be completed.")
+            # Landed-cost documents posted before physical arrival have already
+            # debited 1430. Reclass their share to the warehouse on this receipt.
+            if company_qty:
+                from purchases.landed_cost_posting import post_transit_receipt_landed_cost_adjustments
+                post_transit_receipt_landed_cost_adjustments(
+                    lot=lot, receipt=receipt, user=actor,
+                )
             record.response_body = {"receipt_id": receipt.pk}
             record.save(update_fields=["response_body"])
             record_audit_event(user=actor, action=AuditAction.CREATE, entity="TransitReceipt", entity_id=receipt.pk, reference=reference, previous_state={"remaining_quantity": before}, new_state={"remaining_quantity": lot.remaining_quantity, "company_quantity": company_qty, "customer_custody_quantity": custody_qty}, reason="")
