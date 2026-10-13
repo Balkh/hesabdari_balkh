@@ -916,3 +916,63 @@ class PurchaseFoundationTests(TestCase):
         self.assertEqual(adjustment.amount_afn, Decimal("3.00"))
         self.assertEqual(adjustment.journal_entry.lines.get(account__code="5100").debit, Decimal("3.00"))
         self.assertEqual(adjustment.journal_entry.lines.get(account__code="1430").credit, Decimal("3.00"))
+
+
+    def test_post_landed_cost_replays_transfer_and_destination_cogs(self):
+        from accounting.models import Account
+        from accounting.services import post_journal
+        from inventory.services import issue_stock, transfer_stock
+        from purchases.landed_cost_services import post_landed_cost
+        destination = create_warehouse(name="Landed Cost Destination", user=self.user)
+        WarehouseInventoryAccount.objects.create(
+            warehouse=destination, account_id=self._account_id("1420"),
+        )
+        purchase = self._purchase(document_number="PI-LC-TRANSFER-001")
+        post_purchase(purchase=purchase, user=self.user)
+        out_movement, in_movement = transfer_stock(
+            product=self.product, source_warehouse=self.warehouse,
+            destination_warehouse=destination, quantity=4,
+            movement_date=self.day, reference="TR-LC-TRANSFER-001",
+            description="Landed-cost transfer evidence", user=self.user,
+            idempotency_key="tr-lc-transfer-001",
+        )
+        issue = issue_stock(
+            product=self.product, warehouse=destination, quantity=2,
+            movement_date=self.day, reference="ISSUE-LC-DEST-001",
+            description="Destination sale issue", user=self.user,
+            party=self.customer, idempotency_key="issue-lc-dest-001",
+        )
+        post_journal(
+            number="JE-LC-DEST-COGS", posting_date=self.day,
+            description="Original destination COGS",
+            lines=[
+                {"account": Account.objects.get(code="5100"), "debit": Decimal("24.00"), "reference": issue.reference},
+                {"account": Account.objects.get(code="1420"), "credit": Decimal("24.00"), "reference": issue.reference},
+            ],
+            source_type="SALES_COGS", source_id=issue.reference, currency=self.afn,
+            rate=Decimal("1.0000"), rate_date=self.day, created_by=self.user,
+            idempotency_key="je-lc-dest-cogs",
+        )
+        cost = create_landed_cost_draft(
+            document_number="LC-TRANSFER-001", payee=self.supplier, cost_date=self.day,
+            currency=self.afn, amount="10.00", exchange_rate="1", rate_date=self.day,
+            category="FREIGHT", purchase_line_ids=[purchase.lines.get().pk],
+            allocation_method=LandedCostAllocationMethod.DIRECT, user=self.user,
+            idempotency_key="lc-transfer-001",
+        )
+        posted = post_landed_cost(cost_document=cost, user=self.user)
+        transfer_adjustment = posted.valuation_adjustments.get(adjustment_type="WAREHOUSE_TRANSFER")
+        cogs_adjustment = posted.valuation_adjustments.get(
+            adjustment_type="SALES_ISSUE", movement=issue,
+        )
+        self.assertEqual(transfer_adjustment.movement_id, out_movement.pk)
+        self.assertEqual(transfer_adjustment.amount_afn, Decimal("4.00"))
+        self.assertEqual(transfer_adjustment.journal_entry.lines.get(account__code="1420").debit, Decimal("4.00"))
+        self.assertEqual(transfer_adjustment.journal_entry.lines.get(account__code="1410").credit, Decimal("4.00"))
+        self.assertEqual(cogs_adjustment.amount_afn, Decimal("2.00"))
+        self.assertEqual(avco_for(self.product, self.warehouse), Decimal("13.0000"))
+        self.assertEqual(avco_for(self.product, destination), Decimal("13.0000"))
+        out_movement.refresh_from_db()
+        in_movement.refresh_from_db()
+        self.assertEqual(out_movement.unit_cost_afn, Decimal("12.0000"))
+        self.assertEqual(in_movement.unit_cost_afn, Decimal("12.0000"))
