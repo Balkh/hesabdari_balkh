@@ -5,8 +5,6 @@ source documents and allocation snapshots. It does not post a journal or
 claim valuation finalization; that requires the traceable valuation-adjustment
 ledger and its reconciliation gate.
 """
-import hashlib
-import json
 from datetime import date as date_class
 from decimal import Decimal, InvalidOperation
 
@@ -49,20 +47,6 @@ def _positive_money(value, field):
     if amount <= 0:
         raise LandedCostValidationError(f"{field} must be greater than zero.")
     return amount
-
-
-def _fingerprint(payload):
-    normalized = {}
-    for key, value in payload.items():
-        if isinstance(value, Decimal):
-            normalized[key] = str(value)
-        elif isinstance(value, date_class):
-            normalized[key] = value.isoformat()
-        elif isinstance(value, (list, tuple)):
-            normalized[key] = list(value)
-        else:
-            normalized[key] = value
-    return hashlib.sha256(json.dumps(normalized, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
 def _allocate(total, rows, weights):
