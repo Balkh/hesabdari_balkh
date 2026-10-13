@@ -124,11 +124,15 @@ def _extra_cost_map(lines, allocations, *, lock=True):
         line = line_by_id.get(allocation.purchase_line_id)
         if line is None:
             continue
-        per_line[line.pk] += _q4(allocation.afn_amount / Decimal(line.quantity))
+        # Sum the exact posted AFN layers first, then round once per unit.
+        # Rounding each invoice separately can accumulate a false unit-cost
+        # difference when several direct-cost documents target the same line.
+        per_line[line.pk] += allocation.afn_amount
 
     extra = defaultdict(lambda: Decimal("0"))
-    for line_id, delta_per_unit in per_line.items():
+    for line_id, allocated_afn in per_line.items():
         line = line_by_id[line_id]
+        delta_per_unit = _q4(allocated_afn / Decimal(line.quantity))
         if not delta_per_unit:
             continue
         lot = GoodsInTransitLot.objects.filter(purchase_line_id=line_id).first()
