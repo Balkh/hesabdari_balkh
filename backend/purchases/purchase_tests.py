@@ -818,3 +818,37 @@ class PurchaseFoundationTests(TestCase):
         self.assertEqual(avco_for(self.product, self.warehouse), Decimal("13.0000"))
         original_cogs.refresh_from_db()
         self.assertEqual(original_cogs.lines.get(account__code="5100").debit, Decimal("48.00"))
+
+
+    def test_post_landed_cost_reclassifies_goods_in_transit_receipt(self):
+        from goods_in_transit.models import GoodsInTransitLot
+        from goods_in_transit.services import receive_transit
+        from purchases.landed_cost_services import post_landed_cost
+        purchase = self._purchase(
+            document_number="PI-LC-TRANSIT-001", delivery_mode="IN_TRANSIT",
+        )
+        post_purchase(purchase=purchase, user=self.user)
+        line = purchase.lines.get()
+        lot = GoodsInTransitLot.objects.get(purchase_line=line)
+        receipt = receive_transit(
+            lot=lot, quantity=4, receipt_date=self.day, user=self.user,
+            idempotency_key="lc-transit-receipt-001",
+        )
+        cost = create_landed_cost_draft(
+            document_number="LC-TRANSIT-001", payee=self.supplier, cost_date=self.day,
+            currency=self.afn, amount="10.00", exchange_rate="1", rate_date=self.day,
+            category="FREIGHT", purchase_line_ids=[line.pk],
+            allocation_method=LandedCostAllocationMethod.DIRECT, user=self.user,
+            idempotency_key="lc-transit-001",
+        )
+        posted = post_landed_cost(cost_document=cost, user=self.user)
+        receipt_adjustment = posted.valuation_adjustments.get(
+            adjustment_type="TRANSIT_RECEIPT",
+        )
+        self.assertEqual(receipt_adjustment.movement_id, receipt.stock_movement_id)
+        self.assertEqual(receipt_adjustment.amount_afn, Decimal("4.00"))
+        self.assertEqual(receipt_adjustment.journal_entry.lines.get(account__code="1410").debit, Decimal("4.00"))
+        self.assertEqual(receipt_adjustment.journal_entry.lines.get(account__code="1430").credit, Decimal("4.00"))
+        self.assertEqual(avco_for(self.product, self.warehouse), Decimal("13.0000"))
+        lot.refresh_from_db()
+        self.assertEqual(lot.remaining_quantity, 6)
