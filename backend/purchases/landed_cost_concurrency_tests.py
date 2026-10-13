@@ -1,5 +1,6 @@
 """PostgreSQL-only row-lock regression for concurrent landed-cost posting."""
 import threading
+from decimal import Decimal
 from unittest import skipUnless
 
 from django.contrib.auth import get_user_model
@@ -131,5 +132,5 @@ class LandedCostConcurrentPostingTests(TransactionTestCase):
             1,
         )
         self.assertEqual(self.cost.valuation_adjustments.count(), 1)
-        self.assertEqual(self.issue.unit_cost_afn, "12.0000")
-        self.assertEqual(avco_for(self.product, self.warehouse), "13.0000")
+        self.assertEqual(self.issue.unit_cost_afn, Decimal("12.0000"))
+        self.assertEqual(avco_for(self.product, self.warehouse), Decimal("13.0000"))
