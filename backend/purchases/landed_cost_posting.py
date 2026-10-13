@@ -338,6 +338,70 @@ def _post_adjustment(*, document, adjustment_type, reference, movement,
     )
 
 
+def _post_purchase_return_adjustment(*, document, reference, movement,
+                                     warehouse, payable_party,
+                                     inventory_delta, payable_delta,
+                                     posting_day, actor):
+    """Keep supplier claim at its source-receipt cost while AVCO inventory
+    relief remains consistent with the Kardex. Any difference is an explicit
+    COGS variance, never a silent mismatch between AP and inventory.
+    """
+    inventory_delta = _q2(inventory_delta)
+    payable_delta = _q2(payable_delta)
+    if inventory_delta == 0 and payable_delta == 0:
+        return None
+    inventory_account = resolve_warehouse_account(warehouse)
+    payable = _account(PAYABLE_ACCOUNT)
+    cogs = _account(COGS_ACCOUNT)
+    lines = []
+    if payable_delta > 0:
+        lines.append({"account": payable, "debit": payable_delta, "reference": reference,
+                      "description": "Landed-cost adjustment to supplier return claim"})
+    elif payable_delta < 0:
+        lines.append({"account": payable, "credit": abs(payable_delta), "reference": reference,
+                      "description": "Reverse landed-cost adjustment to supplier return claim"})
+    if inventory_delta > 0:
+        lines.append({"account": inventory_account, "credit": inventory_delta, "reference": reference,
+                      "description": "Remove adjusted AVCO from returned stock"})
+    elif inventory_delta < 0:
+        lines.append({"account": inventory_account, "debit": abs(inventory_delta), "reference": reference,
+                      "description": "Reverse adjusted AVCO removal"})
+    debit_total = sum((line.get("debit", Decimal("0")) for line in lines), Decimal("0"))
+    credit_total = sum((line.get("credit", Decimal("0")) for line in lines), Decimal("0"))
+    if debit_total > credit_total:
+        lines.append({"account": cogs, "credit": debit_total - credit_total,
+                      "reference": reference, "description": "Purchase-return cost variance"})
+    elif credit_total > debit_total:
+        lines.append({"account": cogs, "debit": credit_total - debit_total,
+                      "reference": reference, "description": "Purchase-return cost variance"})
+    if sum((line.get("debit", Decimal("0")) for line in lines), Decimal("0")) != sum(
+        (line.get("credit", Decimal("0")) for line in lines), Decimal("0")
+    ):
+        raise LandedCostPostingError("Purchase-return adjustment journal failed to balance.")
+    base = _base_currency()
+    digest = hashlib.sha256(str(movement.pk).encode()).hexdigest()[:20]
+    entry = post_journal(
+        number=next_document_number("JE", _jalali_year(posting_day)),
+        posting_date=posting_day,
+        description=f"Landed-cost purchase-return adjustment: {document.document_number}",
+        lines=lines, source_type="LANDED_COST_VALUATION_ADJUSTMENT",
+        source_id=f"{document.document_number}:PURCHASE_RETURN:{digest}",
+        currency=base, rate=Decimal("1.0000"), rate_date=posting_day,
+        created_by=actor,
+        idempotency_key=f"landed-cost:{document.pk}:adjustment:PURCHASE_RETURN:{movement.pk}",
+    )
+    payable_line = entry.lines.filter(account=payable).first()
+    if payable_line is not None and payable_party is not None:
+        attribute_journal_line(payable_line, party=payable_party, user=actor)
+    return LandedCostValuationAdjustment.objects.create(
+        cost_document=document, source_reference=reference[:200],
+        adjustment_type="PURCHASE_RETURN", movement=movement,
+        amount_afn=max(abs(inventory_delta), abs(payable_delta),
+                       abs(inventory_delta - payable_delta)),
+        journal_entry=entry,
+    )
+
+
 @transaction.atomic
 def post_landed_cost(*, cost_document, user=None):
     """Post one landed-cost invoice and all traceable AFN valuation adjustments.
@@ -545,15 +609,21 @@ def post_landed_cost(*, cost_document, user=None):
                     raise LandedCostPostingError(
                         f"Purchase return {movement.reference} has no posted supplier-claim document."
                     )
-                _post_adjustment(
-                    document=document, adjustment_type="PURCHASE_RETURN",
-                    reference=movement.reference, movement=movement,
-                    debit_account=_account(PAYABLE_ACCOUNT),
-                    credit_account=resolve_warehouse_account(movement.warehouse),
-                    amount=delta, posting_day=day, actor=actor,
-                    party=purchase_return.supplier,
+                source_result_before = baseline.get(inventory_return.source_movement_id)
+                source_result_after = revised.get(inventory_return.source_movement_id)
+                if source_result_before is None or source_result_after is None:
+                    raise LandedCostPostingError("Purchase-return source receipt is missing from valuation replay.")
+                source_unit_delta = source_result_after["unit"] - source_result_before["unit"]
+                payable_delta = _q2(source_unit_delta * Decimal(abs(movement.quantity)))
+                _post_purchase_return_adjustment(
+                    document=document, reference=movement.reference,
+                    movement=movement, warehouse=movement.warehouse,
+                    payable_party=purchase_return.supplier,
+                    inventory_delta=delta, payable_delta=payable_delta,
+                    posting_day=day, actor=actor,
                 )
-                purchase_return_delta += delta
+                purchase_return_delta += payable_delta
+                cogs_delta += delta - payable_delta
             elif movement.movement_type == MovementType.SALES_RETURN:
                 _inventory_return, sales_return, _purchase_return = _movement_return_context(movement)
                 if sales_return is None:
