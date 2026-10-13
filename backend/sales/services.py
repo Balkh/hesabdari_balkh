@@ -23,6 +23,7 @@ from security.services import record_audit_event
 
 from .models import (
     COGSAdjustment, CheckStatus, NegativeCOGSObligation,
+    NegativeCOGSReceiptAllocation,
     PaymentMode, Sale, SaleLine, SaleStatus, SalesChannel, SaleType,
     WarehouseCheck, WarehouseCheckReversal,
 )
@@ -517,6 +518,13 @@ def resolve_negative_obligations(*, receipt_movement):
             open_qty = obligation.original_quantity - obligation.resolved_quantity
             qty = min(open_qty, remaining)
             actual = receipt_movement.unit_cost_afn
+            # Persist the quantity/source relationship even when the receipt
+            # exactly matches the temporary cost and no COGS journal is needed.
+            # A later landed-cost invoice must still trace this consumed layer.
+            NegativeCOGSReceiptAllocation.objects.create(
+                obligation=obligation, receipt_movement=receipt_movement,
+                quantity=qty,
+            )
             difference = cogs_amount(qty, actual - obligation.temporary_unit_cost_afn)
             if difference != 0:
                 inv = resolve_warehouse_account(receipt_movement.warehouse)
