@@ -186,7 +186,7 @@ def _transfer_pairs(movements):
     return out_for_in, in_for_out
 
 
-def _simulate_product(product_id, extra_unit_costs, earliest_date):
+def _simulate_product(product_id, baseline_extra_costs, revised_extra_costs, earliest_date):
     """Replay the existing 4dp AVCO rule without changing any posted movement."""
     movements = list(StockMovement.objects.filter(
         product_id=product_id
@@ -197,7 +197,7 @@ def _simulate_product(product_id, extra_unit_costs, earliest_date):
     from sales.models import SalesReturn
 
     # The same event stream is replayed under the prior basis and the proposed basis.
-    def replay(use_extra):
+    def replay(extra_unit_costs):
         state = {}  # warehouse_id -> [quantity, cost basis AFN]
         results = {}
         for movement in movements:
@@ -229,13 +229,12 @@ def _simulate_product(product_id, extra_unit_costs, earliest_date):
                 elif sales_return is not None and sales_return.return_movement_id:
                     # Transit sale returns have no company issue movement; the virtual
                     # landed-cost layer is explicitly attached to this return movement.
-                    unit = movement.unit_cost_afn + (extra_unit_costs.get(movement.pk, Decimal("0")) if use_extra else Decimal("0"))
+                    unit = movement.unit_cost_afn
                 else:
                     raise LandedCostPostingError(f"Sales return {movement.reference} has no traceable source.")
 
             if signed > 0:
-                if use_extra:
-                    unit += extra_unit_costs.get(movement.pk, Decimal("0"))
+                unit += extra_unit_costs.get(movement.pk, Decimal("0"))
                 inbound_value = Decimal(signed) * unit
                 if qty >= 0:
                     qty += signed
@@ -282,8 +281,8 @@ def _simulate_product(product_id, extra_unit_costs, earliest_date):
             }
         return results, state
 
-    baseline, baseline_state = replay(False)
-    revised, revised_state = replay(True)
+    baseline, baseline_state = replay(baseline_extra_costs)
+    revised, revised_state = replay(revised_extra_costs)
     return movements, baseline, revised, baseline_state, revised_state, in_for_out
 
 
@@ -299,7 +298,7 @@ def _post_adjustment(*, document, adjustment_type, reference, movement,
     credit = credit_account if signed > 0 else debit_account
     value = abs(signed)
     base = _base_currency()
-    fingerprint_ref = f"{adjustment_type}:{reference}"
+    fingerprint_ref = str(reference)[:200]
     existing = LandedCostValuationAdjustment.objects.filter(
         cost_document=document, source_reference=fingerprint_ref,
         adjustment_type=adjustment_type,
@@ -411,7 +410,7 @@ def post_landed_cost(*, cost_document, user=None):
     product_results = {}
     for product_id in sorted(earliest_by_product):
         product_results[product_id] = _simulate_product(
-            product_id, baseline_extra, earliest_by_product[product_id]
+            product_id, baseline_extra, revised_extra, earliest_by_product[product_id]
         )
         # Re-run with all layers for the proposed final basis.
         # _simulate_product compares its baseline and revised maps internally.
