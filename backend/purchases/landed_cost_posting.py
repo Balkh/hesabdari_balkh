@@ -519,13 +519,22 @@ def post_landed_cost(*, cost_document, user=None):
 
     # Build one replay per affected product, sharing the complete chronology
     # so AVCO effects continue through warehouse transfers and sales returns.
+    from sales.models import NegativeCOGSReceiptAllocation
+
     product_results = {}
     for product_id in sorted(earliest_by_product):
-        product_results[product_id] = _simulate_product(
-            product_id, baseline_extra, revised_extra, earliest_by_product[product_id]
+        # Negative-stock issue rows are replayable only when a persisted
+        # receipt-allocation record proves which later receipt resolved them.
+        allowed_negative_issue_ids = set(
+            NegativeCOGSReceiptAllocation.objects.filter(
+                obligation__product_id=product_id,
+                receipt_movement__product_id=product_id,
+            ).values_list("obligation__movement_id", flat=True)
         )
-        # Re-run with all layers for the proposed final basis.
-        # _simulate_product compares its baseline and revised maps internally.
+        product_results[product_id] = _simulate_product(
+            product_id, baseline_extra, revised_extra, earliest_by_product[product_id],
+            allowed_negative_issue_ids=allowed_negative_issue_ids,
+        )
     # Invoice posting: capitalize full cost before reallocation. The subsequent
     # adjustment journals move the sold/returned/transferred portions out of
     # this initial asset debit; the remainder stays in inventory / 1430.
@@ -605,6 +614,42 @@ def post_landed_cost(*, cost_document, user=None):
     cogs_delta = Decimal("0.00")
     purchase_return_delta = Decimal("0.00")
     inventory_delta = Decimal("0.00")
+
+    # A purchase receipt may resolve a sale that was already posted against a
+    # manually entered temporary cost. The receipt allocation ledger preserves
+    # that source relationship even when the original receipt needed no COGS
+    # correction; a later landed cost must therefore flow to that prior COGS.
+    for row in allocations:
+        line = row.purchase_line
+        source = source_movements.get(line.pk)
+        if source is None:
+            continue
+        per_unit = _q4(row.afn_amount / Decimal(line.quantity))
+        if not per_unit:
+            continue
+        for resolved in NegativeCOGSReceiptAllocation.objects.filter(
+            receipt_movement=source
+        ).select_related("obligation", "obligation__movement", "obligation__warehouse").order_by("id"):
+            obligation = resolved.obligation
+            if not JournalEntry.objects.filter(
+                source_type="SALES_COGS", source_id=obligation.movement.reference
+            ).exists():
+                raise LandedCostPostingError(
+                    f"Negative-COGS obligation {obligation.pk} has no original posted COGS journal."
+                )
+            amount = _q2(per_unit * Decimal(resolved.quantity))
+            if amount <= 0:
+                continue
+            _post_adjustment(
+                document=document, adjustment_type="NEGATIVE_COGS_OBLIGATION",
+                reference=obligation.movement.reference,
+                movement=obligation.movement,
+                debit_account=_account(COGS_ACCOUNT),
+                credit_account=resolve_warehouse_account(obligation.warehouse),
+                amount=amount, posting_day=day, actor=actor,
+            )
+            cogs_delta += amount
+
     for product_id, result in product_results.items():
         movements, baseline, revised, base_state, revised_state, in_for_out = result
         earliest = earliest_by_product[product_id]
