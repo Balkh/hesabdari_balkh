@@ -1322,6 +1322,7 @@ class PurchaseFoundationTests(TestCase):
 
     def test_late_cost_after_transit_sale_return_reconciles_transit_inventory_and_cogs(self):
         from goods_in_transit.models import GoodsInTransitLot
+        from goods_in_transit.services import receive_transit
         from purchases.landed_cost_services import post_landed_cost
         from sales.returns_services import create_sales_return
         from sales.services import (
@@ -1345,6 +1346,12 @@ class PurchaseFoundationTests(TestCase):
         )
         finalize_sale(sale=sale, user=self.user)
         sale_line = sale.lines.get()
+        # The shipment arrives with 7 company-owned units and 3 units already
+        # owned by the customer; the receipt places customer custody at this warehouse.
+        receive_transit(
+            lot=lot, quantity=10, receipt_date=self.day, user=self.user,
+            idempotency_key="tr-lc-transit-return-receipt",
+        )
         check = prepare_warehouse_check(
             sale_line=sale_line, warehouse=self.warehouse, quantity=3,
             number="WC-LC-TRANSIT-RETURN-001",
@@ -1377,8 +1384,8 @@ class PurchaseFoundationTests(TestCase):
         self.assertEqual(sale_adjustment.amount_afn, Decimal("3.00"))
         self.assertEqual(return_adjustment.amount_afn, Decimal("1.00"))
         lot.refresh_from_db()
-        self.assertEqual(lot.remaining_quantity, 7)
-        self.assertEqual(stock_for(self.product, self.warehouse), 1)
+        self.assertEqual(lot.remaining_quantity, 0)
+        self.assertEqual(stock_for(self.product, self.warehouse), 8)
         self.assertEqual(avco_for(self.product, self.warehouse), Decimal("13.0000"))
         self.assertEqual(
             sale_adjustment.journal_entry.lines.get(account__code="5100").debit,
