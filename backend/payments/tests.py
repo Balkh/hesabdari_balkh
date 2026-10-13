@@ -31,7 +31,7 @@ def test_receivable_payment_posts_cash_and_customer_ledger(setup_payment):
                              amount="1000.005", user=user, document_number="PMT-TEST-1")
     assert payment.amount == Decimal("1000.01")
     assert payment.journal_entry.status == JournalStatus.POSTED
-    assert list(payment.journal_entry.lines.values_list("account__code", "debit", "credit")) == [
+    assert list(payment.journal_entry.lines.order_by("id").values_list("account__code", "debit", "credit")) == [
         ("1110", Decimal("1000.01"), Decimal("0.00")),
         ("1310", Decimal("0.00"), Decimal("1000.01")),
     ]
