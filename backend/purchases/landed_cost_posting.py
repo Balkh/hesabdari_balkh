@@ -193,7 +193,7 @@ def _transfer_pairs(movements):
     return out_for_in, in_for_out
 
 
-def _simulate_product(product_id, baseline_extra_costs, revised_extra_costs, earliest_date, *, strict=True):
+def _simulate_product(product_id, baseline_extra_costs, revised_extra_costs, earliest_date, *, strict=True, allowed_negative_issue_ids=()):
     """Replay the existing 4dp AVCO rule without changing any posted movement."""
     movements = list(StockMovement.objects.filter(
         product_id=product_id
@@ -204,6 +204,7 @@ def _simulate_product(product_id, baseline_extra_costs, revised_extra_costs, ear
         return [], {}, {}, {}, {}, {}
     out_for_in, in_for_out = _transfer_pairs(movements)
     from sales.models import SalesReturn
+    allowed_negative_issue_ids = set(allowed_negative_issue_ids)
 
     # The same event stream is replayed under the prior basis and the proposed basis.
     def replay(extra_unit_costs):
@@ -214,7 +215,7 @@ def _simulate_product(product_id, baseline_extra_costs, revised_extra_costs, ear
             qty, basis = state.get(wid, [0, Decimal("0")])
             signed = movement.quantity
             unit = movement.unit_cost_afn
-            if strict and movement.is_temporary_cost and movement.movement_date >= earliest_date:
+            if strict and movement.is_temporary_cost and movement.movement_date >= earliest_date and movement.pk not in allowed_negative_issue_ids:
                 raise LandedCostPostingError(
                     f"Movement {movement.reference} uses a temporary cost; late valuation is blocked until resolved."
                 )
@@ -257,7 +258,7 @@ def _simulate_product(product_id, baseline_extra_costs, revised_extra_costs, ear
                 relief = Decimal("0")
                 relief_unit = unit
             else:
-                if qty < 0 and strict:
+                if qty < 0 and strict and movement.pk not in allowed_negative_issue_ids:
                     raise LandedCostPostingError(
                         f"Product {product_id} has negative stock before {movement.reference}; valuation replay is ambiguous."
                     )
@@ -273,17 +274,19 @@ def _simulate_product(product_id, baseline_extra_costs, revised_extra_costs, ear
                         basis = Decimal("0")
                     elif basis < 0:
                         basis = Decimal("0")
-                elif strict:
+                elif strict and movement.pk not in allowed_negative_issue_ids:
                     raise LandedCostPostingError(
                         f"Product {product_id} has an issue with no positive cost basis at {movement.reference}."
                     )
                 else:
+                    # A negative-stock issue is replayable only when an immutable
+                    # receipt-allocation record proves which later receipt resolved it.
                     qty -= taken
                     basis = Decimal("0")
                     relief = Decimal("0")
                     relief_unit = movement.unit_cost_afn
                 inbound_value = Decimal("0")
-            if qty < 0 and strict:
+            if qty < 0 and strict and signed < 0 and movement.pk not in allowed_negative_issue_ids:
                 raise LandedCostPostingError(
                     f"Product {product_id} becomes negative at {movement.reference}; late valuation is blocked."
                 )
@@ -293,6 +296,10 @@ def _simulate_product(product_id, baseline_extra_costs, revised_extra_costs, ear
                 "relief": relief, "relief_unit": relief_unit,
                 "inbound": inbound_value, "unit": unit,
             }
+        if strict and any(pair[0] < 0 for pair in state.values()):
+            raise LandedCostPostingError(
+                f"Product {product_id} still has unresolved negative stock after valuation replay."
+            )
         return results, state
 
     baseline, baseline_state = replay(baseline_extra_costs)
