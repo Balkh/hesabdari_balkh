@@ -1348,7 +1348,7 @@ class PurchaseFoundationTests(TestCase):
         sale_line = sale.lines.get()
         # The shipment arrives with 7 company-owned units and 3 units already
         # owned by the customer; the receipt places customer custody at this warehouse.
-        receive_transit(
+        transit_receipt = receive_transit(
             lot=lot, quantity=10, receipt_date=self.day, user=self.user,
             idempotency_key="tr-lc-transit-return-receipt",
         )
@@ -1381,6 +1381,10 @@ class PurchaseFoundationTests(TestCase):
             adjustment_type="SALES_RETURN",
             movement=returned.return_movement,
         )
+        receipt_adjustment = posted.valuation_adjustments.get(
+            adjustment_type="TRANSIT_RECEIPT", movement=transit_receipt.stock_movement,
+        )
+        self.assertEqual(receipt_adjustment.amount_afn, Decimal("7.00"))
         self.assertEqual(sale_adjustment.amount_afn, Decimal("3.00"))
         self.assertEqual(return_adjustment.amount_afn, Decimal("1.00"))
         lot.refresh_from_db()
