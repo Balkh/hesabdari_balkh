@@ -747,3 +747,74 @@ class PurchaseFoundationTests(TestCase):
             )
         self.assertEqual(LandedCostDocument.objects.count(), before_documents)
         self.assertEqual(JournalEntry.objects.count(), before_journals)
+
+
+    def test_post_landed_cost_capitalizes_cost_and_preserves_source_history(self):
+        from purchases.landed_cost_services import post_landed_cost
+        purchase = self._purchase(document_number="PI-LC-POST-001")
+        post_purchase(purchase=purchase, user=self.user)
+        line = purchase.lines.get()
+        movement = StockMovement.objects.get(reference=f"{purchase.document_number}:LINE:{line.pk}")
+        original_cost = movement.unit_cost_afn
+        original_journal_count = JournalEntry.objects.count()
+        cost = create_landed_cost_draft(
+            document_number="LC-POST-001", payee=self.supplier, cost_date=self.day,
+            currency=self.afn, amount="10.00", exchange_rate="1", rate_date=self.day,
+            category="FREIGHT", purchase_line_ids=[line.pk],
+            allocation_method=LandedCostAllocationMethod.DIRECT, user=self.user,
+            idempotency_key="lc-post-001",
+        )
+        posted = post_landed_cost(cost_document=cost, user=self.user)
+        self.assertEqual(posted.status, LandedCostStatus.POSTED)
+        self.assertIsNotNone(posted.journal_entry_id)
+        self.assertEqual(posted.journal_entry.total_debit, Decimal("10.00"))
+        self.assertEqual(posted.journal_entry.total_credit, Decimal("10.00"))
+        self.assertEqual(posted.journal_entry.lines.get(account__code="1410").debit, Decimal("10.00"))
+        self.assertEqual(posted.journal_entry.lines.get(account__code="2110").credit, Decimal("10.00"))
+        self.assertEqual(avco_for(self.product, self.warehouse), Decimal("13.0000"))
+        movement.refresh_from_db()
+        self.assertEqual(movement.unit_cost_afn, original_cost)
+        self.assertEqual(JournalEntry.objects.count(), original_journal_count + 1)
+        self.assertEqual(post_landed_cost(cost_document=posted, user=self.user).pk, posted.pk)
+
+    def test_post_landed_cost_reallocates_sold_portion_to_cogs(self):
+        from accounting.models import Account
+        from accounting.services import post_journal
+        from inventory.services import issue_stock
+        from purchases.landed_cost_services import post_landed_cost
+        purchase = self._purchase(document_number="PI-LC-SOLD-001")
+        post_purchase(purchase=purchase, user=self.user)
+        reference = "ISSUE-LC-SOLD-001"
+        issue = issue_stock(
+            product=self.product, warehouse=self.warehouse, quantity=4,
+            movement_date=self.day, reference=reference,
+            description="Evidence sale issue", user=self.user,
+            party=self.customer, idempotency_key="issue-lc-sold-001",
+        )
+        original_cogs = post_journal(
+            number="JE-LC-SOLD-COGS", posting_date=self.day,
+            description="Original COGS for evidence issue",
+            lines=[
+                {"account": Account.objects.get(code="5100"), "debit": Decimal("48.00"), "reference": reference},
+                {"account": Account.objects.get(code="1410"), "credit": Decimal("48.00"), "reference": reference},
+            ],
+            source_type="SALES_COGS", source_id=reference, currency=self.afn,
+            rate=Decimal("1.0000"), rate_date=self.day, created_by=self.user,
+            idempotency_key="je-lc-sold-cogs",
+        )
+        cost = create_landed_cost_draft(
+            document_number="LC-SOLD-001", payee=self.supplier, cost_date=self.day,
+            currency=self.afn, amount="10.00", exchange_rate="1", rate_date=self.day,
+            category="FREIGHT", purchase_line_ids=[purchase.lines.get().pk],
+            allocation_method=LandedCostAllocationMethod.DIRECT, user=self.user,
+            idempotency_key="lc-sold-001",
+        )
+        posted = post_landed_cost(cost_document=cost, user=self.user)
+        adjustment = posted.valuation_adjustments.get(adjustment_type="SALES_ISSUE")
+        self.assertEqual(adjustment.movement_id, issue.pk)
+        self.assertEqual(adjustment.amount_afn, Decimal("4.00"))
+        self.assertEqual(adjustment.journal_entry.lines.get(account__code="5100").debit, Decimal("4.00"))
+        self.assertEqual(adjustment.journal_entry.lines.get(account__code="1410").credit, Decimal("4.00"))
+        self.assertEqual(avco_for(self.product, self.warehouse), Decimal("13.0000"))
+        original_cogs.refresh_from_db()
+        self.assertEqual(original_cogs.lines.get(account__code="5100").debit, Decimal("48.00"))
