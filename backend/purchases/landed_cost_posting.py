@@ -829,6 +829,8 @@ def post_transit_sale_landed_cost_adjustments(*, lot, sale_allocation, posting_d
 @transaction.atomic
 def post_transit_sales_return_landed_cost_adjustments(*, lot, sales_return, user=None):
     """Reverse the landed-cost COGS portion when Transit-sold goods are returned."""
+    from goods_in_transit.models import GoodsInTransitLot
+    lot = GoodsInTransitLot.objects.select_for_update().get(pk=lot.pk)
     movement = sales_return.return_movement
     if movement is None:
         return []
