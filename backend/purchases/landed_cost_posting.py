@@ -477,13 +477,34 @@ def post_landed_cost(*, cost_document, user=None):
         earliest_by_product[line.product_id] = min(current, earliest) if current else earliest
 
     line_ids = [line.pk for line in lines]
-    prior = _posted_prior_allocations(line_ids)
-    # The replay baseline includes every previously posted landed-cost layer;
-    # the revised replay adds this document only.
-    baseline_allocations = prior
-    revised_allocations = prior + allocations
-    baseline_extra = _extra_cost_map(lines, baseline_allocations)
-    revised_extra = _extra_cost_map(lines, revised_allocations)
+    product_ids = sorted(earliest_by_product)
+    # Serialize cost finalization by product, not only by purchase line: two
+    # invoices for different receipts of the same product both affect AVCO.
+    if lines:
+        product_model = type(lines[0].product)
+        list(product_model.objects.select_for_update().filter(
+            pk__in=product_ids
+        ).order_by("pk").values_list("pk", flat=True))
+
+    # The baseline must include every posted cost layer for each affected
+    # product, including costs attached to earlier/different purchase lines.
+    # Otherwise a second late cost would replay AVCO without the first layer
+    # and calculate the wrong marginal COGS/inventory/transfer adjustments.
+    prior = list(LandedCostAllocation.objects.filter(
+        purchase_line__product_id__in=product_ids,
+        cost_document__status=LandedCostStatus.POSTED,
+    ).select_related("purchase_line", "cost_document").order_by(
+        "cost_document__cost_date", "id"
+    ))
+    valuation_line_ids = {row.purchase_line_id for row in prior} | set(line_ids)
+    valuation_lines = list(PurchaseLine.objects.filter(
+        pk__in=valuation_line_ids
+    ).select_related(
+        "purchase", "purchase__warehouse", "purchase__currency", "product"
+    ).order_by("pk"))
+    # Prior layers form the baseline; this document is the only delta.
+    baseline_extra = _extra_cost_map(valuation_lines, prior)
+    revised_extra = _extra_cost_map(valuation_lines, prior + allocations)
 
     # Build one replay per affected product, sharing the complete chronology
     # so AVCO effects continue through warehouse transfers and sales returns.
