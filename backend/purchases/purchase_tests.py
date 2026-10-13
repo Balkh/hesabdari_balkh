@@ -1399,3 +1399,59 @@ class PurchaseFoundationTests(TestCase):
             return_adjustment.journal_entry.lines.get(account__code="5100").credit,
             Decimal("1.00"),
         )
+
+
+    def test_post_foreign_landed_cost_preserves_manual_historical_rate_and_payee(self):
+        from purchases.landed_cost_services import post_landed_cost
+
+        purchase = self._purchase(
+            document_number="PI-LC-USD-001", currency=self.usd,
+            rate="70.0000", rate_date=self.day,
+        )
+        post_purchase(purchase=purchase, user=self.user)
+        cost = create_landed_cost_draft(
+            document_number="LC-USD-001", payee=self.supplier,
+            cost_date=self.day, currency=self.usd, amount="10.00",
+            exchange_rate="70.0000", rate_date=self.day, category="FREIGHT",
+            purchase_line_ids=[purchase.lines.get().pk],
+            allocation_method=LandedCostAllocationMethod.DIRECT,
+            user=self.user, idempotency_key="lc-usd-001",
+        )
+        posted = post_landed_cost(cost_document=cost, user=self.user)
+        self.assertEqual(posted.journal_entry.currency, self.usd)
+        self.assertEqual(posted.journal_entry.rate, Decimal("70.0000"))
+        self.assertEqual(posted.journal_entry.rate_date, self.day)
+        self.assertEqual(posted.journal_entry.afn_total, Decimal("700.00"))
+        self.assertEqual(posted.journal_entry.lines.get(account__code="1410").debit, Decimal("10.00"))
+        self.assertEqual(posted.journal_entry.lines.get(account__code="2110").credit, Decimal("10.00"))
+        self.assertEqual(posted.allocations.get().amount, Decimal("10.00"))
+        self.assertEqual(posted.allocations.get().afn_amount, Decimal("700.00"))
+        self.assertEqual(
+            posted.journal_entry.lines.get(account__code="2110").party_attributions.get().party,
+            self.supplier,
+        )
+
+    def test_landed_cost_allocation_mismatch_rejects_posting_atomically(self):
+        from purchases.landed_cost_services import LandedCostPostingError, post_landed_cost
+
+        purchase = self._purchase(document_number="PI-LC-MISMATCH-001")
+        post_purchase(purchase=purchase, user=self.user)
+        cost = create_landed_cost_draft(
+            document_number="LC-MISMATCH-001", payee=self.supplier,
+            cost_date=self.day, currency=self.afn, amount="10.00",
+            exchange_rate="1", rate_date=self.day, category="FREIGHT",
+            purchase_line_ids=[purchase.lines.get().pk],
+            allocation_method=LandedCostAllocationMethod.DIRECT,
+            user=self.user, idempotency_key="lc-mismatch-001",
+        )
+        allocation = cost.allocations.get()
+        allocation.amount = Decimal("9.00")
+        allocation.save(update_fields=["amount"])
+        before_journals = JournalEntry.objects.count()
+        with self.assertRaises(LandedCostPostingError):
+            post_landed_cost(cost_document=cost, user=self.user)
+        cost.refresh_from_db()
+        self.assertEqual(cost.status, LandedCostStatus.DRAFT)
+        self.assertIsNone(cost.journal_entry_id)
+        self.assertEqual(cost.valuation_adjustments.count(), 0)
+        self.assertEqual(JournalEntry.objects.count(), before_journals)
