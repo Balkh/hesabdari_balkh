@@ -392,6 +392,13 @@ def create_sales_return(*, sale_line, warehouse, quantity, return_date,
             status=SalesReturnStatus.POSTED, reason=reason, created_by=actor,
             idempotency_key=idempotency_key or f"sales-return:{document_number}",
         )
+        if allocation is not None:
+            # Transit-sale COGS was recognized from 1430. If landed costs were
+            # posted before this return, reverse that same AFN cost layer too.
+            from purchases.landed_cost_posting import post_transit_sales_return_landed_cost_adjustments
+            post_transit_sales_return_landed_cost_adjustments(
+                lot=allocation.transit_lot, sales_return=record, user=actor,
+            )
         record_audit_event(
             user=actor, action=AuditAction.CREATE, entity="SalesReturn",
             entity_id=record.pk, reference=document_number,

@@ -110,6 +110,8 @@ class PurchaseLine(models.Model):
     line_total = models.DecimalField(max_digits=20, decimal_places=2)
     discount_allocated = models.DecimalField(max_digits=20, decimal_places=2, default=Decimal("0.00"))
     net_total = models.DecimalField(max_digits=20, decimal_places=2)
+    measured_weight_kg = models.DecimalField(max_digits=20, decimal_places=4, null=True, blank=True)
+    freight_allocated = models.DecimalField(max_digits=20, decimal_places=2, default=Decimal("0.00"))
 
     objects = PurchaseLineQuerySet.as_manager()
 
@@ -121,6 +123,8 @@ class PurchaseLine(models.Model):
             models.CheckConstraint(condition=models.Q(line_total__gte=0), name="purchase_line_total_gte0"),
             models.CheckConstraint(condition=models.Q(discount_allocated__gte=0), name="purchase_line_discount_gte0"),
             models.CheckConstraint(condition=models.Q(net_total__gte=0), name="purchase_line_net_gte0"),
+            models.CheckConstraint(condition=models.Q(measured_weight_kg__isnull=True) | models.Q(measured_weight_kg__gt=0), name="purchase_line_weight_kg_gt0"),
+            models.CheckConstraint(condition=models.Q(freight_allocated__gte=0), name="purchase_line_freight_allocated_gte0"),
         ]
 
     def save(self, *args, **kwargs):
@@ -317,3 +321,222 @@ class PurchaseReturnReversal(models.Model):
 
     def delete(self, *args, **kwargs):
         raise PostedImmutabilityError("Purchase return reversals cannot be deleted")
+
+
+
+class LandedCostStatus(models.TextChoices):
+    DRAFT = "DRAFT", "Draft"
+    POSTED = "POSTED", "Posted"
+
+
+class LandedCostAllocationMethod(models.TextChoices):
+    DIRECT = "DIRECT", "Direct to purchase line"
+    WEIGHT = "WEIGHT", "Measured-weight allocation"
+
+
+class LandedCostDocumentQuerySet(models.QuerySet):
+    def update(self, **kwargs):
+        if self.filter(status=LandedCostStatus.POSTED).exists() or "status" in kwargs:
+            raise PostedImmutabilityError("Posted landed-cost documents are immutable")
+        return super().update(**kwargs)
+
+    def delete(self):
+        if self.filter(status=LandedCostStatus.POSTED).exists():
+            raise PostedImmutabilityError("Posted landed-cost documents cannot be deleted")
+        return super().delete()
+
+
+class LandedCostAllocationQuerySet(models.QuerySet):
+    def _contains_posted_parent(self):
+        return self.filter(cost_document__status=LandedCostStatus.POSTED).exists()
+
+    def update(self, **kwargs):
+        target = kwargs.get("cost_document_id", kwargs.get("cost_document"))
+        target_id = getattr(target, "pk", target)
+        if self._contains_posted_parent() or (
+            target_id is not None
+            and LandedCostDocument.objects.filter(
+                pk=target_id, status=LandedCostStatus.POSTED
+            ).exists()
+        ):
+            raise PostedImmutabilityError("Allocations of posted landed costs are immutable")
+        return super().update(**kwargs)
+
+    def delete(self):
+        if self._contains_posted_parent():
+            raise PostedImmutabilityError("Allocations of posted landed costs cannot be deleted")
+        return super().delete()
+
+
+class LandedCostDocument(models.Model):
+    """Immutable later direct-cost source; valuation effects are separate adjustments.
+
+    Amount/rate fields preserve the cost document's own historical transaction
+    context. They must never overwrite the source Purchase or its posted journal.
+    """
+
+    document_number = models.CharField(max_length=30, unique=True)
+    payee = models.ForeignKey(
+        "parties.Party", on_delete=models.PROTECT, related_name="landed_cost_documents"
+    )
+    cost_date = models.DateField()
+    currency = models.ForeignKey(
+        "currencies.Currency", on_delete=models.PROTECT, related_name="landed_cost_documents"
+    )
+    amount = models.DecimalField(max_digits=20, decimal_places=2)
+    exchange_rate = models.DecimalField(max_digits=20, decimal_places=4)
+    rate_date = models.DateField()
+    afn_amount = models.DecimalField(max_digits=20, decimal_places=2)
+    category = models.CharField(max_length=40)
+    description = models.CharField(max_length=500, blank=True, default="")
+    status = models.CharField(max_length=10, choices=LandedCostStatus.choices, default=LandedCostStatus.DRAFT)
+    journal_entry = models.ForeignKey(
+        "accounting.JournalEntry", null=True, blank=True, on_delete=models.PROTECT,
+        related_name="landed_cost_documents",
+    )
+    idempotency_key = models.CharField(max_length=128, unique=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name="landed_cost_documents_created",
+    )
+    posted_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    objects = LandedCostDocumentQuerySet.as_manager()
+
+    class Meta:
+        ordering = ["cost_date", "document_number"]
+        constraints = [
+            models.CheckConstraint(condition=models.Q(amount__gt=0), name="landed_cost_amount_gt0"),
+            models.CheckConstraint(condition=models.Q(exchange_rate__gt=0), name="landed_cost_rate_gt0"),
+            models.CheckConstraint(condition=models.Q(afn_amount__gt=0), name="landed_cost_afn_gt0"),
+            models.CheckConstraint(condition=~models.Q(document_number=""), name="landed_cost_doc_nonblank"),
+            models.CheckConstraint(condition=~models.Q(category=""), name="landed_cost_category_nonblank"),
+        ]
+
+    def save(self, *args, **kwargs):
+        if self.pk is not None:
+            current = type(self).objects.filter(pk=self.pk).values_list("status", flat=True).first()
+            if current == LandedCostStatus.POSTED:
+                raise PostedImmutabilityError(
+                    "Posted landed-cost documents are immutable; correct through traceable adjustment/reversal"
+                )
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        if self.pk is not None and type(self).objects.filter(pk=self.pk, status=LandedCostStatus.POSTED).exists():
+            raise PostedImmutabilityError("Posted landed-cost documents cannot be deleted")
+        return super().delete(*args, **kwargs)
+
+
+class LandedCostAllocation(models.Model):
+    """Immutable allocation snapshot for one source purchase line."""
+
+    cost_document = models.ForeignKey(
+        LandedCostDocument, on_delete=models.PROTECT, related_name="allocations"
+    )
+    purchase_line = models.ForeignKey(
+        PurchaseLine, on_delete=models.PROTECT, related_name="landed_cost_allocations"
+    )
+    method = models.CharField(max_length=10, choices=LandedCostAllocationMethod.choices)
+    amount = models.DecimalField(max_digits=20, decimal_places=2)
+    afn_amount = models.DecimalField(max_digits=20, decimal_places=2)
+    measured_weight_kg = models.DecimalField(max_digits=20, decimal_places=4, null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    objects = LandedCostAllocationQuerySet.as_manager()
+
+    class Meta:
+        ordering = ["cost_document_id", "id"]
+        constraints = [
+            models.UniqueConstraint(fields=["cost_document", "purchase_line"], name="uniq_lc_doc_purchase_line"),
+            models.CheckConstraint(condition=models.Q(amount__gt=0), name="landed_cost_alloc_amount_gt0"),
+            models.CheckConstraint(condition=models.Q(afn_amount__gt=0), name="landed_cost_alloc_afn_gt0"),
+            models.CheckConstraint(
+                condition=models.Q(measured_weight_kg__isnull=True) | models.Q(measured_weight_kg__gt=0),
+                name="landed_cost_alloc_weight_gt0",
+            ),
+        ]
+
+    def save(self, *args, **kwargs):
+        if self.pk is not None:
+            original_document_id = type(self).objects.filter(pk=self.pk).values_list(
+                "cost_document_id", flat=True
+            ).first()
+            if original_document_id and LandedCostDocument.objects.filter(
+                pk=original_document_id, status=LandedCostStatus.POSTED
+            ).exists():
+                raise PostedImmutabilityError("Allocations of posted landed-cost documents are immutable")
+        if self.cost_document_id and LandedCostDocument.objects.filter(
+            pk=self.cost_document_id, status=LandedCostStatus.POSTED
+        ).exists():
+            raise PostedImmutabilityError("Cannot add or move allocations into a posted landed-cost document")
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        if self.pk is not None and type(self).objects.filter(
+            pk=self.pk, cost_document__status=LandedCostStatus.POSTED
+        ).exists():
+            raise PostedImmutabilityError("Allocations of posted landed-cost documents cannot be deleted")
+        return super().delete(*args, **kwargs)
+
+
+class LandedCostValuationAdjustmentQuerySet(models.QuerySet):
+    def update(self, **kwargs):
+        raise PostedImmutabilityError("Landed-cost valuation adjustments are immutable")
+
+    def bulk_update(self, objs, fields, batch_size=None):
+        raise PostedImmutabilityError("Landed-cost valuation adjustments are immutable")
+
+    def bulk_create(self, objs, **kwargs):
+        raise PostedImmutabilityError("Create valuation adjustments only through the posting service")
+
+    def delete(self):
+        raise PostedImmutabilityError("Landed-cost valuation adjustments cannot be deleted")
+
+
+class LandedCostValuationAdjustment(models.Model):
+    """Immutable posted reallocation of a late landed cost to its final destination.
+
+    The source invoice journal capitalizes the complete cost first. These
+    linked journals then reclassify the amount to COGS, another warehouse,
+    supplier-return claim, or returned inventory without rewriting history.
+    """
+    cost_document = models.ForeignKey(
+        LandedCostDocument, on_delete=models.PROTECT,
+        related_name="valuation_adjustments",
+    )
+    source_reference = models.CharField(max_length=200)
+    adjustment_type = models.CharField(max_length=40)
+    movement = models.ForeignKey(
+        "inventory.StockMovement", null=True, blank=True,
+        on_delete=models.PROTECT, related_name="landed_cost_valuation_adjustments",
+    )
+    amount_afn = models.DecimalField(max_digits=20, decimal_places=2)
+    journal_entry = models.OneToOneField(
+        "accounting.JournalEntry", on_delete=models.PROTECT,
+        related_name="landed_cost_valuation_adjustment",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    objects = LandedCostValuationAdjustmentQuerySet.as_manager()
+
+    class Meta:
+        ordering = ["cost_document_id", "id"]
+        constraints = [
+            models.CheckConstraint(condition=models.Q(amount_afn__gt=0), name="landed_cost_adjustment_afn_gt0"),
+            models.UniqueConstraint(
+                fields=["cost_document", "source_reference", "adjustment_type"],
+                name="uniq_lc_valuation_adjustment_ref",
+            ),
+        ]
+
+    def save(self, *args, **kwargs):
+        if self.pk is not None:
+            raise PostedImmutabilityError("Landed-cost valuation adjustments are immutable")
+        if self.cost_document_id and self.cost_document.status != LandedCostStatus.POSTED:
+            raise PostedImmutabilityError("Valuation adjustments require a posted landed-cost document")
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise PostedImmutabilityError("Landed-cost valuation adjustments cannot be deleted")

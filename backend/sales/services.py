@@ -221,10 +221,18 @@ def finalize_sale(*, sale, user=None, idempotency_key=None):
             # customer-owned goods still in transit.
             lot.status = TransitLotStatus.OPEN
             lot.save(allow_state_transition=True, update_fields={"remaining_quantity", "status"})
-            TransitSaleAllocation.objects.create(
+            transit_allocation = TransitSaleAllocation.objects.create(
                 sale_line=line, transit_lot=lot, quantity=line.quantity,
                 unit_cost=lot.unit_cost, cogs_journal=cogs_journal,
                 idempotency_key=f"sale:{sale.pk}:transit-allocation:{line.pk}",
+            )
+            # If a late landed-cost invoice was already posted, recognize this
+            # newly sold Transit quantity in COGS now (the earlier post could
+            # only adjust Transit sales that already existed at that time).
+            from purchases.landed_cost_posting import post_transit_sale_landed_cost_adjustments
+            post_transit_sale_landed_cost_adjustments(
+                lot=lot, sale_allocation=transit_allocation,
+                posting_date=sale.sale_date, user=actor,
             )
         sale.status = SaleStatus.FINALIZED
         sale.finalized_at = timezone.now()
