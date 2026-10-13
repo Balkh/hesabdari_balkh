@@ -27,6 +27,7 @@ from .models import (
     LandedCostStatus, Purchase, PurchaseLine, PurchaseStatus,
 )
 from .services import PurchaseValidationError, create_purchase, post_purchase, update_purchase, update_purchase_line
+from .landed_cost_services import LandedCostValidationError, create_landed_cost_draft
 
 
 class PurchaseFoundationTests(TestCase):
@@ -624,3 +625,105 @@ class PurchaseFoundationTests(TestCase):
             LandedCostAllocation.objects.filter(pk=allocation.pk).update(amount=Decimal("99.00"))
         with self.assertRaises(PostedImmutabilityError):
             allocation.delete()
+
+
+    def test_late_landed_cost_draft_allocates_direct_cost_and_preserves_history(self):
+        purchase = self._purchase(
+            currency=self.usd, rate="70", rate_date=self.day,
+            document_number="PI-LC-DRAFT-001",
+        )
+        post_purchase(purchase=purchase, user=self.user)
+        line = purchase.lines.get()
+        original_movement = StockMovement.objects.get(reference=f"{purchase.document_number}:LINE:{line.pk}")
+        original_journal_count = JournalEntry.objects.count()
+        cost = create_landed_cost_draft(
+            document_number="LC-DRAFT-001", payee=self.supplier, cost_date=self.day,
+            currency=self.usd, amount="25.00", exchange_rate="71.25",
+            rate_date=date(2026, 1, 14), category="FREIGHT",
+            description="Late carrier invoice", purchase_line_ids=[line.pk],
+            allocation_method=LandedCostAllocationMethod.DIRECT, user=self.user,
+            idempotency_key="lc-draft-direct-001",
+        )
+        allocation = cost.allocations.get()
+        self.assertEqual(cost.status, LandedCostStatus.DRAFT)
+        self.assertEqual(cost.afn_amount, Decimal("1781.25"))
+        self.assertEqual(allocation.amount, Decimal("25.00"))
+        self.assertEqual(allocation.afn_amount, Decimal("1781.25"))
+        self.assertEqual(allocation.method, LandedCostAllocationMethod.DIRECT)
+        self.assertEqual(JournalEntry.objects.count(), original_journal_count)
+        original_movement.refresh_from_db()
+        self.assertEqual(original_movement.unit_cost, Decimal("12.0000"))
+        self.assertEqual(original_movement.unit_cost_afn, Decimal("840.0000"))
+
+    def test_late_landed_cost_weight_allocation_reconciles_cents_and_afn(self):
+        purchase = self._purchase(
+            currency=self.usd, rate="70", rate_date=self.day,
+            document_number="PI-LC-WEIGHT-001",
+            lines=[
+                {"product": self.product, "quantity": 10, "unit_price": "10", "measured_weight_kg": "10"},
+                {"product": self.product2, "quantity": 10, "unit_price": "10", "measured_weight_kg": "20"},
+            ],
+        )
+        post_purchase(purchase=purchase, user=self.user)
+        lines = list(purchase.lines.order_by("id"))
+        cost = create_landed_cost_draft(
+            document_number="LC-WEIGHT-001", payee=self.supplier, cost_date=self.day,
+            currency=self.usd, amount="10.00", exchange_rate="70.0000",
+            rate_date=self.day, category="FREIGHT", purchase_line_ids=[l.pk for l in lines],
+            allocation_method=LandedCostAllocationMethod.WEIGHT, user=self.user,
+            idempotency_key="lc-draft-weight-001",
+        )
+        allocations = list(cost.allocations.order_by("id"))
+        self.assertEqual([row.amount for row in allocations], [Decimal("3.33"), Decimal("6.67")])
+        self.assertEqual(sum((row.amount for row in allocations), Decimal("0.00")), Decimal("10.00"))
+        self.assertEqual(sum((row.afn_amount for row in allocations), Decimal("0.00")), Decimal("700.00"))
+        self.assertEqual([row.measured_weight_kg for row in allocations], [Decimal("10.0000"), Decimal("20.0000")])
+
+    def test_late_landed_cost_rejects_missing_weight_and_draft_source_atomically(self):
+        draft = self._purchase(document_number="PI-LC-UNPOSTED-001")
+        with self.assertRaises(LandedCostValidationError):
+            create_landed_cost_draft(
+                document_number="LC-UNPOSTED-001", payee=self.supplier, cost_date=self.day,
+                currency=self.afn, amount="10.00", exchange_rate="1", rate_date=self.day,
+                category="FREIGHT", purchase_line_ids=[draft.lines.get().pk],
+                allocation_method=LandedCostAllocationMethod.DIRECT, user=self.user,
+                idempotency_key="lc-draft-unposted-001",
+            )
+        posted = self._purchase(
+            document_number="PI-LC-NOWEIGHT-001",
+            lines=[
+                {"product": self.product, "quantity": 10, "unit_price": "10"},
+                {"product": self.product2, "quantity": 10, "unit_price": "10"},
+            ],
+        )
+        post_purchase(purchase=posted, user=self.user)
+        before = JournalEntry.objects.count()
+        with self.assertRaises(LandedCostValidationError):
+            create_landed_cost_draft(
+                document_number="LC-NOWEIGHT-001", payee=self.supplier, cost_date=self.day,
+                currency=self.afn, amount="10.00", exchange_rate="1", rate_date=self.day,
+                category="FREIGHT", purchase_line_ids=list(posted.lines.values_list("pk", flat=True)),
+                allocation_method=LandedCostAllocationMethod.WEIGHT, user=self.user,
+                idempotency_key="lc-draft-no-weight-001",
+            )
+        self.assertFalse(LandedCostDocument.objects.filter(document_number="LC-NOWEIGHT-001").exists())
+        self.assertEqual(JournalEntry.objects.count(), before)
+
+    def test_late_landed_cost_idempotency_returns_exact_draft_and_rejects_changed_payload(self):
+        purchase = self._purchase(document_number="PI-LC-IDEM-001")
+        post_purchase(purchase=purchase, user=self.user)
+        line = purchase.lines.get()
+        args = dict(
+            document_number="LC-IDEM-001", payee=self.supplier, cost_date=self.day,
+            currency=self.afn, amount="10.00", exchange_rate="1", rate_date=self.day,
+            category="FREIGHT", purchase_line_ids=[line.pk],
+            allocation_method=LandedCostAllocationMethod.DIRECT, user=self.user,
+            idempotency_key="lc-draft-idempotency-001",
+        )
+        first = create_landed_cost_draft(**args)
+        retry = create_landed_cost_draft(**args)
+        self.assertEqual(first.pk, retry.pk)
+        args["amount"] = "11.00"
+        with self.assertRaises(LandedCostValidationError):
+            create_landed_cost_draft(**args)
+        self.assertEqual(LandedCostDocument.objects.filter(idempotency_key=args["idempotency_key"]).count(), 1)
