@@ -3,6 +3,8 @@
 Write serializers validate wire format only. All accounting, allocation,
 historical-rate and immutability rules remain in purchases.landed_cost_services.
 """
+from decimal import Decimal
+
 from rest_framework import serializers
 
 from .models import (
@@ -54,8 +56,8 @@ class LandedCostDraftCreateSerializer(serializers.Serializer):
     payee_id = serializers.IntegerField(required=True, min_value=1)
     cost_date = serializers.DateField(required=True)
     currency_id = serializers.IntegerField(required=True, min_value=1)
-    amount = serializers.DecimalField(required=True, max_digits=20, decimal_places=2, min_value="0.01")
-    exchange_rate = serializers.DecimalField(required=True, max_digits=20, decimal_places=4, min_value="0.0001")
+    amount = serializers.DecimalField(required=True, max_digits=20, decimal_places=2, min_value=Decimal("0.01"))
+    exchange_rate = serializers.DecimalField(required=True, max_digits=20, decimal_places=4, min_value=Decimal("0.0001"))
     rate_date = serializers.DateField(required=True)
     category = serializers.CharField(required=True, allow_blank=False, max_length=40)
     description = serializers.CharField(required=False, allow_blank=True, max_length=500, default="")
