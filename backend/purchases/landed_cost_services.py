@@ -200,8 +200,6 @@ def create_landed_cost_draft(
         "allocation_method": allocation_method, "weights": [str(w) for w in weights],
         "created_by_id": getattr(user, "pk", None),
     }
-    fingerprint = _fingerprint(payload)
-
     existing = LandedCostDocument.objects.select_for_update().filter(idempotency_key=idempotency_key).first()
     if existing is not None:
         old_allocations = list(existing.allocations.order_by("id").values_list(
