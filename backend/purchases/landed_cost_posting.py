@@ -14,7 +14,7 @@ from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
 
-from accounting.models import Account
+from accounting.models import Account, JournalEntry
 from accounting.services import post_journal
 from core.money import quantize_half_up
 from currencies.models import Currency
@@ -192,7 +192,9 @@ def _simulate_product(product_id, baseline_extra_costs, revised_extra_costs, ear
         product_id=product_id
     ).select_related("warehouse", "currency").order_by("movement_date", "id"))
     if not movements:
-        raise LandedCostPostingError(f"Product {product_id} has no stock movements.")
+        # A Transit lot may be sold or still owned entirely outside physical
+        # warehouses. Its asset/COGS split is reconciled by Transit events below.
+        return [], {}, {}, {}, {}, {}
     out_for_in, in_for_out = _transfer_pairs(movements)
     from sales.models import SalesReturn
 
@@ -512,6 +514,12 @@ def post_landed_cost(*, cost_document, user=None):
             if movement.movement_type == MovementType.SALES_ISSUE:
                 if not Account.objects.filter(code=COGS_ACCOUNT, is_active=True, is_posting=True).exists():
                     raise LandedCostPostingError("COGS account 5100 is unavailable.")
+                if not JournalEntry.objects.filter(
+                    source_type="SALES_COGS", source_id=movement.reference
+                ).exists():
+                    raise LandedCostPostingError(
+                        f"Sales issue {movement.reference} has no matching posted COGS journal."
+                    )
                 _post_adjustment(
                     document=document, adjustment_type="SALES_ISSUE",
                     reference=movement.reference, movement=movement,
