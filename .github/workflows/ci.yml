@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, phase/11-late-landed-cost-finalization]
   pull_request:
-    branches: [main]
+    branches: [main, phase/11-landed-cost-weight-allocation]
 
 jobs:
   backend:
