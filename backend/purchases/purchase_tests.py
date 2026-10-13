@@ -1427,7 +1427,9 @@ class PurchaseFoundationTests(TestCase):
         self.assertEqual(posted.allocations.get().amount, Decimal("10.00"))
         self.assertEqual(posted.allocations.get().afn_amount, Decimal("700.00"))
         self.assertEqual(
-            posted.journal_entry.lines.get(account__code="2110").party_attributions.get().party,
+            PartyLedgerAttribution.objects.get(
+                journal_line=posted.journal_entry.lines.get(account__code="2110")
+            ).party,
             self.supplier,
         )
 
