@@ -764,3 +764,57 @@ def effective_avco_for_product_warehouse(product, warehouse):
 def _lot_for_read(line):
     from goods_in_transit.models import GoodsInTransitLot
     return GoodsInTransitLot.objects.get(purchase_line=line)
+
+
+@transaction.atomic
+def post_transit_receipt_landed_cost_adjustments(*, lot, receipt, user=None):
+    """Reclass already-posted landed costs when Transit goods arrive later."""
+    if not receipt.company_quantity or receipt.stock_movement_id is None:
+        return []
+    created = []
+    for allocation in LandedCostAllocation.objects.filter(
+        purchase_line_id=lot.purchase_line_id,
+        cost_document__status=LandedCostStatus.POSTED,
+    ).select_related("cost_document").order_by("cost_document__cost_date", "id"):
+        per_unit = _q4(allocation.afn_amount / Decimal(lot.original_quantity))
+        amount = _q2(per_unit * Decimal(receipt.company_quantity))
+        if not amount:
+            continue
+        row = _post_adjustment(
+            document=allocation.cost_document,
+            adjustment_type="TRANSIT_RECEIPT",
+            reference=receipt.stock_movement.reference,
+            movement=receipt.stock_movement,
+            debit_account=resolve_warehouse_account(receipt.warehouse),
+            credit_account=_account(TRANSIT_ACCOUNT),
+            amount=amount, posting_day=receipt.receipt_date, actor=user,
+        )
+        if row is not None:
+            created.append(row)
+    return created
+
+
+@transaction.atomic
+def post_transit_sale_landed_cost_adjustments(*, lot, sale_allocation, posting_date, user=None):
+    """Recognize posted landed costs in COGS for a later Transit sale."""
+    created = []
+    for allocation in LandedCostAllocation.objects.filter(
+        purchase_line_id=lot.purchase_line_id,
+        cost_document__status=LandedCostStatus.POSTED,
+    ).select_related("cost_document").order_by("cost_document__cost_date", "id"):
+        per_unit = _q4(allocation.afn_amount / Decimal(lot.original_quantity))
+        amount = _q2(per_unit * Decimal(sale_allocation.quantity))
+        if not amount:
+            continue
+        row = _post_adjustment(
+            document=allocation.cost_document,
+            adjustment_type="TRANSIT_SALE",
+            reference=f"TRANSIT-SALE:{sale_allocation.sale_line_id}",
+            movement=None,
+            debit_account=_account(COGS_ACCOUNT),
+            credit_account=_account(TRANSIT_ACCOUNT),
+            amount=amount, posting_day=posting_date, actor=user,
+        )
+        if row is not None:
+            created.append(row)
+    return created
