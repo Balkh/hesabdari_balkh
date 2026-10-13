@@ -1,6 +1,6 @@
-# Phase 11 — Late Landed-Cost Finalization Contract (Draft)
+# Phase 11 — Late Landed-Cost Finalization Contract
 
-**Status:** Draft for implementation/evidence; not approved, not frozen.
+**Contract status:** User-approved for implementation. **Implementation status:** Incomplete; not frozen.
 **Base:** `phase/11-landed-cost-weight-allocation`
 **Work branch:** `phase/11-late-landed-cost-finalization`
 **Scope:** Costs received after a purchase receipt or goods-in-transit recognition, without editing posted purchase documents, journals, or stock movements.
