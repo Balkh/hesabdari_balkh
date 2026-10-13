@@ -727,3 +727,23 @@ class PurchaseFoundationTests(TestCase):
         with self.assertRaises(LandedCostValidationError):
             create_landed_cost_draft(**args)
         self.assertEqual(LandedCostDocument.objects.filter(idempotency_key=args["idempotency_key"]).count(), 1)
+
+
+    def test_late_landed_cost_rejects_cost_date_before_source_purchase_atomically(self):
+        purchase = self._purchase(
+            document_number="PI-LC-BEFORE-COST-001",
+        )
+        post_purchase(purchase=purchase, user=self.user)
+        line = purchase.lines.get()
+        before_documents = LandedCostDocument.objects.count()
+        before_journals = JournalEntry.objects.count()
+        with self.assertRaises(LandedCostValidationError):
+            create_landed_cost_draft(
+                document_number="LC-BEFORE-COST-001", payee=self.supplier,
+                cost_date=date(2025, 12, 31), currency=self.afn, amount="10.00",
+                exchange_rate="1", rate_date=date(2025, 12, 31), category="FREIGHT",
+                purchase_line_ids=[line.pk], allocation_method=LandedCostAllocationMethod.DIRECT,
+                user=self.user, idempotency_key="lc-before-cost-001",
+            )
+        self.assertEqual(LandedCostDocument.objects.count(), before_documents)
+        self.assertEqual(JournalEntry.objects.count(), before_journals)
