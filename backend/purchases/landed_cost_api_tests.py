@@ -12,7 +12,7 @@ from currencies.models import Currency
 from inventory.models import WarehouseInventoryAccount
 from parties.services import create_party
 from products.services import create_product
-from purchases.models import LandedCostDocument, LandedCostStatus
+from purchases.models import LandedCostDocument, LandedCostReversal, LandedCostStatus
 from purchases.services import create_purchase, post_purchase
 from uom.services import create_uom
 from warehouses.services import create_warehouse
@@ -111,3 +111,41 @@ class LandedCostApiTests(TestCase):
         )
         self.assertEqual(bad.status_code, 400)
         self.assertEqual(LandedCostDocument.objects.count(), 0)
+
+
+    def test_api_reverses_posted_landed_cost_with_compensating_journal(self):
+        created = self.client.post(self.COLLECTION, self._payload(), format="json")
+        self.assertEqual(created.status_code, 201, created.content)
+        document_id = created.json()["id"]
+        posted = self.client.post(f"{self.COLLECTION}{document_id}/post/", {}, format="json")
+        self.assertEqual(posted.status_code, 200, posted.content)
+        self.assertFalse(posted.json()["is_reversed"])
+
+        payload = {
+            "reversal_date": self.day.isoformat(),
+            "reason": "Carrier cancelled the freight invoice",
+            "idempotency_key": "lc-api-reversal-001",
+        }
+        reversed_response = self.client.post(
+            f"{self.COLLECTION}{document_id}/reverse/", payload, format="json",
+        )
+        self.assertEqual(reversed_response.status_code, 201, reversed_response.content)
+        reversal_body = reversed_response.json()
+        self.assertEqual(reversal_body["cost_document_id"], document_id)
+        self.assertEqual(reversal_body["adjustment_reversal_count"], 0)
+        self.assertTrue(reversal_body["journal_entry_id"])
+        self.assertEqual(LandedCostReversal.objects.count(), 1)
+
+        detail = self.client.get(f"{self.COLLECTION}{document_id}/")
+        self.assertEqual(detail.status_code, 200)
+        self.assertTrue(detail.json()["is_reversed"])
+        self.assertEqual(detail.json()["reversal_date"], self.day.isoformat())
+        self.assertEqual(detail.json()["status"], LandedCostStatus.POSTED)
+
+        retry = self.client.post(
+            f"{self.COLLECTION}{document_id}/reverse/", payload, format="json",
+        )
+        self.assertEqual(retry.status_code, 200, retry.content)
+        self.assertEqual(retry.json()["id"], reversal_body["id"])
+        repost = self.client.post(f"{self.COLLECTION}{document_id}/post/", {}, format="json")
+        self.assertEqual(repost.status_code, 400)
