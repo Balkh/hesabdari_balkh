@@ -14,7 +14,9 @@ from django.db import transaction
 
 from core.money import fx_equivalent, normalize_rate, quantize_half_up, to_decimal
 from inventory.models import MovementType, StockMovement
-from purchases.models import (
+from security.models import AuditAction
+from security.services import record_audit_event
+from .models import (
     LandedCostAllocation,
     LandedCostAllocationMethod,
     LandedCostDocument,
@@ -143,8 +145,10 @@ def create_landed_cost_draft(
         raise LandedCostValidationError("An active transaction currency is required.")
     if currency.is_base and rate_value != Decimal("1.0000"):
         raise LandedCostValidationError("Base-currency landed costs must use rate 1.0000.")
-    if not currency.is_base and fx_day is None:
-        raise LandedCostValidationError("A historical rate date is required for foreign currency.")
+    if fx_day > day:
+        raise LandedCostValidationError("Historical rate date cannot be after the cost date.")
+    if payee is None or not getattr(payee, "is_supplier", False) or not getattr(payee, "is_active", False):
+        raise LandedCostValidationError("The payee must be an active supplier/creditor party.")
     afn_total = amount_value if currency.is_base else fx_equivalent(amount_value, rate_value)
 
     try:
@@ -220,7 +224,7 @@ def create_landed_cost_draft(
             and existing.category == payload["category"]
             and existing.description == payload["description"]
         )
-        if existing.status == LandedCostStatus.DRAFT and same_header and old_allocations == expected_allocations:
+        if same_header and old_allocations == expected_allocations:
             return existing
         raise LandedCostValidationError("Idempotency key was already used for a different landed-cost request.")
 
@@ -243,4 +247,32 @@ def create_landed_cost_draft(
         )
         for index, line in enumerate(lines)
     ])
+    record_audit_event(
+        user=user, action=AuditAction.CREATE, entity="LandedCostDocument",
+        entity_id=document.pk, reference=document.document_number,
+        previous_state=None,
+        new_state={
+            "document_number": document.document_number,
+            "payee_id": document.payee_id,
+            "cost_date": document.cost_date.isoformat(),
+            "currency": document.currency.code,
+            "amount": str(document.amount),
+            "exchange_rate": str(document.exchange_rate),
+            "rate_date": document.rate_date.isoformat(),
+            "afn_amount": str(document.afn_amount),
+            "category": document.category,
+            "status": document.status,
+            "allocations": [
+                {
+                    "purchase_line_id": row.purchase_line_id,
+                    "method": row.method,
+                    "amount": str(row.amount),
+                    "afn_amount": str(row.afn_amount),
+                    "measured_weight_kg": str(row.measured_weight_kg) if row.measured_weight_kg is not None else None,
+                }
+                for row in document.allocations.order_by("id")
+            ],
+        },
+        reason="",
+    )
     return document
