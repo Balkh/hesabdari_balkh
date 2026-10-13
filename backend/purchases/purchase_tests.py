@@ -1457,3 +1457,127 @@ class PurchaseFoundationTests(TestCase):
         self.assertIsNone(cost.journal_entry_id)
         self.assertEqual(cost.valuation_adjustments.count(), 0)
         self.assertEqual(JournalEntry.objects.count(), before_journals)
+
+
+    def test_late_landed_cost_reallocates_resolved_negative_stock_cogs(self):
+        from purchases.landed_cost_services import post_landed_cost
+        from sales.models import COGSAdjustment, NegativeCOGSObligation, NegativeCOGSReceiptAllocation
+        from sales.services import (
+            create_sale, finalize_sale, finalize_warehouse_check, prepare_warehouse_check,
+        )
+
+        sale = create_sale(
+            customer=self.customer, sale_date=self.day, currency=self.afn,
+            channel="WHOLESALE", payment_mode="CREDIT",
+            lines=[{
+                "product": self.product, "unit": self.product.primary_uom,
+                "quantity": 10, "unit_price": "20.00",
+            }],
+            user=self.user, document_number="SI-LC-NEGATIVE-001",
+        )
+        finalize_sale(sale=sale, user=self.user)
+        check = prepare_warehouse_check(
+            sale_line=sale.lines.get(), warehouse=self.warehouse, quantity=10,
+            number="WC-LC-NEGATIVE-001",
+        )
+        finalize_warehouse_check(
+            check=check, user=self.user, acknowledge_negative=True,
+            temporary_unit_cost="10.00",
+        )
+        obligation = NegativeCOGSObligation.objects.get(movement__reference=check.number)
+        self.assertEqual(obligation.resolved_quantity, 0)
+
+        purchase = self._purchase(
+            document_number="PI-LC-NEGATIVE-001",
+            lines=[{"product": self.product, "quantity": 10, "unit_price": "12.00"}],
+        )
+        post_purchase(purchase=purchase, user=self.user)
+        receipt = StockMovement.objects.get(
+            reference=f"{purchase.document_number}:LINE:{purchase.lines.get().pk}",
+            movement_type=MovementType.PURCHASE_RECEIPT,
+        )
+        obligation.refresh_from_db()
+        self.assertEqual(obligation.resolved_quantity, 10)
+        receipt_link = NegativeCOGSReceiptAllocation.objects.get(
+            obligation=obligation, receipt_movement=receipt,
+        )
+        self.assertEqual(receipt_link.quantity, 10)
+        self.assertEqual(COGSAdjustment.objects.get(obligation=obligation).difference, Decimal("20.00"))
+
+        cost = create_landed_cost_draft(
+            document_number="LC-NEGATIVE-001", payee=self.supplier,
+            cost_date=self.day, currency=self.afn, amount="10.00",
+            exchange_rate="1", rate_date=self.day, category="FREIGHT",
+            purchase_line_ids=[purchase.lines.get().pk],
+            allocation_method=LandedCostAllocationMethod.DIRECT,
+            user=self.user, idempotency_key="lc-negative-001",
+        )
+        posted = post_landed_cost(cost_document=cost, user=self.user)
+        adjustment = posted.valuation_adjustments.get(
+            adjustment_type="NEGATIVE_COGS_OBLIGATION",
+            movement=obligation.movement,
+        )
+        self.assertEqual(adjustment.amount_afn, Decimal("10.00"))
+        self.assertEqual(adjustment.journal_entry.lines.get(account__code="5100").debit, Decimal("10.00"))
+        self.assertEqual(adjustment.journal_entry.lines.get(account__code="1410").credit, Decimal("10.00"))
+        self.assertEqual(stock_for(self.product, self.warehouse), 0)
+        self.assertEqual(receipt.unit_cost_afn, Decimal("12.0000"))
+
+    def test_exact_cost_match_still_traces_negative_stock_for_future_landed_cost(self):
+        from purchases.landed_cost_services import post_landed_cost
+        from sales.models import COGSAdjustment, NegativeCOGSObligation, NegativeCOGSReceiptAllocation
+        from sales.services import (
+            create_sale, finalize_sale, finalize_warehouse_check, prepare_warehouse_check,
+        )
+
+        sale = create_sale(
+            customer=self.customer, sale_date=self.day, currency=self.afn,
+            channel="WHOLESALE", payment_mode="CREDIT",
+            lines=[{
+                "product": self.product, "unit": self.product.primary_uom,
+                "quantity": 10, "unit_price": "20.00",
+            }],
+            user=self.user, document_number="SI-LC-NEGATIVE-EXACT-001",
+        )
+        finalize_sale(sale=sale, user=self.user)
+        check = prepare_warehouse_check(
+            sale_line=sale.lines.get(), warehouse=self.warehouse, quantity=10,
+            number="WC-LC-NEGATIVE-EXACT-001",
+        )
+        finalize_warehouse_check(
+            check=check, user=self.user, acknowledge_negative=True,
+            temporary_unit_cost="12.00",
+        )
+        obligation = NegativeCOGSObligation.objects.get(movement__reference=check.number)
+        purchase = self._purchase(
+            document_number="PI-LC-NEGATIVE-EXACT-001",
+            lines=[{"product": self.product, "quantity": 10, "unit_price": "12.00"}],
+        )
+        post_purchase(purchase=purchase, user=self.user)
+        receipt = StockMovement.objects.get(
+            reference=f"{purchase.document_number}:LINE:{purchase.lines.get().pk}",
+            movement_type=MovementType.PURCHASE_RECEIPT,
+        )
+        self.assertFalse(COGSAdjustment.objects.filter(obligation=obligation).exists())
+        self.assertEqual(
+            NegativeCOGSReceiptAllocation.objects.get(
+                obligation=obligation, receipt_movement=receipt,
+            ).quantity,
+            10,
+        )
+
+        cost = create_landed_cost_draft(
+            document_number="LC-NEGATIVE-EXACT-001", payee=self.supplier,
+            cost_date=self.day, currency=self.afn, amount="10.00",
+            exchange_rate="1", rate_date=self.day, category="FREIGHT",
+            purchase_line_ids=[purchase.lines.get().pk],
+            allocation_method=LandedCostAllocationMethod.DIRECT,
+            user=self.user, idempotency_key="lc-negative-exact-001",
+        )
+        posted = post_landed_cost(cost_document=cost, user=self.user)
+        adjustment = posted.valuation_adjustments.get(
+            adjustment_type="NEGATIVE_COGS_OBLIGATION",
+            movement=obligation.movement,
+        )
+        self.assertEqual(adjustment.amount_afn, Decimal("10.00"))
+        self.assertEqual(stock_for(self.product, self.warehouse), 0)
