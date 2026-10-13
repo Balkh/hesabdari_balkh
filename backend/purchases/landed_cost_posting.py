@@ -890,26 +890,52 @@ def post_transit_receipt_landed_cost_adjustments(*, lot, receipt, user=None):
     """Reclass already-posted landed costs when Transit goods arrive later."""
     if not receipt.company_quantity or receipt.stock_movement_id is None:
         return []
+    from sales.models import NegativeCOGSReceiptAllocation
+
     created = []
+    links = list(NegativeCOGSReceiptAllocation.objects.filter(
+        receipt_movement_id=receipt.stock_movement_id
+    ).select_related("obligation", "obligation__movement").order_by("id"))
+    consumed_quantity = sum(link.quantity for link in links)
+    if consumed_quantity > receipt.company_quantity:
+        raise LandedCostPostingError(
+            f"Transit receipt {receipt.stock_movement.reference} resolves more negative stock than its company quantity."
+        )
+    remaining_company_quantity = receipt.company_quantity - consumed_quantity
     for allocation in LandedCostAllocation.objects.filter(
         purchase_line_id=lot.purchase_line_id,
         cost_document__status=LandedCostStatus.POSTED,
     ).select_related("cost_document").order_by("cost_document__cost_date", "id"):
         per_unit = _q4(allocation.afn_amount / Decimal(lot.original_quantity))
-        amount = _q2(per_unit * Decimal(receipt.company_quantity))
-        if not amount:
-            continue
-        row = _post_adjustment(
-            document=allocation.cost_document,
-            adjustment_type="TRANSIT_RECEIPT",
-            reference=receipt.stock_movement.reference,
-            movement=receipt.stock_movement,
-            debit_account=resolve_warehouse_account(receipt.warehouse),
-            credit_account=_account(TRANSIT_ACCOUNT),
-            amount=amount, posting_day=receipt.receipt_date, actor=user,
-        )
-        if row is not None:
-            created.append(row)
+        amount = _q2(per_unit * Decimal(remaining_company_quantity))
+        if amount:
+            row = _post_adjustment(
+                document=allocation.cost_document,
+                adjustment_type="TRANSIT_RECEIPT",
+                reference=receipt.stock_movement.reference,
+                movement=receipt.stock_movement,
+                debit_account=resolve_warehouse_account(receipt.warehouse),
+                credit_account=_account(TRANSIT_ACCOUNT),
+                amount=amount, posting_day=receipt.receipt_date, actor=user,
+            )
+            if row is not None:
+                created.append(row)
+        for link in links:
+            negative_amount = _q2(per_unit * Decimal(link.quantity))
+            if not negative_amount:
+                continue
+            reference = f"{link.obligation.movement.reference}:NEGATIVE-RECEIPT:{receipt.stock_movement_id}"
+            row = _post_adjustment(
+                document=allocation.cost_document,
+                adjustment_type="NEGATIVE_COGS_OBLIGATION",
+                reference=reference,
+                movement=link.obligation.movement,
+                debit_account=_account(COGS_ACCOUNT),
+                credit_account=_account(TRANSIT_ACCOUNT),
+                amount=negative_amount, posting_day=receipt.receipt_date, actor=user,
+            )
+            if row is not None:
+                created.append(row)
     return created
 
 
