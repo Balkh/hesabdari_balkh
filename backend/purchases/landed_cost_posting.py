@@ -28,7 +28,7 @@ from security.services import record_audit_event
 
 from .models import (
     LandedCostAllocation, LandedCostDocument, LandedCostStatus,
-    LandedCostValuationAdjustment, PurchaseReturn,
+    LandedCostValuationAdjustment, PurchaseLine, PurchaseReturn,
 )
 
 
