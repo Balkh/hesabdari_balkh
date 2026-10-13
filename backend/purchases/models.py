@@ -481,6 +481,14 @@ class LandedCostAllocation(models.Model):
         return super().delete(*args, **kwargs)
 
 
+class LandedCostValuationAdjustmentQuerySet(models.QuerySet):
+    def update(self, **kwargs):
+        raise PostedImmutabilityError("Landed-cost valuation adjustments are immutable")
+
+    def delete(self):
+        raise PostedImmutabilityError("Landed-cost valuation adjustments cannot be deleted")
+
+
 class LandedCostValuationAdjustment(models.Model):
     """Immutable posted reallocation of a late landed cost to its final destination.
 
@@ -504,6 +512,8 @@ class LandedCostValuationAdjustment(models.Model):
         related_name="landed_cost_valuation_adjustment",
     )
     created_at = models.DateTimeField(auto_now_add=True)
+
+    objects = LandedCostValuationAdjustmentQuerySet.as_manager()
 
     class Meta:
         ordering = ["cost_document_id", "id"]
