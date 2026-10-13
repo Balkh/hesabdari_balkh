@@ -1541,7 +1541,7 @@ class PurchaseFoundationTests(TestCase):
         finalize_sale(sale=sale, user=self.user)
         check = prepare_warehouse_check(
             sale_line=sale.lines.get(), warehouse=self.warehouse, quantity=10,
-            number="WC-LC-NEGATIVE-EXACT-001",
+            number="WC-NEG-EXACT",
         )
         finalize_warehouse_check(
             check=check, user=self.user, acknowledge_negative=True,
@@ -1603,7 +1603,7 @@ class PurchaseFoundationTests(TestCase):
         finalize_sale(sale=sale, user=self.user)
         check = prepare_warehouse_check(
             sale_line=sale.lines.get(), warehouse=self.warehouse, quantity=10,
-            number="WC-LC-TRANSIT-NEGATIVE-001",
+            number="WC-TR-NEG",
         )
         finalize_warehouse_check(
             check=check, user=self.user, acknowledge_negative=True,
