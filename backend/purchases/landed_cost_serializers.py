@@ -66,6 +66,6 @@ class LandedCostDraftCreateSerializer(serializers.Serializer):
     )
     allocation_method = serializers.ChoiceField(
         choices=LandedCostAllocationMethod.choices,
-        required=True, default=LandedCostAllocationMethod.DIRECT,
+        required=True,
     )
     idempotency_key = serializers.CharField(required=True, allow_blank=False, max_length=128)
