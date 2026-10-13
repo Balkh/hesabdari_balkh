@@ -1008,3 +1008,21 @@ class PurchaseFoundationTests(TestCase):
         self.assertIsNone(cost.journal_entry_id)
         self.assertEqual(JournalEntry.objects.count(), before_journals)
         self.assertEqual(cost.valuation_adjustments.count(), 0)
+
+
+    def test_insurance_is_rejected_by_landed_cost_contract(self):
+        purchase = self._purchase(document_number="PI-LC-NO-INSURANCE-001")
+        post_purchase(purchase=purchase, user=self.user)
+        before_documents = LandedCostDocument.objects.count()
+        before_journals = JournalEntry.objects.count()
+        with self.assertRaises(LandedCostValidationError):
+            create_landed_cost_draft(
+                document_number="LC-NO-INSURANCE-001", payee=self.supplier,
+                cost_date=self.day, currency=self.afn, amount="10.00",
+                exchange_rate="1", rate_date=self.day, category="Cargo Insurance",
+                purchase_line_ids=[purchase.lines.get().pk],
+                allocation_method=LandedCostAllocationMethod.DIRECT, user=self.user,
+                idempotency_key="lc-no-insurance-001",
+            )
+        self.assertEqual(LandedCostDocument.objects.count(), before_documents)
+        self.assertEqual(JournalEntry.objects.count(), before_journals)
