@@ -818,3 +818,32 @@ def post_transit_sale_landed_cost_adjustments(*, lot, sale_allocation, posting_d
         if row is not None:
             created.append(row)
     return created
+
+
+@transaction.atomic
+def post_transit_sales_return_landed_cost_adjustments(*, lot, sales_return, user=None):
+    """Reverse the landed-cost COGS portion when Transit-sold goods are returned."""
+    movement = sales_return.return_movement
+    if movement is None:
+        return []
+    created = []
+    for allocation in LandedCostAllocation.objects.filter(
+        purchase_line_id=lot.purchase_line_id,
+        cost_document__status=LandedCostStatus.POSTED,
+    ).select_related("cost_document").order_by("cost_document__cost_date", "id"):
+        per_unit = _q4(allocation.afn_amount / Decimal(lot.original_quantity))
+        amount = _q2(per_unit * Decimal(sales_return.quantity))
+        if not amount:
+            continue
+        row = _post_adjustment(
+            document=allocation.cost_document,
+            adjustment_type="SALES_RETURN",
+            reference=movement.reference,
+            movement=movement,
+            debit_account=resolve_warehouse_account(sales_return.warehouse),
+            credit_account=_account(COGS_ACCOUNT),
+            amount=amount, posting_day=sales_return.return_date, actor=user,
+        )
+        if row is not None:
+            created.append(row)
+    return created
