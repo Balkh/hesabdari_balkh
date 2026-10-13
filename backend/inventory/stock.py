@@ -39,7 +39,18 @@ def stock_for(product, warehouse):
 
 
 def avco_for(product, warehouse):
-    """4dp AVCO in AFN, or None when there is no known cost basis."""
+    """4dp AVCO in AFN, including posted late landed-cost valuation layers."""
+    # Landed costs are immutable overlays on the movement history. Once a
+    # landed-cost document is posted, the same chronological replay used by
+    # its posting service must drive future issue/transfer costs as well.
+    from purchases.landed_cost_posting import effective_avco_for_product_warehouse
+
+    has_landed_cost, effective_average = effective_avco_for_product_warehouse(
+        product, warehouse
+    )
+    if has_landed_cost:
+        return effective_average
+
     quantity = 0
     cost = Decimal("0")
     legs = movements_for(product, warehouse).values(
