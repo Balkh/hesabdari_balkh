@@ -6,8 +6,8 @@ immutable. This service replays the existing AVCO rule with a virtual cost
 layer, then posts compensating AFN journals for downstream sales, returns,
 transfers and Transit receipts/sales. Unknown/ambiguous flows fail closed.
 """
+from collections import hashlib
 from collections import defaultdict
-from datetime import date
 from decimal import Decimal
 
 from django.db import transaction
