@@ -1150,3 +1150,310 @@ class PurchaseFoundationTests(TestCase):
             returned.journal_entry.lines.get(account__code="2110").debit,
             Decimal("24.00"),
         )
+
+
+    def test_late_cost_isolated_to_explicit_receipt_when_product_has_multiple_receipts(self):
+        from purchases.landed_cost_services import post_landed_cost
+
+        first = self._purchase(document_number="PI-LC-MULTI-RECEIPT-A")
+        post_purchase(purchase=first, user=self.user)
+        first_line = first.lines.get()
+
+        second = self._purchase(
+            document_number="PI-LC-MULTI-RECEIPT-B",
+            lines=[{"product": self.product, "quantity": 10, "unit_price": "20.00"}],
+        )
+        post_purchase(purchase=second, user=self.user)
+        second_line = second.lines.get()
+
+        cost = create_landed_cost_draft(
+            document_number="LC-MULTI-RECEIPT-A", payee=self.supplier,
+            cost_date=self.day, currency=self.afn, amount="10.00",
+            exchange_rate="1", rate_date=self.day, category="FREIGHT",
+            purchase_line_ids=[first_line.pk],
+            allocation_method=LandedCostAllocationMethod.DIRECT,
+            user=self.user, idempotency_key="lc-multi-receipt-a",
+        )
+        posted = post_landed_cost(cost_document=cost, user=self.user)
+
+        self.assertEqual(list(posted.allocations.values_list("purchase_line_id", flat=True)), [first_line.pk])
+        self.assertNotEqual(first_line.pk, second_line.pk)
+        self.assertEqual(posted.allocations.get().afn_amount, Decimal("10.00"))
+        # Chronological AVCO applies the extra AFN 1/unit to receipt A before
+        # receipt B enters the same product/warehouse pool: (130 + 200) / 20.
+        self.assertEqual(avco_for(self.product, self.warehouse), Decimal("16.5000"))
+        self.assertEqual(stock_for(self.product, self.warehouse), 20)
+
+    def test_late_cost_after_sales_return_reallocates_net_cogs_and_inventory(self):
+        from purchases.landed_cost_services import post_landed_cost
+        from sales.returns_services import create_sales_return
+        from sales.services import (
+            create_sale, finalize_sale, finalize_warehouse_check, prepare_warehouse_check,
+        )
+
+        purchase = self._purchase(document_number="PI-LC-SALES-RETURN-001")
+        post_purchase(purchase=purchase, user=self.user)
+        line = purchase.lines.get()
+
+        sale = create_sale(
+            customer=self.customer, sale_date=self.day, currency=self.afn,
+            channel="WHOLESALE", payment_mode="CREDIT",
+            lines=[{
+                "product": self.product, "unit": self.product.primary_uom,
+                "quantity": 4, "unit_price": "20.00",
+            }],
+            user=self.user, document_number="SI-LC-SALES-RETURN-001",
+        )
+        finalize_sale(sale=sale, user=self.user)
+        sale_line = sale.lines.get()
+        check = prepare_warehouse_check(
+            sale_line=sale_line, warehouse=self.warehouse, quantity=4,
+            number="WC-LC-SALES-RETURN-001",
+        )
+        finalize_warehouse_check(check=check)
+
+        returned = create_sales_return(
+            sale_line=sale_line, warehouse=self.warehouse, quantity=2,
+            return_date=self.day, reason="Two units returned before freight invoice",
+            user=self.user, document_number="SR-LC-SALES-RETURN-001",
+            idempotency_key="sr-lc-sales-return-001",
+        )
+        source_issue = StockMovement.objects.get(reference="WC-LC-SALES-RETURN-001", movement_type=MovementType.SALES_ISSUE)
+        original_return_cogs = returned.cogs_journal.lines.get(account__code="5100").credit
+
+        cost = create_landed_cost_draft(
+            document_number="LC-SALES-RETURN-001", payee=self.supplier,
+            cost_date=self.day, currency=self.afn, amount="10.00",
+            exchange_rate="1", rate_date=self.day, category="FREIGHT",
+            purchase_line_ids=[line.pk],
+            allocation_method=LandedCostAllocationMethod.DIRECT,
+            user=self.user, idempotency_key="lc-sales-return-001",
+        )
+        posted = post_landed_cost(cost_document=cost, user=self.user)
+
+        issue_adjustment = posted.valuation_adjustments.get(
+            adjustment_type="SALES_ISSUE", movement=source_issue,
+        )
+        return_adjustment = posted.valuation_adjustments.get(
+            adjustment_type="SALES_RETURN",
+            movement=returned.inventory_return.return_movement,
+        )
+        self.assertEqual(issue_adjustment.amount_afn, Decimal("4.00"))
+        self.assertEqual(return_adjustment.amount_afn, Decimal("2.00"))
+        self.assertEqual(issue_adjustment.journal_entry.lines.get(account__code="5100").debit, Decimal("4.00"))
+        self.assertEqual(return_adjustment.journal_entry.lines.get(account__code="5100").credit, Decimal("2.00"))
+        self.assertEqual(original_return_cogs, Decimal("24.00"))
+        self.assertEqual(stock_for(self.product, self.warehouse), 8)
+        self.assertEqual(avco_for(self.product, self.warehouse), Decimal("13.0000"))
+
+    def test_late_cost_posting_in_closed_period_is_atomic(self):
+        from purchases.landed_cost_services import post_landed_cost
+
+        purchase = self._purchase(document_number="PI-LC-CLOSED-001")
+        post_purchase(purchase=purchase, user=self.user)
+        period = create_period(
+            name="Closed Landed Cost Period", start_date=self.day,
+            end_date=self.day, user=self.user,
+        )
+        close_period(period, user=self.user, reason="Phase 11 closed-period evidence")
+        cost = create_landed_cost_draft(
+            document_number="LC-CLOSED-001", payee=self.supplier,
+            cost_date=self.day, currency=self.afn, amount="10.00",
+            exchange_rate="1", rate_date=self.day, category="FREIGHT",
+            purchase_line_ids=[purchase.lines.get().pk],
+            allocation_method=LandedCostAllocationMethod.DIRECT,
+            user=self.user, idempotency_key="lc-closed-001",
+        )
+        before_journals = JournalEntry.objects.count()
+        with self.assertRaises(PeriodValidationError):
+            post_landed_cost(cost_document=cost, user=self.user)
+
+        cost.refresh_from_db()
+        self.assertEqual(cost.status, LandedCostStatus.DRAFT)
+        self.assertIsNone(cost.journal_entry_id)
+        self.assertEqual(cost.valuation_adjustments.count(), 0)
+        self.assertEqual(JournalEntry.objects.count(), before_journals)
+
+
+    def test_late_cost_after_entire_receipt_was_sold_reclassifies_all_cost_to_cogs(self):
+        from accounting.models import Account
+        from accounting.services import post_journal
+        from inventory.services import issue_stock
+        from purchases.landed_cost_services import post_landed_cost
+
+        purchase = self._purchase(document_number="PI-LC-FULLY-SOLD-001")
+        post_purchase(purchase=purchase, user=self.user)
+        line = purchase.lines.get()
+        issue = issue_stock(
+            product=self.product, warehouse=self.warehouse, quantity=10,
+            movement_date=self.day, reference="ISSUE-LC-FULLY-SOLD-001",
+            description="Entire source receipt consumed before late freight",
+            user=self.user, party=self.customer, idempotency_key="issue-lc-fully-sold-001",
+        )
+        original_cogs = post_journal(
+            number="JE-LC-FULLY-SOLD-COGS", posting_date=self.day,
+            description="Original COGS for fully consumed receipt",
+            lines=[
+                {"account": Account.objects.get(code="5100"), "debit": Decimal("120.00"), "reference": issue.reference},
+                {"account": Account.objects.get(code="1410"), "credit": Decimal("120.00"), "reference": issue.reference},
+            ],
+            source_type="SALES_COGS", source_id=issue.reference, currency=self.afn,
+            rate=Decimal("1.0000"), rate_date=self.day, created_by=self.user,
+            idempotency_key="je-lc-fully-sold-cogs",
+        )
+        cost = create_landed_cost_draft(
+            document_number="LC-FULLY-SOLD-001", payee=self.supplier,
+            cost_date=self.day, currency=self.afn, amount="10.00",
+            exchange_rate="1", rate_date=self.day, category="FREIGHT",
+            purchase_line_ids=[line.pk],
+            allocation_method=LandedCostAllocationMethod.DIRECT,
+            user=self.user, idempotency_key="lc-fully-sold-001",
+        )
+        posted = post_landed_cost(cost_document=cost, user=self.user)
+        adjustment = posted.valuation_adjustments.get(
+            adjustment_type="SALES_ISSUE", movement=issue,
+        )
+        self.assertEqual(adjustment.amount_afn, Decimal("10.00"))
+        self.assertEqual(adjustment.journal_entry.lines.get(account__code="5100").debit, Decimal("10.00"))
+        self.assertEqual(stock_for(self.product, self.warehouse), 0)
+        original_cogs.refresh_from_db()
+        self.assertEqual(original_cogs.lines.get(account__code="5100").debit, Decimal("120.00"))
+        self.assertEqual(issue.unit_cost_afn, Decimal("12.0000"))
+
+    def test_late_cost_after_transit_sale_return_reconciles_transit_inventory_and_cogs(self):
+        from goods_in_transit.models import GoodsInTransitLot
+        from goods_in_transit.services import receive_transit
+        from purchases.landed_cost_services import post_landed_cost
+        from sales.returns_services import create_sales_return
+        from sales.services import (
+            create_sale, finalize_sale, finalize_warehouse_check, prepare_warehouse_check,
+        )
+
+        purchase = self._purchase(
+            document_number="PI-LC-TRANSIT-RETURN-001", delivery_mode="IN_TRANSIT",
+        )
+        post_purchase(purchase=purchase, user=self.user)
+        line = purchase.lines.get()
+        lot = GoodsInTransitLot.objects.get(purchase_line=line)
+        sale = create_sale(
+            customer=self.customer, sale_date=self.day, currency=self.afn,
+            channel="WHOLESALE", payment_mode="CREDIT",
+            lines=[{
+                "product": self.product, "unit": self.product.primary_uom,
+                "quantity": 3, "unit_price": "20.00", "transit_lot": lot,
+            }],
+            user=self.user, document_number="SI-LC-TRANSIT-RETURN-001",
+        )
+        finalize_sale(sale=sale, user=self.user)
+        sale_line = sale.lines.get()
+        # The shipment arrives with 7 company-owned units and 3 units already
+        # owned by the customer; the receipt places customer custody at this warehouse.
+        transit_receipt = receive_transit(
+            lot=lot, quantity=10, receipt_date=self.day, user=self.user,
+            idempotency_key="tr-lc-transit-return-receipt",
+        )
+        check = prepare_warehouse_check(
+            sale_line=sale_line, warehouse=self.warehouse, quantity=3,
+            number="WC-LC-TRANSIT-RETURN-001",
+        )
+        finalize_warehouse_check(check=check, user=self.user)
+        returned = create_sales_return(
+            sale_line=sale_line, warehouse=self.warehouse, quantity=1,
+            return_date=self.day, reason="Transit goods physically returned",
+            user=self.user, document_number="SR-LC-TRANSIT-RETURN-001",
+            idempotency_key="sr-lc-transit-return-001",
+        )
+
+        cost = create_landed_cost_draft(
+            document_number="LC-TRANSIT-RETURN-001", payee=self.supplier,
+            cost_date=self.day, currency=self.afn, amount="10.00",
+            exchange_rate="1", rate_date=self.day, category="FREIGHT",
+            purchase_line_ids=[line.pk],
+            allocation_method=LandedCostAllocationMethod.DIRECT,
+            user=self.user, idempotency_key="lc-transit-return-001",
+        )
+        posted = post_landed_cost(cost_document=cost, user=self.user)
+        sale_adjustment = posted.valuation_adjustments.get(
+            adjustment_type="TRANSIT_SALE",
+            source_reference=f"TRANSIT-SALE:{sale_line.pk}",
+        )
+        return_adjustment = posted.valuation_adjustments.get(
+            adjustment_type="SALES_RETURN",
+            movement=returned.return_movement,
+        )
+        receipt_adjustment = posted.valuation_adjustments.get(
+            adjustment_type="TRANSIT_RECEIPT", movement=transit_receipt.stock_movement,
+        )
+        self.assertEqual(receipt_adjustment.amount_afn, Decimal("7.00"))
+        self.assertEqual(sale_adjustment.amount_afn, Decimal("3.00"))
+        self.assertEqual(return_adjustment.amount_afn, Decimal("1.00"))
+        lot.refresh_from_db()
+        self.assertEqual(lot.remaining_quantity, 0)
+        self.assertEqual(stock_for(self.product, self.warehouse), 8)
+        self.assertEqual(avco_for(self.product, self.warehouse), Decimal("13.0000"))
+        self.assertEqual(
+            sale_adjustment.journal_entry.lines.get(account__code="5100").debit,
+            Decimal("3.00"),
+        )
+        self.assertEqual(
+            return_adjustment.journal_entry.lines.get(account__code="5100").credit,
+            Decimal("1.00"),
+        )
+
+
+    def test_post_foreign_landed_cost_preserves_manual_historical_rate_and_payee(self):
+        from purchases.landed_cost_services import post_landed_cost
+
+        purchase = self._purchase(
+            document_number="PI-LC-USD-001", currency=self.usd,
+            rate="70.0000", rate_date=self.day,
+        )
+        post_purchase(purchase=purchase, user=self.user)
+        cost = create_landed_cost_draft(
+            document_number="LC-USD-001", payee=self.supplier,
+            cost_date=self.day, currency=self.usd, amount="10.00",
+            exchange_rate="70.0000", rate_date=self.day, category="FREIGHT",
+            purchase_line_ids=[purchase.lines.get().pk],
+            allocation_method=LandedCostAllocationMethod.DIRECT,
+            user=self.user, idempotency_key="lc-usd-001",
+        )
+        posted = post_landed_cost(cost_document=cost, user=self.user)
+        self.assertEqual(posted.journal_entry.currency, self.usd)
+        self.assertEqual(posted.journal_entry.rate, Decimal("70.0000"))
+        self.assertEqual(posted.journal_entry.rate_date, self.day)
+        self.assertEqual(posted.journal_entry.afn_total, Decimal("700.00"))
+        self.assertEqual(posted.journal_entry.lines.get(account__code="1410").debit, Decimal("10.00"))
+        self.assertEqual(posted.journal_entry.lines.get(account__code="2110").credit, Decimal("10.00"))
+        self.assertEqual(posted.allocations.get().amount, Decimal("10.00"))
+        self.assertEqual(posted.allocations.get().afn_amount, Decimal("700.00"))
+        self.assertEqual(
+            PartyLedgerAttribution.objects.get(
+                journal_line=posted.journal_entry.lines.get(account__code="2110")
+            ).party,
+            self.supplier,
+        )
+
+    def test_landed_cost_allocation_mismatch_rejects_posting_atomically(self):
+        from purchases.landed_cost_services import LandedCostPostingError, post_landed_cost
+
+        purchase = self._purchase(document_number="PI-LC-MISMATCH-001")
+        post_purchase(purchase=purchase, user=self.user)
+        cost = create_landed_cost_draft(
+            document_number="LC-MISMATCH-001", payee=self.supplier,
+            cost_date=self.day, currency=self.afn, amount="10.00",
+            exchange_rate="1", rate_date=self.day, category="FREIGHT",
+            purchase_line_ids=[purchase.lines.get().pk],
+            allocation_method=LandedCostAllocationMethod.DIRECT,
+            user=self.user, idempotency_key="lc-mismatch-001",
+        )
+        allocation = cost.allocations.get()
+        allocation.amount = Decimal("9.00")
+        allocation.save(update_fields=["amount"])
+        before_journals = JournalEntry.objects.count()
+        with self.assertRaises(LandedCostPostingError):
+            post_landed_cost(cost_document=cost, user=self.user)
+        cost.refresh_from_db()
+        self.assertEqual(cost.status, LandedCostStatus.DRAFT)
+        self.assertIsNone(cost.journal_entry_id)
+        self.assertEqual(cost.valuation_adjustments.count(), 0)
+        self.assertEqual(JournalEntry.objects.count(), before_journals)
