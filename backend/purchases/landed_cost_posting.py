@@ -28,7 +28,7 @@ from security.services import record_audit_event
 
 from .models import (
     LandedCostAllocation, LandedCostDocument, LandedCostStatus,
-    LandedCostValuationAdjustment, PurchaseLine, PurchaseReturn,
+    LandedCostValuationAdjustment, LandedCostReversal, PurchaseLine, PurchaseReturn,
 )
 
 
@@ -108,6 +108,7 @@ def _posted_prior_allocations(line_ids):
     return list(LandedCostAllocation.objects.filter(
         purchase_line_id__in=line_ids,
         cost_document__status=LandedCostStatus.POSTED,
+        cost_document__reversal__isnull=True,
     ).select_related("purchase_line", "cost_document").order_by(
         "cost_document__cost_date", "id"
     ))
@@ -438,6 +439,8 @@ def post_landed_cost(*, cost_document, user=None):
     if document.status == LandedCostStatus.POSTED:
         if document.journal_entry_id is None:
             raise LandedCostPostingError("Posted landed-cost document has no source journal.")
+        if LandedCostReversal.objects.filter(cost_document=document).exists():
+            raise LandedCostPostingError("This landed-cost document has already been reversed.")
         return document
     actor = user or document.created_by
     if actor is not None and not getattr(actor, "is_authenticated", False):
@@ -522,6 +525,7 @@ def post_landed_cost(*, cost_document, user=None):
     prior = list(LandedCostAllocation.objects.filter(
         purchase_line__product_id__in=product_ids,
         cost_document__status=LandedCostStatus.POSTED,
+        cost_document__reversal__isnull=True,
     ).select_related("purchase_line", "cost_document").order_by(
         "cost_document__cost_date", "id"
     ))
@@ -866,6 +870,7 @@ def effective_avco_for_product_warehouse(product, warehouse):
     allocations = list(LandedCostAllocation.objects.filter(
         purchase_line__product_id=product_id,
         cost_document__status=LandedCostStatus.POSTED,
+        cost_document__reversal__isnull=True,
     ).select_related("purchase_line", "purchase_line__purchase").order_by(
         "cost_document__cost_date", "id"
     ))
@@ -923,6 +928,7 @@ def post_transit_receipt_landed_cost_adjustments(*, lot, receipt, user=None):
     for allocation in LandedCostAllocation.objects.filter(
         purchase_line_id=lot.purchase_line_id,
         cost_document__status=LandedCostStatus.POSTED,
+        cost_document__reversal__isnull=True,
     ).select_related("cost_document").order_by("cost_document__cost_date", "id"):
         per_unit = _q4(allocation.afn_amount / Decimal(lot.original_quantity))
         amount = _q2(per_unit * Decimal(remaining_company_quantity))
@@ -964,6 +970,7 @@ def post_transit_sale_landed_cost_adjustments(*, lot, sale_allocation, posting_d
     for allocation in LandedCostAllocation.objects.filter(
         purchase_line_id=lot.purchase_line_id,
         cost_document__status=LandedCostStatus.POSTED,
+        cost_document__reversal__isnull=True,
     ).select_related("cost_document").order_by("cost_document__cost_date", "id"):
         per_unit = _q4(allocation.afn_amount / Decimal(lot.original_quantity))
         amount = _q2(per_unit * Decimal(sale_allocation.quantity))
@@ -995,6 +1002,7 @@ def post_transit_sales_return_landed_cost_adjustments(*, lot, sales_return, user
     for allocation in LandedCostAllocation.objects.filter(
         purchase_line_id=lot.purchase_line_id,
         cost_document__status=LandedCostStatus.POSTED,
+        cost_document__reversal__isnull=True,
     ).select_related("cost_document").order_by("cost_document__cost_date", "id"):
         per_unit = _q4(allocation.afn_amount / Decimal(lot.original_quantity))
         amount = _q2(per_unit * Decimal(sales_return.quantity))
