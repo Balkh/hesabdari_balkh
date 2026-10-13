@@ -70,7 +70,7 @@ The work branch now includes:
 - REST endpoints under `/api/v1/purchases/landed-costs/`: list/create, detail, and explicit `POST /{id}/post/`. There are no update/delete endpoints.
 - Atomic posting, idempotent retries, stable source-row lock order, PostgreSQL-safe document locking, and append-only valuation-adjustment records.
 
-The service intentionally rejects valuation histories with unresolved negative stock, temporary-cost movements, or unlinked adjustment-out/shortage events after the source date. It does not guess an expense mapping that the accounting contract has not approved. These guards are correctness gates, not proof that every possible inventory history is supported.
+The service supports a temporary-cost negative-stock issue only when the immutable `NegativeCOGSReceiptAllocation` ledger proves which later receipt resolved its quantity. A late cost allocated to that receipt is reclassified to the linked prior COGS, including the edge case where the original receipt exactly matched the temporary cost and therefore produced no separate `COGSAdjustment` journal. Unresolved negative stock, untraceable historical obligations, temporary-cost movements without that receipt link, or unlinked adjustment-out/shortage events after the source date remain fail-closed. The service does not guess an expense mapping that the accounting contract has not approved.
 
 ## 7. Remaining release gates
 
