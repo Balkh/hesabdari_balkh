@@ -540,3 +540,109 @@ class LandedCostValuationAdjustment(models.Model):
 
     def delete(self, *args, **kwargs):
         raise PostedImmutabilityError("Landed-cost valuation adjustments cannot be deleted")
+
+
+class ImmutableLandedCostReversalQuerySet(models.QuerySet):
+    def update(self, **kwargs):
+        raise PostedImmutabilityError("Landed-cost reversals are immutable")
+
+    def bulk_update(self, objs, fields, batch_size=None):
+        raise PostedImmutabilityError("Landed-cost reversals are immutable")
+
+    def bulk_create(self, objs, **kwargs):
+        raise PostedImmutabilityError("Create landed-cost reversals through the reversal service")
+
+    def delete(self):
+        raise PostedImmutabilityError("Landed-cost reversals cannot be deleted")
+
+
+class LandedCostReversal(models.Model):
+    """Compensating reversal of a posted landed-cost source and its valuation journals.
+
+    Original source/adjustment journals remain immutable and POSTED. The
+    reversal has its own date, reason and compensating journals.
+    """
+
+    cost_document = models.OneToOneField(
+        LandedCostDocument, on_delete=models.PROTECT, related_name="reversal",
+    )
+    reversal_date = models.DateField()
+    reason = models.CharField(max_length=500)
+    journal_entry = models.OneToOneField(
+        "accounting.JournalEntry", on_delete=models.PROTECT,
+        related_name="landed_cost_source_reversal",
+    )
+    idempotency_key = models.CharField(max_length=128, unique=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name="landed_cost_reversals_created",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    objects = ImmutableLandedCostReversalQuerySet.as_manager()
+
+    class Meta:
+        ordering = ["reversal_date", "id"]
+
+    def save(self, *args, **kwargs):
+        if self.pk is not None:
+            raise PostedImmutabilityError("Landed-cost reversals are immutable")
+        if self.cost_document_id is None or self.journal_entry_id is None:
+            raise PostedImmutabilityError("A landed-cost reversal requires a source and compensating journal")
+        if self.cost_document.status != LandedCostStatus.POSTED:
+            raise PostedImmutabilityError("Only a posted landed-cost source can be reversed")
+        if (
+            self.journal_entry.status != "POSTED"
+            or self.journal_entry.source_type != "LANDED_COST_REVERSAL"
+            or self.journal_entry.source_id != self.cost_document.document_number
+        ):
+            raise PostedImmutabilityError("Reversal must reference its posted compensating source journal")
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise PostedImmutabilityError("Landed-cost reversals cannot be deleted")
+
+
+class LandedCostReversalAdjustment(models.Model):
+    """Immutable link from an original valuation adjustment to its compensation."""
+
+    reversal = models.ForeignKey(
+        LandedCostReversal, on_delete=models.PROTECT,
+        related_name="adjustment_reversals",
+    )
+    original_adjustment = models.OneToOneField(
+        LandedCostValuationAdjustment, on_delete=models.PROTECT,
+        related_name="reversal_record",
+    )
+    journal_entry = models.OneToOneField(
+        "accounting.JournalEntry", on_delete=models.PROTECT,
+        related_name="landed_cost_adjustment_reversal",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    objects = ImmutableLandedCostReversalQuerySet.as_manager()
+
+    class Meta:
+        ordering = ["id"]
+
+    def save(self, *args, **kwargs):
+        if self.pk is not None:
+            raise PostedImmutabilityError("Landed-cost adjustment reversals are immutable")
+        if self.reversal_id is None or self.original_adjustment_id is None or self.journal_entry_id is None:
+            raise PostedImmutabilityError("A valuation reversal requires all source links and its compensating journal")
+        reversal = self.reversal
+        original = self.original_adjustment
+        journal = self.journal_entry
+        expected_source = f"{reversal.cost_document.document_number}:ADJ:{original.pk}"
+        if original.cost_document_id != reversal.cost_document_id:
+            raise PostedImmutabilityError("A valuation reversal must belong to the same landed-cost source")
+        if (
+            journal.status != "POSTED"
+            or journal.source_type != "LANDED_COST_REVERSAL_ADJUSTMENT"
+            or journal.source_id != expected_source
+        ):
+            raise PostedImmutabilityError("Valuation reversal must reference its posted compensating journal")
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise PostedImmutabilityError("Landed-cost adjustment reversals cannot be deleted")

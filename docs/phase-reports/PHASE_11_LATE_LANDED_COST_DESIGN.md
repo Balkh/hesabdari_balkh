@@ -67,10 +67,10 @@ The work branch now includes:
 - A shared chronological AVCO replay overlay used by `inventory.stock.avco_for()`; posted stock movement costs and quantities are not edited.
 - Reallocation journals for sales COGS, warehouse transfers, sales returns, purchase returns (including an explicit COGS variance when source-return value differs from AVCO relief), transit receipts, transit sales, and transit sales returns.
 - Follow-on hooks so a landed cost posted before a later Transit receipt/sale/return is reclassified when that event occurs.
-- REST endpoints under `/api/v1/purchases/landed-costs/`: list/create, detail, and explicit `POST /{id}/post/`. There are no update/delete endpoints.
+- REST endpoints under `/api/v1/purchases/landed-costs/`: list/create, detail, explicit `POST /{id}/post/`, and guarded compensating `POST /{id}/reverse/`. There are no source-document update/delete endpoints.
 - Atomic posting, idempotent retries, stable source-row lock order, PostgreSQL-safe document locking, and append-only valuation-adjustment records.
 
-The service intentionally rejects valuation histories with unresolved negative stock, temporary-cost movements, or unlinked adjustment-out/shortage events after the source date. It does not guess an expense mapping that the accounting contract has not approved. These guards are correctness gates, not proof that every possible inventory history is supported.
+The service supports a temporary-cost negative-stock issue only when the immutable `NegativeCOGSReceiptAllocation` ledger proves which later receipt resolved its quantity. A late cost allocated to that receipt is reclassified to the linked prior COGS, including the edge case where the original receipt exactly matched the temporary cost and therefore produced no separate `COGSAdjustment` journal. Unresolved negative stock, untraceable historical obligations, temporary-cost movements without that receipt link, or unlinked adjustment-out/shortage events after the source date remain fail-closed. The service does not guess an expense mapping that the accounting contract has not approved.
 
 ## 7. Remaining release gates
 
@@ -78,3 +78,40 @@ The service intentionally rejects valuation histories with unresolved negative s
 - Review the REST tests, transfer/COGS/Transit tests, atomic rollback, and append-only enforcement as accounting evidence, not merely CI-green evidence.
 - This branch adds the backend API, not a purchase-screen UI. A UI must use these service-backed endpoints and must not post journals or calculate AVCO in the client.
 - Keep the PR Draft and unmerged until the user reviews the evidence. No main-branch change or freeze is implied.
+
+
+## 8. Evidence snapshot — 2026-10-13
+
+Latest verified candidate before this evidence-only documentation update:
+- Commit: `aaadf77af34c5819172e5051a3733453ba44a889`
+- PR: [#35 — Trace late costs through resolved negative-stock COGS](https://github.com/Balkh/hesabdari_balkh/pull/35)
+- Exact-head CI: [run 38451577408](https://github.com/Balkh/hesabdari_balkh/actions/runs/38451577408) — **all four jobs succeeded**: backend, PostgreSQL, frontend, and Tauri.
+- Backend verification: **858 passed, 4 skipped**; Django system check clean. The skipped tests are reported by the test runner and must not be represented as executed.
+- PostgreSQL verification: **56 tests passed**, Django system check clean, and script reported `POSTGRESQL VERIFICATION: PASS`.
+- The PostgreSQL-only concurrent-posting test is included; it is intentionally skipped by the SQLite backend run and exercised in the PostgreSQL job.
+- Frontend verification and Tauri `cargo check` succeeded on that exact commit.
+- The successful run also exercised migrations on both test database paths through the repository verification scripts.
+
+Focused scenario coverage in `backend/purchases/purchase_tests.py` and related test modules includes:
+- Shared-weight allocation, cent/AFN reconciliation, manual foreign-currency rate/date, and supplier payable.
+- Atomic rejection for missing weight, allocation mismatch, closed period, insurance, and untraceable outflows.
+- Fully remaining, partially sold, fully sold, and sequential late-cost valuation replay.
+- Multiple receipts for the same product with cost isolated to the selected purchase line.
+- Goods-in-Transit cost before and after receipt; Transit sale and return.
+- Warehouse transfer with destination COGS and immutable movement cost snapshots.
+- Purchase return, sales return, and late costs after returns.
+- Temporary-cost negative-stock obligations, including exact-cost receipt resolution and later direct/Transit landed costs.
+- Draft/post idempotency, PostgreSQL concurrent posting, posted-history immutability, and compensating reversal including a fail-closed dependency guard.
+- REST authentication, creation/post/read lifecycle, reversal, and idempotent retry.
+
+**Evidence limitation / release gate:** CI-green is necessary, not sufficient for accounting approval. This run is tied to the exact SHA above; any subsequent source or test change requires a fresh complete CI run. The PR remains unmerged and Phase 11 is **not frozen**. The separate ERP frontend screen for entering/reviewing landed-cost documents is not part of this backend/API evidence and remains a later UI task. The compensating reversal is deliberately fail-closed if later stock or Transit events may depend on the valuation layer; a broader historical replay reversal is not claimed as supported.
+
+
+## 9. Final source/test follow-up evidence — 2026-10-14
+
+The source/model-boundary hardening and its regression assertion were then verified on commit `28b71f9c6043b2ab2e9c8d86414496f2d814cfdb`:
+- [Exact-head CI run 38498427347](https://github.com/Balkh/hesabdari_balkh/actions/runs/38498427347): **backend, PostgreSQL, frontend, and Tauri all succeeded**.
+- Backend script: Django tests **56 passed**, system check clean; pytest **858 passed, 4 skipped**.
+- PostgreSQL script: Django tests **56 passed**, system check clean; pytest **862 passed**; script reported `POSTGRESQL VERIFICATION: PASS`.
+- The added regression confirms an ordinary source journal cannot be used to create a reversal metadata row that would incorrectly hide an active valuation layer.
+- The run is evidence for that exact source/test commit. The evidence-document-only follow-up itself requires its own CI run before this candidate is ready for user review.

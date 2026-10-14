@@ -13,12 +13,16 @@ from currencies.models import Currency
 from parties.models import Party
 from security.permissions import IsAuthenticatedForERP
 
-from .models import LandedCostDocument
+from .models import LandedCostDocument, LandedCostReversal
 from .landed_cost_serializers import LandedCostDocumentReadSerializer, LandedCostDraftCreateSerializer
+from .landed_cost_reversal_serializers import (
+    LandedCostReversalCreateSerializer, LandedCostReversalReadSerializer,
+)
 from .landed_cost_services import (
     LandedCostPostingError, LandedCostValidationError,
     create_landed_cost_draft, post_landed_cost,
 )
+from .landed_cost_reversal import reverse_landed_cost
 
 _AUTH_CLASSES = [SessionAuthentication, BasicAuthentication]
 
@@ -32,7 +36,7 @@ def _domain_error(exc):
 
 def _document_queryset():
     return LandedCostDocument.objects.select_related(
-        "payee", "currency", "journal_entry",
+        "payee", "currency", "journal_entry", "reversal",
     ).prefetch_related(
         "allocations__purchase_line__purchase",
         "allocations__purchase_line__product",
@@ -85,3 +89,26 @@ def landed_cost_post(request, pk):
     except (LandedCostValidationError, LandedCostPostingError, ValueError) as exc:
         return _domain_error(exc)
     return Response(LandedCostDocumentReadSerializer(posted).data)
+
+
+
+@api_view(["POST"])
+@authentication_classes(_AUTH_CLASSES)
+@permission_classes([IsAuthenticatedForERP])
+def landed_cost_reverse(request, pk):
+    document = get_object_or_404(LandedCostDocument, pk=pk)
+    serializer = LandedCostReversalCreateSerializer(data=request.data)
+    serializer.is_valid(raise_exception=True)
+    data = dict(serializer.validated_data)
+    key = data["idempotency_key"]
+    existed = LandedCostReversal.objects.filter(idempotency_key=key).exists()
+    try:
+        reversal = reverse_landed_cost(
+            cost_document=document, user=request.user, **data,
+        )
+    except (LandedCostValidationError, LandedCostPostingError, ValueError) as exc:
+        return _domain_error(exc)
+    return Response(
+        LandedCostReversalReadSerializer(reversal).data,
+        status=http_status.HTTP_200_OK if existed else http_status.HTTP_201_CREATED,
+    )

@@ -179,6 +179,63 @@ class COGSAdjustment(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
 
 
+class NegativeCOGSReceiptAllocationQuerySet(models.QuerySet):
+    def update(self, **kwargs):
+        raise PostedImmutabilityError("Negative-COGS receipt allocations are immutable")
+
+    def bulk_update(self, objs, fields, batch_size=None):
+        raise PostedImmutabilityError("Negative-COGS receipt allocations are immutable")
+
+    def bulk_create(self, objs, **kwargs):
+        raise PostedImmutabilityError("Create negative-COGS receipt allocations through the receipt service")
+
+    def delete(self):
+        raise PostedImmutabilityError("Negative-COGS receipt allocations cannot be deleted")
+
+
+class NegativeCOGSReceiptAllocation(models.Model):
+    """Immutable quantity link between a receipt and the negative-stock obligation it resolves.
+
+    Kept separately from COGSAdjustment because a receipt may exactly match the
+    temporary cost and therefore need no financial adjustment journal, while a
+    later landed-cost invoice still must trace that consumed quantity.
+    """
+
+    obligation = models.ForeignKey(
+        NegativeCOGSObligation, on_delete=models.PROTECT,
+        related_name="receipt_allocations",
+    )
+    receipt_movement = models.ForeignKey(
+        "inventory.StockMovement", on_delete=models.PROTECT,
+        related_name="negative_cogs_receipt_allocations",
+    )
+    quantity = models.PositiveIntegerField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    objects = NegativeCOGSReceiptAllocationQuerySet.as_manager()
+
+    class Meta:
+        ordering = ["id"]
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(quantity__gt=0),
+                name="negative_cogs_receipt_alloc_qty_gt0",
+            ),
+            models.UniqueConstraint(
+                fields=["obligation", "receipt_movement"],
+                name="uniq_negative_cogs_receipt_alloc",
+            ),
+        ]
+
+    def save(self, *args, **kwargs):
+        if self.pk is not None:
+            raise PostedImmutabilityError("Negative-COGS receipt allocations are immutable")
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise PostedImmutabilityError("Negative-COGS receipt allocations cannot be deleted")
+
+
 # Phase 11 models live in a separate module to keep the existing Sales models readable.
 from .returns_models import CrossCurrencyRefund, CrossCurrencyRefundStatus, Refund, RefundStatus, SalesReturn, SalesReturnReversal, SalesReturnStatus
 

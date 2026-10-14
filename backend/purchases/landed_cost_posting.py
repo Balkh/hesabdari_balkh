@@ -28,7 +28,7 @@ from security.services import record_audit_event
 
 from .models import (
     LandedCostAllocation, LandedCostDocument, LandedCostStatus,
-    LandedCostValuationAdjustment, PurchaseLine, PurchaseReturn,
+    LandedCostValuationAdjustment, LandedCostReversal, PurchaseLine, PurchaseReturn,
 )
 
 
@@ -108,6 +108,7 @@ def _posted_prior_allocations(line_ids):
     return list(LandedCostAllocation.objects.filter(
         purchase_line_id__in=line_ids,
         cost_document__status=LandedCostStatus.POSTED,
+        cost_document__reversal__isnull=True,
     ).select_related("purchase_line", "cost_document").order_by(
         "cost_document__cost_date", "id"
     ))
@@ -193,7 +194,7 @@ def _transfer_pairs(movements):
     return out_for_in, in_for_out
 
 
-def _simulate_product(product_id, baseline_extra_costs, revised_extra_costs, earliest_date, *, strict=True):
+def _simulate_product(product_id, baseline_extra_costs, revised_extra_costs, earliest_date, *, strict=True, allowed_negative_issue_ids=()):
     """Replay the existing 4dp AVCO rule without changing any posted movement."""
     movements = list(StockMovement.objects.filter(
         product_id=product_id
@@ -204,6 +205,7 @@ def _simulate_product(product_id, baseline_extra_costs, revised_extra_costs, ear
         return [], {}, {}, {}, {}, {}
     out_for_in, in_for_out = _transfer_pairs(movements)
     from sales.models import SalesReturn
+    allowed_negative_issue_ids = set(allowed_negative_issue_ids)
 
     # The same event stream is replayed under the prior basis and the proposed basis.
     def replay(extra_unit_costs):
@@ -214,7 +216,7 @@ def _simulate_product(product_id, baseline_extra_costs, revised_extra_costs, ear
             qty, basis = state.get(wid, [0, Decimal("0")])
             signed = movement.quantity
             unit = movement.unit_cost_afn
-            if strict and movement.is_temporary_cost and movement.movement_date >= earliest_date:
+            if strict and movement.is_temporary_cost and movement.movement_date >= earliest_date and movement.pk not in allowed_negative_issue_ids:
                 raise LandedCostPostingError(
                     f"Movement {movement.reference} uses a temporary cost; late valuation is blocked until resolved."
                 )
@@ -257,7 +259,7 @@ def _simulate_product(product_id, baseline_extra_costs, revised_extra_costs, ear
                 relief = Decimal("0")
                 relief_unit = unit
             else:
-                if qty < 0 and strict:
+                if qty < 0 and strict and movement.pk not in allowed_negative_issue_ids:
                     raise LandedCostPostingError(
                         f"Product {product_id} has negative stock before {movement.reference}; valuation replay is ambiguous."
                     )
@@ -273,17 +275,19 @@ def _simulate_product(product_id, baseline_extra_costs, revised_extra_costs, ear
                         basis = Decimal("0")
                     elif basis < 0:
                         basis = Decimal("0")
-                elif strict:
+                elif strict and movement.pk not in allowed_negative_issue_ids:
                     raise LandedCostPostingError(
                         f"Product {product_id} has an issue with no positive cost basis at {movement.reference}."
                     )
                 else:
+                    # A negative-stock issue is replayable only when an immutable
+                    # receipt-allocation record proves which later receipt resolved it.
                     qty -= taken
                     basis = Decimal("0")
                     relief = Decimal("0")
                     relief_unit = movement.unit_cost_afn
                 inbound_value = Decimal("0")
-            if qty < 0 and strict:
+            if qty < 0 and strict and signed < 0 and movement.pk not in allowed_negative_issue_ids:
                 raise LandedCostPostingError(
                     f"Product {product_id} becomes negative at {movement.reference}; late valuation is blocked."
                 )
@@ -293,6 +297,10 @@ def _simulate_product(product_id, baseline_extra_costs, revised_extra_costs, ear
                 "relief": relief, "relief_unit": relief_unit,
                 "inbound": inbound_value, "unit": unit,
             }
+        if strict and any(pair[0] < 0 for pair in state.values()):
+            raise LandedCostPostingError(
+                f"Product {product_id} still has unresolved negative stock after valuation replay."
+            )
         return results, state
 
     baseline, baseline_state = replay(baseline_extra_costs)
@@ -431,6 +439,8 @@ def post_landed_cost(*, cost_document, user=None):
     if document.status == LandedCostStatus.POSTED:
         if document.journal_entry_id is None:
             raise LandedCostPostingError("Posted landed-cost document has no source journal.")
+        if LandedCostReversal.objects.filter(cost_document=document).exists():
+            raise LandedCostPostingError("This landed-cost document has already been reversed.")
         return document
     actor = user or document.created_by
     if actor is not None and not getattr(actor, "is_authenticated", False):
@@ -467,11 +477,29 @@ def post_landed_cost(*, cost_document, user=None):
     earliest_by_product = {}
     source_movements = {}
     transit_lots = {}
+    from goods_in_transit.models import TransitReceipt
+    from sales.models import SalesReturn, TransitSaleAllocation
     for line in lines:
         purchase = line.purchase
         if purchase.delivery_mode == "IN_TRANSIT":
             lot = _lot_for(line)
             transit_lots[line.pk] = lot
+            has_company_receipt = TransitReceipt.objects.filter(
+                lot=lot, company_quantity__gt=0, stock_movement__isnull=False
+            ).exists()
+            transit_sale_line_ids = TransitSaleAllocation.objects.filter(
+                transit_lot=lot
+            ).values_list("sale_line_id", flat=True)
+            has_transit_return = SalesReturn.objects.filter(
+                sale_line_id__in=transit_sale_line_ids,
+                return_movement__isnull=False,
+            ).exists()
+            # An unreceived Transit lot has no warehouse AVCO layer yet. Its
+            # remaining asset and in-transit sales are reconciled separately;
+            # replay warehouse Kardex only after a company receipt or physical
+            # Transit return movement exists.
+            if not (has_company_receipt or has_transit_return):
+                continue
             earliest = lot.ownership_date
         else:
             source = _source_movement(line)
@@ -497,6 +525,7 @@ def post_landed_cost(*, cost_document, user=None):
     prior = list(LandedCostAllocation.objects.filter(
         purchase_line__product_id__in=product_ids,
         cost_document__status=LandedCostStatus.POSTED,
+        cost_document__reversal__isnull=True,
     ).select_related("purchase_line", "cost_document").order_by(
         "cost_document__cost_date", "id"
     ))
@@ -512,13 +541,22 @@ def post_landed_cost(*, cost_document, user=None):
 
     # Build one replay per affected product, sharing the complete chronology
     # so AVCO effects continue through warehouse transfers and sales returns.
+    from sales.models import NegativeCOGSReceiptAllocation
+
     product_results = {}
     for product_id in sorted(earliest_by_product):
-        product_results[product_id] = _simulate_product(
-            product_id, baseline_extra, revised_extra, earliest_by_product[product_id]
+        # Negative-stock issue rows are replayable only when a persisted
+        # receipt-allocation record proves which later receipt resolved them.
+        allowed_negative_issue_ids = set(
+            NegativeCOGSReceiptAllocation.objects.filter(
+                obligation__product_id=product_id,
+                receipt_movement__product_id=product_id,
+            ).values_list("obligation__movement_id", flat=True)
         )
-        # Re-run with all layers for the proposed final basis.
-        # _simulate_product compares its baseline and revised maps internally.
+        product_results[product_id] = _simulate_product(
+            product_id, baseline_extra, revised_extra, earliest_by_product[product_id],
+            allowed_negative_issue_ids=allowed_negative_issue_ids,
+        )
     # Invoice posting: capitalize full cost before reallocation. The subsequent
     # adjustment journals move the sold/returned/transferred portions out of
     # this initial asset debit; the remainder stays in inventory / 1430.
@@ -562,8 +600,9 @@ def post_landed_cost(*, cost_document, user=None):
     # Transit allocations: invoice source is Dr 1430. Reclass cost for goods
     # already physically received; sold-in-transit goods go directly to COGS.
     transit_delta_by_line = {}
+    transit_negative_cogs_delta = Decimal("0.00")
     from goods_in_transit.models import TransitReceipt
-    from sales.models import SalesReturn, TransitSaleAllocation
+    from sales.models import NegativeCOGSReceiptAllocation, SalesReturn, TransitSaleAllocation
     for row in allocations:
         line = row.purchase_line
         if line.pk not in transit_lots:
@@ -571,10 +610,26 @@ def post_landed_cost(*, cost_document, user=None):
         lot = transit_lots[line.pk]
         per_unit = _q4(row.afn_amount / Decimal(lot.original_quantity))
         transit_delta_by_line[line.pk] = per_unit
-        for receipt in TransitReceipt.objects.filter(
+        receipts = list(TransitReceipt.objects.filter(
             lot=lot, company_quantity__gt=0, stock_movement__isnull=False
-        ).select_related("stock_movement", "warehouse"):
-            value = _q2(per_unit * Decimal(receipt.company_quantity))
+        ).select_related("stock_movement", "warehouse").order_by("id"))
+        resolved_by_obligation = defaultdict(int)
+        resolved_by_receipt = {}
+        for receipt in receipts:
+            links = list(NegativeCOGSReceiptAllocation.objects.filter(
+                receipt_movement=receipt.stock_movement
+            ).select_related("obligation", "obligation__movement").order_by("id"))
+            consumed = sum(link.quantity for link in links)
+            if consumed > receipt.company_quantity:
+                raise LandedCostPostingError(
+                    f"Transit receipt {receipt.stock_movement.reference} resolves more negative stock than its company quantity."
+                )
+            resolved_by_receipt[receipt.pk] = consumed
+            for link in links:
+                resolved_by_obligation[link.obligation_id] += link.quantity
+        for receipt in receipts:
+            remaining_company_qty = receipt.company_quantity - resolved_by_receipt[receipt.pk]
+            value = _q2(per_unit * Decimal(remaining_company_qty))
             _post_adjustment(
                 document=document, adjustment_type="TRANSIT_RECEIPT",
                 reference=receipt.stock_movement.reference,
@@ -583,6 +638,25 @@ def post_landed_cost(*, cost_document, user=None):
                 credit_account=_account(TRANSIT_ACCOUNT), amount=value,
                 posting_day=day, actor=actor,
             )
+        for obligation_id, resolved_quantity in sorted(resolved_by_obligation.items()):
+            link = next(
+                link for receipt in receipts
+                for link in NegativeCOGSReceiptAllocation.objects.filter(
+                    receipt_movement=receipt.stock_movement,
+                    obligation_id=obligation_id,
+                ).select_related("obligation", "obligation__movement", "obligation__warehouse")
+            )
+            amount = _q2(per_unit * Decimal(resolved_quantity))
+            if amount:
+                reference = f"{link.obligation.movement.reference}:NEGATIVE-RECEIPT:{link.receipt_movement_id}"
+                _post_adjustment(
+                    document=document, adjustment_type="NEGATIVE_COGS_OBLIGATION",
+                    reference=reference, movement=link.obligation.movement,
+                    debit_account=_account(COGS_ACCOUNT),
+                    credit_account=_account(TRANSIT_ACCOUNT), amount=amount,
+                    posting_day=day, actor=actor,
+                )
+                transit_negative_cogs_delta += amount
         for sale_allocation in TransitSaleAllocation.objects.filter(
             transit_lot=lot
         ).select_related("sale_line", "cogs_journal"):
@@ -595,9 +669,45 @@ def post_landed_cost(*, cost_document, user=None):
                 posting_day=day, actor=actor,
             )
 
-    cogs_delta = Decimal("0.00")
+    cogs_delta = transit_negative_cogs_delta
     purchase_return_delta = Decimal("0.00")
     inventory_delta = Decimal("0.00")
+
+    # A purchase receipt may resolve a sale that was already posted against a
+    # manually entered temporary cost. The receipt allocation ledger preserves
+    # that source relationship even when the original receipt needed no COGS
+    # correction; a later landed cost must therefore flow to that prior COGS.
+    for row in allocations:
+        line = row.purchase_line
+        source = source_movements.get(line.pk)
+        if source is None:
+            continue
+        per_unit = _q4(row.afn_amount / Decimal(line.quantity))
+        if not per_unit:
+            continue
+        for resolved in NegativeCOGSReceiptAllocation.objects.filter(
+            receipt_movement=source
+        ).select_related("obligation", "obligation__movement", "obligation__warehouse").order_by("id"):
+            obligation = resolved.obligation
+            if not JournalEntry.objects.filter(
+                source_type="SALES_COGS", source_id=obligation.movement.reference
+            ).exists():
+                raise LandedCostPostingError(
+                    f"Negative-COGS obligation {obligation.pk} has no original posted COGS journal."
+                )
+            amount = _q2(per_unit * Decimal(resolved.quantity))
+            if amount <= 0:
+                continue
+            _post_adjustment(
+                document=document, adjustment_type="NEGATIVE_COGS_OBLIGATION",
+                reference=obligation.movement.reference,
+                movement=obligation.movement,
+                debit_account=_account(COGS_ACCOUNT),
+                credit_account=resolve_warehouse_account(obligation.warehouse),
+                amount=amount, posting_day=day, actor=actor,
+            )
+            cogs_delta += amount
+
     for product_id, result in product_results.items():
         movements, baseline, revised, base_state, revised_state, in_for_out = result
         earliest = earliest_by_product[product_id]
@@ -760,6 +870,7 @@ def effective_avco_for_product_warehouse(product, warehouse):
     allocations = list(LandedCostAllocation.objects.filter(
         purchase_line__product_id=product_id,
         cost_document__status=LandedCostStatus.POSTED,
+        cost_document__reversal__isnull=True,
     ).select_related("purchase_line", "purchase_line__purchase").order_by(
         "cost_document__cost_date", "id"
     ))
@@ -802,26 +913,53 @@ def post_transit_receipt_landed_cost_adjustments(*, lot, receipt, user=None):
     """Reclass already-posted landed costs when Transit goods arrive later."""
     if not receipt.company_quantity or receipt.stock_movement_id is None:
         return []
+    from sales.models import NegativeCOGSReceiptAllocation
+
     created = []
+    links = list(NegativeCOGSReceiptAllocation.objects.filter(
+        receipt_movement_id=receipt.stock_movement_id
+    ).select_related("obligation", "obligation__movement").order_by("id"))
+    consumed_quantity = sum(link.quantity for link in links)
+    if consumed_quantity > receipt.company_quantity:
+        raise LandedCostPostingError(
+            f"Transit receipt {receipt.stock_movement.reference} resolves more negative stock than its company quantity."
+        )
+    remaining_company_quantity = receipt.company_quantity - consumed_quantity
     for allocation in LandedCostAllocation.objects.filter(
         purchase_line_id=lot.purchase_line_id,
         cost_document__status=LandedCostStatus.POSTED,
+        cost_document__reversal__isnull=True,
     ).select_related("cost_document").order_by("cost_document__cost_date", "id"):
         per_unit = _q4(allocation.afn_amount / Decimal(lot.original_quantity))
-        amount = _q2(per_unit * Decimal(receipt.company_quantity))
-        if not amount:
-            continue
-        row = _post_adjustment(
-            document=allocation.cost_document,
-            adjustment_type="TRANSIT_RECEIPT",
-            reference=receipt.stock_movement.reference,
-            movement=receipt.stock_movement,
-            debit_account=resolve_warehouse_account(receipt.warehouse),
-            credit_account=_account(TRANSIT_ACCOUNT),
-            amount=amount, posting_day=receipt.receipt_date, actor=user,
-        )
-        if row is not None:
-            created.append(row)
+        amount = _q2(per_unit * Decimal(remaining_company_quantity))
+        if amount:
+            row = _post_adjustment(
+                document=allocation.cost_document,
+                adjustment_type="TRANSIT_RECEIPT",
+                reference=receipt.stock_movement.reference,
+                movement=receipt.stock_movement,
+                debit_account=resolve_warehouse_account(receipt.warehouse),
+                credit_account=_account(TRANSIT_ACCOUNT),
+                amount=amount, posting_day=receipt.receipt_date, actor=user,
+            )
+            if row is not None:
+                created.append(row)
+        for link in links:
+            negative_amount = _q2(per_unit * Decimal(link.quantity))
+            if not negative_amount:
+                continue
+            reference = f"{link.obligation.movement.reference}:NEGATIVE-RECEIPT:{receipt.stock_movement_id}"
+            row = _post_adjustment(
+                document=allocation.cost_document,
+                adjustment_type="NEGATIVE_COGS_OBLIGATION",
+                reference=reference,
+                movement=link.obligation.movement,
+                debit_account=_account(COGS_ACCOUNT),
+                credit_account=_account(TRANSIT_ACCOUNT),
+                amount=negative_amount, posting_day=receipt.receipt_date, actor=user,
+            )
+            if row is not None:
+                created.append(row)
     return created
 
 
@@ -832,6 +970,7 @@ def post_transit_sale_landed_cost_adjustments(*, lot, sale_allocation, posting_d
     for allocation in LandedCostAllocation.objects.filter(
         purchase_line_id=lot.purchase_line_id,
         cost_document__status=LandedCostStatus.POSTED,
+        cost_document__reversal__isnull=True,
     ).select_related("cost_document").order_by("cost_document__cost_date", "id"):
         per_unit = _q4(allocation.afn_amount / Decimal(lot.original_quantity))
         amount = _q2(per_unit * Decimal(sale_allocation.quantity))
@@ -863,6 +1002,7 @@ def post_transit_sales_return_landed_cost_adjustments(*, lot, sales_return, user
     for allocation in LandedCostAllocation.objects.filter(
         purchase_line_id=lot.purchase_line_id,
         cost_document__status=LandedCostStatus.POSTED,
+        cost_document__reversal__isnull=True,
     ).select_related("cost_document").order_by("cost_document__cost_date", "id"):
         per_unit = _q4(allocation.afn_amount / Decimal(lot.original_quantity))
         amount = _q2(per_unit * Decimal(sales_return.quantity))
