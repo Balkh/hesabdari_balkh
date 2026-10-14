@@ -15,17 +15,11 @@ from rest_framework.decorators import api_view, authentication_classes, permissi
 from rest_framework.response import Response
 
 from core.idempotency import IdempotencyRecord
-from currencies.models import Currency
-from sales.models import Sale, SaleLine, WarehouseCheck, WarehouseCheckReversal
-from sales.returns_services import (
-    ReturnValidationError, create_refund, create_sales_return, reverse_refund,
-    reverse_sales_return,
-)
+from sales.models import Sale, SaleLine, WarehouseCheck
 from sales.services import (
     SalesValidationError, cancel_warehouse_check, create_sale, finalize_sale,
     finalize_warehouse_check, prepare_warehouse_check,
 )
-from sales.models import Refund, SalesReturn
 from security.permissions import IsAuthenticatedForERP
 
 from .api_serializers import (
@@ -125,7 +119,7 @@ def sale_collection(request):
                 user=request.user, rate=rate, rate_date=rate_date, **data,
             ),
         )
-    except (SalesValidationError, ReturnValidationError, ValueError) as exc:
+    except (SalesValidationError, ValueError, IntegrityError) as exc:
         return _domain_error(exc)
     sale = _sale_queryset().get(pk=sale.pk)
     return Response(
@@ -224,95 +218,3 @@ def warehouse_check_cancel(request, pk):
     })
 
 
-@api_view(["GET"])
-@authentication_classes(_AUTH_CLASSES)
-@permission_classes([IsAuthenticatedForERP])
-def sales_return_collection(request):
-    queryset = SalesReturn.objects.select_related("sale_line__sale", "sale_line__product", "warehouse", "entitlement_currency").order_by("return_date", "document_number")
-    return Response([{
-        "id": row.pk, "document_number": row.document_number, "sale_id": row.sale_line.sale_id,
-        "sale_line_id": row.sale_line_id, "product_id": row.sale_line.product_id,
-        "warehouse_id": row.warehouse_id, "quantity": row.quantity, "return_date": row.return_date,
-        "reason": row.reason, "status": row.status, "entitlement_amount": row.entitlement_amount,
-        "entitlement_currency_id": row.entitlement_currency_id, "journal_entry_id": row.journal_entry_id,
-        "created_at": row.created_at,
-    } for row in queryset])
-
-
-@api_view(["POST"])
-@authentication_classes(_AUTH_CLASSES)
-@permission_classes([IsAuthenticatedForERP])
-def sales_return_create(request):
-    data = request.data
-    try:
-        line = get_object_or_404(SaleLine, pk=data.get("sale_line_id"))
-        row = create_sales_return(
-            sale_line=line, warehouse=data.get("warehouse_id"),
-            quantity=data.get("quantity"), return_date=data.get("return_date"),
-            reason=data.get("reason"), user=request.user,
-            document_number=data.get("document_number"),
-            idempotency_key=data.get("idempotency_key"),
-            acknowledge_negative=data.get("acknowledge_negative", False),
-        )
-    except (SalesValidationError, ReturnValidationError, ValueError, TypeError) as exc:
-        return _domain_error(exc)
-    return Response({"id": row.pk, "document_number": row.document_number, "status": row.status,
-                     "sale_line_id": row.sale_line_id, "warehouse_id": row.warehouse_id,
-                     "quantity": row.quantity, "return_date": row.return_date,
-                     "reason": row.reason, "entitlement_amount": row.entitlement_amount,
-                     "entitlement_currency_id": row.entitlement_currency_id,
-                     "journal_entry_id": row.journal_entry_id},
-                    status=http_status.HTTP_201_CREATED)
-
-
-@api_view(["POST"])
-@authentication_classes(_AUTH_CLASSES)
-@permission_classes([IsAuthenticatedForERP])
-def sales_return_reverse(request, pk):
-    row = get_object_or_404(SalesReturn, pk=pk)
-    try:
-        reversed_row = reverse_sales_return(
-            row, reversal_date=request.data.get("reversal_date"),
-            reason=request.data.get("reason"), user=request.user,
-            idempotency_key=request.data.get("idempotency_key"),
-        )
-    except (SalesValidationError, ReturnValidationError, ValueError, TypeError) as exc:
-        return _domain_error(exc)
-    return Response({"id": reversed_row.pk, "status": reversed_row.status})
-
-
-@api_view(["POST"])
-@authentication_classes(_AUTH_CLASSES)
-@permission_classes([IsAuthenticatedForERP])
-def refund_create(request, return_id):
-    sales_return = get_object_or_404(SalesReturn, pk=return_id)
-    data = request.data
-    try:
-        currency = get_object_or_404(Currency, pk=data.get("refund_currency_id"))
-        refund = create_refund(
-            sales_return=sales_return, refund_date=data.get("refund_date"),
-            refund_currency=currency, entitlement_amount=data.get("entitlement_amount"),
-            rate=data.get("rate"), reason=data.get("reason", ""), user=request.user,
-            document_number=data.get("document_number"), idempotency_key=data.get("idempotency_key"),
-        )
-    except (SalesValidationError, ReturnValidationError, ValueError, TypeError) as exc:
-        return _domain_error(exc)
-    return Response({"id": refund.pk, "document_number": refund.document_number, "status": refund.status,
-                     "refund_date": refund.refund_date, "refund_currency_id": refund.refund_currency_id,
-                     "refund_amount": refund.refund_amount, "entitlement_amount": refund.entitlement_amount,
-                     "agreed_rate": refund.agreed_rate, "journal_entry_id": refund.journal_entry_id},
-                    status=http_status.HTTP_201_CREATED)
-
-
-@api_view(["POST"])
-@authentication_classes(_AUTH_CLASSES)
-@permission_classes([IsAuthenticatedForERP])
-def refund_reverse(request, pk):
-    refund = get_object_or_404(Refund, pk=pk)
-    try:
-        reversed_refund = reverse_refund(
-            refund, reason=request.data.get("reason"), user=request.user,
-        )
-    except (SalesValidationError, ReturnValidationError, ValueError, TypeError) as exc:
-        return _domain_error(exc)
-    return Response({"id": reversed_refund.pk, "status": reversed_refund.status})
