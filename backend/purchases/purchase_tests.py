@@ -1683,6 +1683,16 @@ class PurchaseFoundationTests(TestCase):
             user=self.user, idempotency_key="lc-reversal-001",
         )
         posted = post_landed_cost(cost_document=draft, user=self.user)
+        from purchases.models import LandedCostReversal, PostedImmutabilityError
+        with self.assertRaises(PostedImmutabilityError):
+            LandedCostReversal.objects.create(
+                cost_document=posted, reversal_date=self.day,
+                reason="Must not mask source journal",
+                journal_entry=posted.journal_entry,
+                idempotency_key="lc-reversal-forged-record",
+                created_by=self.user,
+            )
+        self.assertFalse(LandedCostReversal.objects.filter(cost_document=posted).exists())
         original_source = posted.journal_entry
         original_adjustment = posted.valuation_adjustments.get(
             adjustment_type="SALES_ISSUE", movement=issue,
