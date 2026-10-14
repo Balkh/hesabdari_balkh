@@ -115,3 +115,18 @@ The source/model-boundary hardening and its regression assertion were then verif
 - PostgreSQL script: Django tests **56 passed**, system check clean; pytest **862 passed**; script reported `POSTGRESQL VERIFICATION: PASS`.
 - The added regression confirms an ordinary source journal cannot be used to create a reversal metadata row that would incorrectly hide an active valuation layer.
 - The run is evidence for that exact source/test commit. The evidence-document-only follow-up itself requires its own CI run before this candidate is ready for user review.
+
+
+## 10. Phase 11 freeze decision — 2026-10-14
+
+The user approved freezing Phase 11 after reviewing the evidence. Final merged state:
+- PR #32 (late landed cost after supplier return): https://github.com/Balkh/hesabdari_balkh/pull/32 — merged.
+- PR #35 (negative-COGS receipt trace, compensating landed-cost reversal, and regression coverage): https://github.com/Balkh/hesabdari_balkh/pull/35 — merged.
+- Resulting `main` commit: `9daa70d3e715e16ca64b1e60303499b2db91ef1e`.
+- Main-branch CI on that exact commit: https://github.com/Balkh/hesabdari_balkh/actions/runs/38505826171 — all four jobs succeeded: backend, PostgreSQL, frontend, and Tauri.
+
+**Freeze boundary:** Phase 11's approved backend/API accounting contract and tested implementation are frozen at the commit above. Posted journals and stock-movement snapshots remain immutable; corrections use the supported compensating workflow, and reversal rejects histories where later dependent activity prevents safe reversal. This freeze does not claim support for arbitrary historical replay reversals, and it does not include the separate ERP UI for landed-cost entry/review. Future changes require a new, explicitly scoped phase/PR, tests, exact-head CI evidence, and review; do not modify this frozen contract silently.
+
+## 11. Next-phase handoff — Sales discovery before implementation
+
+Phase 8 Sales PR #19 remains open and unmerged: https://github.com/Balkh/hesabdari_balkh/pull/19. Its branch is divergent/stale relative to current `main`; it must not be merged directly. The next step is inspect-only: compare the exact PR diff and commit history against current `main`, map each change to the approved sales/accounting/stock-ownership contract, identify salvageable pieces, and collect current CI evidence. Only after that evidence review should implementation proceed on a fresh branch from current `main`. No Sales implementation or PR #19 merge is implied by this handoff.
