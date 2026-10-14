@@ -34,6 +34,7 @@ class SaleLineReadSerializer(serializers.ModelSerializer):
 
 
 class SaleReadSerializer(serializers.ModelSerializer):
+    created_by_id = serializers.IntegerField(read_only=True, allow_null=True)
     customer_id = serializers.IntegerField(read_only=True)
     customer_name = serializers.CharField(source="customer.name", read_only=True)
     currency_id = serializers.IntegerField(read_only=True)
@@ -69,6 +70,7 @@ class SaleLineCreateSerializer(serializers.Serializer):
 
 
 class SaleCreateSerializer(serializers.Serializer):
+    idempotency_key = serializers.CharField(max_length=128, allow_blank=False)
     customer_id = serializers.PrimaryKeyRelatedField(
         source="customer", queryset=Party.objects.filter(is_active=True, is_customer=True)
     )
@@ -124,6 +126,7 @@ class WarehouseCheckReadSerializer(serializers.ModelSerializer):
 
 
 class WarehouseCheckCreateSerializer(serializers.Serializer):
+    idempotency_key = serializers.CharField(max_length=128, allow_blank=False)
     sale_line_id = serializers.PrimaryKeyRelatedField(
         source="sale_line", queryset=SaleLine.objects.select_related("sale")
     )
