@@ -144,7 +144,6 @@ def sale_finalize(request, pk):
     try:
         finalized = finalize_sale(
             sale=sale, user=request.user,
-            idempotency_key=request.data.get("idempotency_key") or f"sale:{sale.pk}:journal",
         )
     except (SalesValidationError, ValueError) as exc:
         return _domain_error(exc)
@@ -167,7 +166,7 @@ def warehouse_check_collection(request):
             validated_data=serializer.validated_data, model=WarehouseCheck,
             create=lambda: prepare_warehouse_check(**data),
         )
-    except (SalesValidationError, ValueError) as exc:
+    except (SalesValidationError, ValueError, IntegrityError) as exc:
         return _domain_error(exc)
     return Response(
         WarehouseCheckReadSerializer(_check_queryset().get(pk=check.pk)).data,
