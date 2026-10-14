@@ -1,8 +1,8 @@
 # Phase 11 — Late Landed-Cost Finalization Contract
 
-**Contract status:** User-approved for implementation. **Implementation status:** Backend service/API implemented; not frozen. The release candidate must retain passing SQLite/PostgreSQL and frontend/Tauri evidence on its exact head SHA.
-**Base:** `phase/11-landed-cost-weight-allocation`
-**Work branch:** `phase/11-late-landed-cost-finalization`
+**Contract status:** Approved and frozen at the evidence-backed merge commit recorded in §10. **Implementation status:** Backend/API frozen; separate landed-cost UI remains deferred. Any future scope change requires a new phase/PR and fresh exact-head evidence.
+**Frozen main commit:** `9daa70d3e715e16ca64b1e60303499b2db91ef1e` (later main commits retain this Phase 11 implementation).
+**Current verification:** [main CI run 38507505349](https://github.com/Balkh/hesabdari_balkh/actions/runs/38507505349) — backend, PostgreSQL, frontend, and Tauri all succeeded.
 **Scope:** Costs received after a purchase receipt or goods-in-transit recognition, without editing posted purchase documents, journals, or stock movements.
 
 ## 1. Source document and accounting
