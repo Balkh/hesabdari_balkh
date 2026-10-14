@@ -587,6 +587,16 @@ class LandedCostReversal(models.Model):
     def save(self, *args, **kwargs):
         if self.pk is not None:
             raise PostedImmutabilityError("Landed-cost reversals are immutable")
+        if self.cost_document_id is None or self.journal_entry_id is None:
+            raise PostedImmutabilityError("A landed-cost reversal requires a source and compensating journal")
+        if self.cost_document.status != LandedCostStatus.POSTED:
+            raise PostedImmutabilityError("Only a posted landed-cost source can be reversed")
+        if (
+            self.journal_entry.status != "POSTED"
+            or self.journal_entry.source_type != "LANDED_COST_REVERSAL"
+            or self.journal_entry.source_id != self.cost_document.document_number
+        ):
+            raise PostedImmutabilityError("Reversal must reference its posted compensating source journal")
         return super().save(*args, **kwargs)
 
     def delete(self, *args, **kwargs):
@@ -618,6 +628,20 @@ class LandedCostReversalAdjustment(models.Model):
     def save(self, *args, **kwargs):
         if self.pk is not None:
             raise PostedImmutabilityError("Landed-cost adjustment reversals are immutable")
+        if self.reversal_id is None or self.original_adjustment_id is None or self.journal_entry_id is None:
+            raise PostedImmutabilityError("A valuation reversal requires all source links and its compensating journal")
+        reversal = self.reversal
+        original = self.original_adjustment
+        journal = self.journal_entry
+        expected_source = f"{reversal.cost_document.document_number}:ADJ:{original.pk}"
+        if original.cost_document_id != reversal.cost_document_id:
+            raise PostedImmutabilityError("A valuation reversal must belong to the same landed-cost source")
+        if (
+            journal.status != "POSTED"
+            or journal.source_type != "LANDED_COST_REVERSAL_ADJUSTMENT"
+            or journal.source_id != expected_source
+        ):
+            raise PostedImmutabilityError("Valuation reversal must reference its posted compensating journal")
         return super().save(*args, **kwargs)
 
     def delete(self, *args, **kwargs):
