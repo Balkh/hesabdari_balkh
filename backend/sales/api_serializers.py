@@ -150,7 +150,6 @@ class WarehouseCheckFinalizeSerializer(serializers.Serializer):
         max_digits=20, decimal_places=4, min_value=0, required=False, allow_null=True,
     )
     temporary_rate_date = serializers.DateField(required=False, allow_null=True)
-    idempotency_key = serializers.CharField(max_length=128, required=False, allow_blank=False)
 
 
 class WarehouseCheckCancelSerializer(serializers.Serializer):
