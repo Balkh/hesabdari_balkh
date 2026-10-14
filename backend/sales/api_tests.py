@@ -6,7 +6,8 @@ from rest_framework.test import APIClient
 
 from accounting.coa import seed_chart_of_accounts
 from currencies.models import Currency
-from inventory.services import assign_warehouse_account
+from inventory.services import assign_warehouse_account, receive_stock
+from inventory.stock import stock_for
 from parties.services import create_party
 from products.services import create_product
 from categories.services import create_category
@@ -118,3 +119,52 @@ class SalesApiTests(TestCase):
         }, format="json")
         self.assertEqual(response.status_code, 400, response.data)
         self.assertEqual(WarehouseCheck.objects.count(), 0)
+
+    def test_pre_delivery_cancel_endpoint_requires_confirmation_and_is_idempotent(self):
+        created = self.client.post(self.SALES_URL, self.payload(key="sale-cancel-api"), format="json")
+        self.assertEqual(created.status_code, 201, created.data)
+        sale_id = created.data["id"]
+        line_id = created.data["lines"][0]["id"]
+        finalized = self.client.post(f"{self.SALES_URL}{sale_id}/finalize/", {}, format="json")
+        self.assertEqual(finalized.status_code, 200, finalized.data)
+
+        receive_stock(
+            product=self.product, warehouse=self.warehouse, quantity=5,
+            unit_cost="4", currency=self.afn, movement_date=date(2026, 1, 10),
+            reference="RCPT-SALES-API-CANCEL",
+        )
+        created_check = self.client.post(self.CHECKS_URL, {
+            "idempotency_key": "check-cancel-api",
+            "sale_line_id": line_id, "warehouse_id": self.warehouse.pk, "quantity": 5,
+        }, format="json")
+        self.assertEqual(created_check.status_code, 201, created_check.data)
+        check_id = created_check.data["id"]
+        finalized_check = self.client.post(
+            f"{self.CHECKS_URL}{check_id}/finalize/", {}, format="json",
+        )
+        self.assertEqual(finalized_check.status_code, 200, finalized_check.data)
+        self.assertEqual(stock_for(self.product, self.warehouse), 0)
+
+        missing_confirmation = self.client.post(
+            f"{self.CHECKS_URL}{check_id}/cancel/",
+            {"reversal_date": "2026-01-11", "reason": "Not delivered",
+             "idempotency_key": "check-cancel-api-key"},
+            format="json",
+        )
+        self.assertEqual(missing_confirmation.status_code, 400, missing_confirmation.data)
+
+        payload = {
+            "reversal_date": "2026-01-11",
+            "reason": "Goods did not physically leave the warehouse",
+            "idempotency_key": "check-cancel-api-key",
+            "confirm_not_delivered": True,
+        }
+        first = self.client.post(f"{self.CHECKS_URL}{check_id}/cancel/", payload, format="json")
+        self.assertEqual(first.status_code, 200, first.data)
+        second = self.client.post(f"{self.CHECKS_URL}{check_id}/cancel/", payload, format="json")
+        self.assertEqual(second.status_code, 200, second.data)
+        self.assertEqual(first.data["id"], second.data["id"])
+        detail = self.client.get(f"{self.CHECKS_URL}{check_id}/")
+        self.assertEqual(detail.status_code, 200, detail.data)
+        self.assertTrue(detail.data["is_cancelled"])
+        self.assertEqual(stock_for(self.product, self.warehouse), 0)
