@@ -5,7 +5,7 @@ from django.contrib.auth import get_user_model
 from django.test import TestCase
 
 from accounting.coa import seed_chart_of_accounts
-from accounting.models import JournalEntry
+from accounting.models import JournalEntry, PostedImmutabilityError
 from customer_custody.models import CustomerCustodyEvent, CustodyEventType
 from customer_custody.services import custody_balance
 from categories.services import create_category
@@ -26,7 +26,7 @@ from sales.services import (
 )
 from sales.returns_services import create_sales_return, reverse_sales_return
 
-from .models import GoodsInTransitLot, TransitCustomerCustody, TransitDestinationTransfer, TransitLotStatus, TransitReceipt
+from .models import GoodsInTransitLot, TransitCustomerCustody, TransitDestinationTransfer, TransitLotStatus, TransitReceipt, TransitLossEvent
 from .services import TransitValidationError, receive_transit, transfer_transit_destination
 
 
@@ -621,3 +621,20 @@ class GoodsInTransitTests(TestCase):
         self.assertEqual(reversal.inventory_movement.movement_type, "SALES_ISSUE")
         self.assertEqual(reversal.inventory_movement.quantity, -2)
         self.assertEqual(stock_for(self.product, self.warehouse), 80)
+
+
+    def test_transit_loss_evidence_is_immutable(self):
+        purchase = self._purchase(document_number="PI-TRANSIT-LOSS-001")
+        post_purchase(purchase=purchase, user=self.user)
+        lot = GoodsInTransitLot.objects.get(purchase_line=purchase.lines.get())
+        loss = TransitLossEvent.objects.create(
+            lot=lot, quantity=2, loss_date=date(2026, 2, 2),
+            reason="Confirmed transport loss",
+            idempotency_key="transit-loss-evidence-001", created_by=self.user,
+        )
+        self.assertEqual(loss.lot_id, lot.pk)
+        self.assertEqual(loss.quantity, 2)
+        with self.assertRaises(PostedImmutabilityError):
+            loss.save()
+        with self.assertRaises(PostedImmutabilityError):
+            loss.delete()
