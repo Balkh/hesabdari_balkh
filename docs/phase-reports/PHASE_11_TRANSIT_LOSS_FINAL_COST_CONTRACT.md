@@ -1,48 +1,61 @@
-# Phase 11 — Transit Loss and Final Unit Cost Contract
+# Phase 11 — Purchase-Wide Transit Loss and Final Unit Cost Contract
 
 **Status:** Business rule confirmed by the user; implementation and evidence pending.
 **Branch:** `phase/11-transit-final-unit-cost`
 **Base:** `main` at `5ee0ae8b946c03307b2a4917ce045e577fc8f3b1`
 **Workflow:** INSPECT → IMPLEMENT → TEST → EVIDENCE → USER REVIEW → APPROVED → FROZEN.
 
-## 1. Confirmed business rule
+## 1. Confirmed business rule: one purchase, multiple vehicle arrivals
 
-For each purchase shipment, calculate final unit cost over the quantity that arrived in good condition, not the quantity originally purchased.
+The costing unit is the **complete purchase line/lot**, not each vehicle, trip, or partial arrival. A purchase of 10,000 barrels may arrive in several loads (for example, about 2,000 per truck). Those partial arrivals are physical receipt events only; they do not independently finalize the purchase's unit cost.
 
-`good_quantity = purchased_quantity - transit_wastage_quantity`
+When the purchased lot is reconciled and all applicable direct costs and wastage are known:
 
-`final_unit_cost = (net_purchase_cost + approved_direct_costs) / good_quantity`
+`good_quantity = original_purchased_quantity - confirmed_wastage_quantity`
 
-Example: 2,000 barrels purchased; 10 barrels leak or are damaged in transit; 1,990 barrels remain good. The full purchase cost plus freight, porter/labor, and other approved direct costs is absorbed by the 1,990 good barrels. The 10 lost barrels are recorded as quantity wastage, not as good inventory. Shared direct costs continue to use measured shipment weight where required by the existing contract.
+`final_unit_cost = (net_purchase_cost + all_approved_direct_costs) / good_quantity`
 
-## 2. Required records and invariants
+Example: 10,000 barrels purchased; 30 barrels confirmed lost across transport; 9,970 good barrels. If purchase cost is $170,000 and freight, porter/labor, loading/unloading and other approved direct costs total $3,000, final cost is $173,000 / 9,970 = approximately $17.3521 per good barrel.
 
-- Preserve the original purchased quantity, loss quantity, good quantity, purchase cost, and each direct-cost source separately.
+Do not finalize or independently calculate a different final cost per truck simply because one truck arrived earlier. Temporary/estimated cost may be used before reconciliation, but the final purchase-wide calculation must include all applicable costs and confirmed loss.
+
+## 2. Direct-cost allocation
+
+- Costs directly attributable to a specific purchase line are assigned to that line.
+- Shared freight and other shared direct costs use measured weight where required by the existing approved allocation contract.
+- Include only approved direct costs. Do not introduce insurance or other unapproved cost categories.
+- Preserve each cost document's currency, manually approved historical rate/date, immutable allocation snapshot, and source journal.
+- If a purchase consists of genuinely separate purchase lines with different products or independently attributable costs, compute each line's unit cost from its own net cost, allocated shared costs, and good quantity. Do not mix unlike products into one denominator.
+
+## 3. Required records and invariants
+
+- Preserve original purchased quantity, each physical receipt quantity, confirmed loss quantity, good quantity, purchase cost, and each direct-cost source separately.
 - A transit loss must be a distinct, immutable, auditable event with date, reason, actor, quantity, source shipment/lot, and idempotency protection. It must not be recorded by editing a posted purchase, posted journal, stock movement, or transit receipt.
-- Reject loss quantities that are non-positive, exceed the un-disposed transit quantity, or would make good quantity zero/negative.
-- Quantity reconciliation must explicitly account for transit loss in addition to remaining transit, company-owned warehouse receipt, and transit sale/disposition.
-- The final unit cost is based on total applicable cost divided by good quantity. Do not divide direct costs by original purchased quantity when a confirmed loss exists.
+- Reconcile the whole lot explicitly: original quantity must equal good quantity accounted for by company-owned transit remaining, company-owned warehouse receipts, transit sales/dispositions and other supported good-quantity flows, plus confirmed loss. Returns and customer-owned custody must be traceable without double-counting.
+- Reject non-positive loss quantities, duplicate/idempotency conflicts, quantities beyond the unreconciled quantity, and any event that makes good quantity zero/negative. Do not reject a valid retrospective loss solely because other good units from the same lot have already arrived or sold; use whole-lot reconciliation, not just current remaining transit quantity.
+- Final unit cost is based on the full applicable cost divided by the whole-lot good quantity. Do not divide direct costs by original purchased quantity after a confirmed loss.
 - The adjustment must flow through the existing chronological AVCO / landed-cost valuation path; do not create a second stock valuation engine.
-- If some goods were already sold, received, transferred, returned, or held in customer-owned custody before the loss/final cost was recorded, post balanced, traceable compensating valuation effects to the affected inventory/transit/COGS destinations. Do not rewrite historical journals or movement snapshots.
+- If some good units were already sold, received, transferred, returned, or held in customer-owned custody before final costing, post balanced, traceable compensating valuation effects to affected inventory/transit/COGS destinations. Do not rewrite historical journals or movement snapshots.
 - Customer revenue, customer balances, cash, and payment/allocation records must not change solely because cost is finalized.
-- Preserve manually approved historical currency rate/date, immutable allocation snapshots, atomic posting, idempotency, and reversal-only correction semantics.
+- Preserve atomic posting, idempotency, manual historical FX rate/date, immutable source snapshots, and reversal-only correction semantics. If history cannot be reconciled safely, fail closed and roll back.
 
-## 3. Required scenarios before acceptance
+## 4. Required scenarios before acceptance
 
-1. 2,000 purchased, 10 lost, 1,990 good; purchase cost only.
-2. Same shipment with freight and porter costs; final cost divides by 1,990.
-3. No loss; denominator remains original quantity.
-4. Loss quantity is zero, negative, exceeds remaining transit, or leaves no good quantity; reject atomically.
-5. Loss recorded before any receipt/sale.
-6. Partial transit sale before loss is recorded; recalculate prior COGS and remaining transit valuation through compensating journals.
-7. Partial warehouse receipt before loss; reconcile transit and warehouse value without double capitalization.
-8. Some quantity sold, some in transit, some in warehouse; final cost effects reconcile exactly across all destinations.
-9. Returns, transfers, and customer-owned custody are present.
-10. Duplicate and concurrent loss/final-cost submission creates only one event and one set of adjustments.
-11. SQLite and PostgreSQL tests, plus existing accounting, inventory, transit, landed-cost, sales, frontend and Tauri CI on the exact candidate SHA.
+1. 10,000 purchased, delivered in several partial vehicle receipts, 30 total lost; denominator is 9,970 for the whole purchase line.
+2. Same purchase with purchase cost only and no additional direct costs.
+3. Same purchase with freight, porter/labor and other approved direct costs; all costs are included before dividing by good quantity.
+4. Shared direct costs allocated by measured weight; line-specific costs assigned to the proper line; deterministic minor-unit rounding and remainder reconciliation.
+5. No loss; denominator remains original quantity.
+6. Zero/negative loss, over-reported loss, duplicate and concurrent submissions, or zero/negative good quantity; reject atomically.
+7. Loss is recorded after multiple partial receipts; whole-lot reconciliation still succeeds when valid.
+8. Partial transit sale or warehouse sale before final costing; recalculate prior COGS and remaining transit/inventory value with compensating journals.
+9. Some quantity sold, some in transit, some in warehouse; exact value reconciliation across all destinations.
+10. Returns, transfers, negative-stock obligations and customer-owned custody are present.
+11. Repeated/late direct-cost documents and finalization are idempotent; source records remain immutable.
+12. SQLite and PostgreSQL tests plus existing accounting, inventory, transit, landed-cost, sales, frontend and Tauri CI on the exact candidate SHA.
 
-## 4. Implementation boundary
+## 5. Implementation boundary
 
-The existing landed-cost posting code currently divides allocated late costs by the original purchase-line quantity. Merely changing that divisor is insufficient: transit loss also changes owned quantity and can require revaluation of already-sold and remaining units. Implementation must add the explicit loss/finalization record and integrate its valuation deltas with the existing ledger and AVCO replay. Any uncertain or unreconcilable history must fail closed and roll back atomically.
+The current landed-cost service divides allocated late costs by original purchase-line quantity. Merely changing that divisor is insufficient: whole-lot loss changes the cost per good unit and can require revaluation of already-sold and remaining units. Implementation must add explicit loss/reconciliation records and integrate their valuation deltas with the existing landed-cost ledger and AVCO replay. A partial truck arrival must never trigger final costing by itself. Any uncertain or unreconcilable history must fail closed.
 
 This contract records the user's confirmed business rule. It does not claim implementation, test success, approval, or freeze.
