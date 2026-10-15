@@ -132,3 +132,35 @@ class TransitDestinationTransfer(models.Model):
         return super().save(*args, **kwargs)
     def delete(self, *args, **kwargs):
         raise PostedImmutabilityError("Transit destination transfers cannot be deleted")
+
+
+class TransitLossEvent(models.Model):
+    """Immutable evidence of confirmed loss from a purchase-wide transit lot."""
+    lot = models.ForeignKey(
+        GoodsInTransitLot, on_delete=models.PROTECT, related_name="loss_events"
+    )
+    quantity = models.PositiveIntegerField()
+    loss_date = models.DateField()
+    reason = models.TextField()
+    idempotency_key = models.CharField(max_length=128, unique=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True,
+        on_delete=models.SET_NULL, related_name="transit_loss_events_created",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["loss_date", "id"]
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(quantity__gt=0), name="transit_loss_qty_gt0"
+            ),
+        ]
+
+    def save(self, *args, **kwargs):
+        if self.pk is not None:
+            raise PostedImmutabilityError("Transit loss events are immutable")
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise PostedImmutabilityError("Transit loss events cannot be deleted")
