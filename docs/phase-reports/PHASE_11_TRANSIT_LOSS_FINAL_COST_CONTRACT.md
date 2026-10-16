@@ -19,6 +19,8 @@ Example: 10,000 barrels purchased; 30 barrels confirmed lost across transport; 9
 
 Do not finalize or independently calculate a different final cost per truck simply because one truck arrived earlier. Temporary/estimated cost may be used before reconciliation, but the final purchase-wide calculation must include all applicable costs and confirmed loss.
 
+**Purchase-invoice baseline (explicit clarification):** the purchase price is not an unknown estimate. Each posted purchase line already has its own invoice-backed net purchase cost (`net_total`, after the approved line discount) and original quantity. That is the source cost for that line from the moment the purchase is posted. A temporary unit cost means the *provisional valuation* before all approved direct costs and confirmed wastage are finalized; it does not mean the system may guess or replace the invoice purchase price. Final cost must start from that line's invoice-backed net cost, add its properly allocated direct costs, and divide by the line's reconciled good quantity. Keep different purchase lines/products separate, preserve the original invoice and exchange-rate/date snapshots, and apply any later difference through compensating valuation entries.
+
 ## 2. Direct-cost allocation
 
 - Costs directly attributable to a specific purchase line are assigned to that line.
