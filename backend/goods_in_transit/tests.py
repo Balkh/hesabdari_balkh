@@ -652,7 +652,8 @@ class GoodsInTransitTests(TestCase):
             reason="Confirmed transport loss",
             idempotency_key="transit-loss-cost-001", created_by=self.user,
         )
-        self.assertEqual(_good_quantity_for_line(line, lot=lot), 98)
+        with self.assertRaisesRegex(LandedCostPostingError, "purchase-wide loss valuation replay"):
+            _good_quantity_for_line(line, lot=lot)
 
     def test_landed_cost_allocation_rejects_loss_of_entire_purchase_line(self):
         purchase = self._purchase(document_number="PI-TRANSIT-LOSS-COST-002")
@@ -664,6 +665,6 @@ class GoodsInTransitTests(TestCase):
             reason="Entire lot confirmed lost",
             idempotency_key="transit-loss-cost-002", created_by=self.user,
         )
-        with self.assertRaisesRegex(LandedCostPostingError, "no good quantity"):
+        with self.assertRaisesRegex(LandedCostPostingError, "purchase-wide loss valuation replay"):
             _good_quantity_for_line(line, lot=lot)
 
