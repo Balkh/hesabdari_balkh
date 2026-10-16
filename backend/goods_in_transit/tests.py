@@ -703,3 +703,28 @@ class GoodsInTransitTests(TestCase):
         with self.assertRaisesRegex(LandedCostPostingError, "purchase-wide loss valuation replay"):
             _good_quantity_for_line(line, lot=lot)
 
+
+    def test_transit_loss_guard_is_scoped_to_its_own_purchase_line(self):
+        first_purchase = self._purchase(document_number="PI-TRANSIT-LOSS-SCOPE-001")
+        second_purchase = self._purchase(document_number="PI-TRANSIT-LOSS-SCOPE-002")
+        post_purchase(purchase=first_purchase, user=self.user)
+        post_purchase(purchase=second_purchase, user=self.user)
+
+        first_line = first_purchase.lines.get()
+        second_line = second_purchase.lines.get()
+        first_lot = GoodsInTransitLot.objects.get(purchase_line=first_line)
+        second_lot = GoodsInTransitLot.objects.get(purchase_line=second_line)
+        self.assertEqual(first_lot.product_id, second_lot.product_id)
+        self.assertNotEqual(first_lot.purchase_line_id, second_lot.purchase_line_id)
+
+        TransitLossEvent.objects.create(
+            lot=first_lot, quantity=2, loss_date=date(2026, 2, 2),
+            reason="Loss belongs only to first purchase",
+            idempotency_key="transit-loss-scope-001", created_by=self.user,
+        )
+
+        with self.assertRaisesRegex(LandedCostPostingError, "purchase-wide loss valuation replay"):
+            _good_quantity_for_line(first_line, lot=first_lot)
+        # A loss on one purchase must not contaminate another purchase line's
+        # good-quantity denominator, even for the same product.
+        self.assertEqual(_good_quantity_for_line(second_line, lot=second_lot), second_line.quantity)
