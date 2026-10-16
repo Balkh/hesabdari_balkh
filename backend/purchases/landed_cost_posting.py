@@ -115,12 +115,12 @@ def _posted_prior_allocations(line_ids):
 
 
 def _good_quantity_for_line(line, *, lot=None):
-    """Return purchase-line quantity available to absorb capitalized direct costs.
+    """Return the safe denominator for capitalized direct costs.
 
-    Transit wastage is purchase-line-specific. The invoice-backed purchase
-    cost remains unchanged; approved direct costs are allocated across the
-    confirmed good quantity. This helper deliberately does not post or infer
-    a loss event: loss events must be confirmed through the Transit workflow.
+    Without transit loss, the source purchase-line quantity is authoritative.
+    Any recorded transit loss blocks this path until the purchase-wide loss
+    replay can revalue prior sales, receipts, warehouse AVCO, and transit assets
+    together. It is unsafe to change only the denominator.
     """
     from goods_in_transit.models import GoodsInTransitLot, TransitLossEvent
 
