@@ -345,3 +345,43 @@ def receive_transit(*, lot, quantity, receipt_date, user=None, idempotency_key=N
         if record is not None and (record.response_body or {}).get("receipt_id"):
             return TransitReceipt.objects.get(pk=record.response_body["receipt_id"])
         raise
+
+
+@transaction.atomic
+def record_transit_loss(*, lot, quantity, loss_date, reason, idempotency_key, user=None):
+    """Record validated, immutable evidence for a confirmed transit loss.
+
+    This does not post valuation. Downstream value-changing operations remain
+    blocked until purchase-wide replay and its compensating journals exist.
+    """
+    from .models import TransitLossEvent
+
+    lot_id = getattr(lot, "pk", lot)
+    locked_lot = GoodsInTransitLot.objects.select_for_update().get(pk=lot_id)
+    if not idempotency_key or not str(idempotency_key).strip():
+        raise TransitValidationError("A non-empty idempotency key is required.")
+    if not reason or not str(reason).strip():
+        raise TransitValidationError("A reason is required for a confirmed transit loss.")
+    if loss_date is None or loss_date < locked_lot.ownership_date:
+        raise TransitValidationError("Transit loss date cannot precede company ownership.")
+    try:
+        quantity = int(quantity)
+    except (TypeError, ValueError) as exc:
+        raise TransitValidationError("Transit loss quantity must be a positive whole number.") from exc
+    if quantity <= 0:
+        raise TransitValidationError("Transit loss quantity must be a positive whole number.")
+
+    existing = TransitLossEvent.objects.filter(idempotency_key=idempotency_key).first()
+    if existing is not None:
+        if (existing.lot_id != locked_lot.pk or existing.quantity != quantity
+                or existing.loss_date != loss_date or existing.reason != reason):
+            raise TransitValidationError("Idempotency key was already used for different loss evidence.")
+        return existing
+
+    reported = sum(TransitLossEvent.objects.filter(lot=locked_lot).values_list("quantity", flat=True))
+    if reported + quantity > locked_lot.original_quantity:
+        raise TransitValidationError("Cumulative transit loss cannot exceed the original purchase quantity.")
+    return TransitLossEvent.objects.create(
+        lot=locked_lot, quantity=quantity, loss_date=loss_date, reason=reason,
+        idempotency_key=idempotency_key, created_by=user,
+    )
