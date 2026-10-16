@@ -359,13 +359,14 @@ def record_transit_loss(*, lot, quantity, loss_date, reason, idempotency_key, us
     actor = _actor(user)
     lot_id = getattr(lot, "pk", lot)
     locked_lot = GoodsInTransitLot.objects.select_for_update().get(pk=lot_id)
-    if not idempotency_key or not str(idempotency_key).strip():
+    if not isinstance(idempotency_key, str) or not idempotency_key.strip():
         raise TransitValidationError("A non-empty idempotency key is required.")
-    if not reason or not str(reason).strip():
+    idempotency_key = idempotency_key.strip()
+    if not isinstance(reason, str) or not reason.strip():
         raise TransitValidationError("A reason is required for a confirmed transit loss.")
+    reason = reason.strip()
     if loss_date is None or loss_date < locked_lot.ownership_date:
         raise TransitValidationError("Transit loss date cannot precede company ownership.")
-    assert_posting_date_open(loss_date)
     try:
         parsed_quantity = int(quantity)
     except (TypeError, ValueError, OverflowError) as exc:
@@ -383,6 +384,9 @@ def record_transit_loss(*, lot, quantity, loss_date, reason, idempotency_key, us
             raise TransitValidationError("Idempotency key was already used for different loss evidence.")
         return existing
 
+    # A genuine retry of an already-recorded event is safe even if the fiscal
+    # period has since closed; only a new posting must pass the open-period gate.
+    assert_posting_date_open(loss_date)
     reported = sum(TransitLossEvent.objects.filter(lot=locked_lot).values_list("quantity", flat=True))
     if reported + quantity > locked_lot.original_quantity:
         raise TransitValidationError("Cumulative transit loss cannot exceed the original purchase quantity.")
