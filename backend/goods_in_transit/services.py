@@ -390,10 +390,22 @@ def record_transit_loss(*, lot, quantity, loss_date, reason, idempotency_key, us
     reported = sum(TransitLossEvent.objects.filter(lot=locked_lot).values_list("quantity", flat=True))
     if reported + quantity >= locked_lot.original_quantity:
         raise TransitValidationError("Cumulative transit loss must leave at least one good unit in the purchase line.")
+    if reported:
+        raise TransitValidationError("A transit lot can have only one final reconciled loss event.")
+    if quantity != locked_lot.remaining_quantity:
+        raise TransitValidationError(
+            "Transit loss can be recorded only after all other owned goods are accounted for; "
+            "loss quantity must equal the lot's remaining transit quantity."
+        )
     event = TransitLossEvent.objects.create(
         lot=locked_lot, quantity=quantity, loss_date=loss_date, reason=reason,
         idempotency_key=idempotency_key, created_by=actor,
     )
+    # The confirmed loss consumes the only remaining company-owned Transit
+    # quantity. Historical journals and stock movements remain immutable.
+    locked_lot.remaining_quantity = 0
+    locked_lot.status = TransitLotStatus.CLOSED
+    locked_lot.save(allow_state_transition=True, update_fields={"remaining_quantity", "status"})
     record_audit_event(
         user=actor, action=AuditAction.CREATE, entity="TransitLossEvent",
         entity_id=event.pk, reference=locked_lot.purchase.document_number,
