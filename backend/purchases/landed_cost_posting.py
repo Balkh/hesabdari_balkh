@@ -1033,7 +1033,7 @@ def post_transit_sales_return_landed_cost_adjustments(*, lot, sales_return, user
         cost_document__status=LandedCostStatus.POSTED,
         cost_document__reversal__isnull=True,
     ).select_related("cost_document").order_by("cost_document__cost_date", "id"):
-        per_unit = _q4(allocation.afn_amount / Decimal(lot.original_quantity))
+        per_unit = _q4(allocation.afn_amount / Decimal(_good_quantity_for_line(lot.purchase_line, lot=lot)))
         amount = _q2(per_unit * Decimal(sales_return.quantity))
         if not amount:
             continue
