@@ -4,6 +4,7 @@ from decimal import Decimal
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
 from django.test import TestCase
+from unittest.mock import patch
 
 from accounting.coa import seed_chart_of_accounts
 from accounting.models import JournalEntry, PostedImmutabilityError
@@ -741,11 +742,17 @@ class GoodsInTransitTests(TestCase):
             reason="First confirmed shortage", idempotency_key="loss-service-001",
             user=self.user,
         )
-        retry = record_transit_loss(
-            lot=lot, quantity=30, loss_date=date(2026, 2, 2),
-            reason="First confirmed shortage", idempotency_key="loss-service-001",
-            user=self.user,
-        )
+        # A retry must return the immutable event even if its original
+        # posting period has since closed; no new posting occurs on retry.
+        with patch(
+            "goods_in_transit.services.assert_posting_date_open",
+            side_effect=TransitValidationError("period is closed"),
+        ):
+            retry = record_transit_loss(
+                lot=lot, quantity=30, loss_date=date(2026, 2, 2),
+                reason="First confirmed shortage", idempotency_key="loss-service-001",
+                user=self.user,
+            )
         self.assertEqual(first.pk, retry.pk)
         self.assertEqual(TransitLossEvent.objects.filter(lot=lot).count(), 1)
 
