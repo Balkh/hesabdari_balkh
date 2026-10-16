@@ -19,6 +19,7 @@ from warehouses.services import create_warehouse
 
 from purchases.models import PurchaseDeliveryMode
 from purchases.services import create_purchase, post_purchase
+from purchases.landed_cost_posting import _good_quantity_for_line, LandedCostPostingError
 from sales.models import PaymentMode, SalesChannel, SaleStatus, TransitSaleAllocation
 from sales.services import (
     SalesValidationError, create_sale, finalize_sale,
@@ -638,3 +639,31 @@ class GoodsInTransitTests(TestCase):
             loss.save()
         with self.assertRaises(PostedImmutabilityError):
             loss.delete()
+
+    def test_landed_cost_allocation_uses_confirmed_good_transit_quantity(self):
+        purchase = self._purchase(document_number="PI-TRANSIT-LOSS-COST-001")
+        post_purchase(purchase=purchase, user=self.user)
+        line = purchase.lines.get()
+        lot = GoodsInTransitLot.objects.get(purchase_line=line)
+        self.assertEqual(_good_quantity_for_line(line, lot=lot), 100)
+
+        TransitLossEvent.objects.create(
+            lot=lot, quantity=2, loss_date=date(2026, 2, 2),
+            reason="Confirmed transport loss",
+            idempotency_key="transit-loss-cost-001", created_by=self.user,
+        )
+        self.assertEqual(_good_quantity_for_line(line, lot=lot), 98)
+
+    def test_landed_cost_allocation_rejects_loss_of_entire_purchase_line(self):
+        purchase = self._purchase(document_number="PI-TRANSIT-LOSS-COST-002")
+        post_purchase(purchase=purchase, user=self.user)
+        line = purchase.lines.get()
+        lot = GoodsInTransitLot.objects.get(purchase_line=line)
+        TransitLossEvent.objects.create(
+            lot=lot, quantity=100, loss_date=date(2026, 2, 2),
+            reason="Entire lot confirmed lost",
+            idempotency_key="transit-loss-cost-002", created_by=self.user,
+        )
+        with self.assertRaisesRegex(LandedCostPostingError, "no good quantity"):
+            _good_quantity_for_line(line, lot=lot)
+
