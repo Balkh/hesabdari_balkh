@@ -132,15 +132,18 @@ def _good_quantity_for_line(line, *, lot=None):
         raise LandedCostPostingError(
             f"Transit lot {lot.pk} original quantity does not match purchase line {line.pk}."
         )
-    lost_quantity = sum(
-        TransitLossEvent.objects.filter(lot=lot).values_list("quantity", flat=True)
-    )
-    good_quantity = line.quantity - lost_quantity
-    if good_quantity <= 0:
+    loss_events = TransitLossEvent.objects.filter(lot=lot)
+    if loss_events.exists():
+        # A loss changes the unit cost of every surviving unit and must also
+        # revalue prior transit sales, receipts, and warehouse AVCO. Merely
+        # changing the denominator here would leave 1430 and historic COGS
+        # inconsistent. Until the purchase-wide loss replay posts those
+        # compensating journals atomically, reject landed-cost posting.
         raise LandedCostPostingError(
-            f"Transit purchase line {line.pk} has no good quantity remaining after confirmed losses."
+            f"Transit purchase line {line.pk} has confirmed loss events without "
+            "a posted purchase-wide loss valuation replay; landed-cost posting is blocked."
         )
-    return good_quantity
+    return line.quantity
 
 
 def _extra_cost_map(lines, allocations, *, lock=True):
