@@ -365,9 +365,12 @@ def record_transit_loss(*, lot, quantity, loss_date, reason, idempotency_key, us
     if loss_date is None or loss_date < locked_lot.ownership_date:
         raise TransitValidationError("Transit loss date cannot precede company ownership.")
     try:
-        quantity = int(quantity)
-    except (TypeError, ValueError) as exc:
+        parsed_quantity = int(quantity)
+    except (TypeError, ValueError, OverflowError) as exc:
         raise TransitValidationError("Transit loss quantity must be a positive whole number.") from exc
+    if isinstance(quantity, bool) or str(parsed_quantity) != str(quantity).strip():
+        raise TransitValidationError("Transit loss quantity must be a positive whole number.")
+    quantity = parsed_quantity
     if quantity <= 0:
         raise TransitValidationError("Transit loss quantity must be a positive whole number.")
 
