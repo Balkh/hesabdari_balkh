@@ -640,6 +640,41 @@ class GoodsInTransitTests(TestCase):
         with self.assertRaises(PostedImmutabilityError):
             loss.delete()
 
+    def test_confirmed_loss_blocks_transit_sale_and_receipt_until_revaluation(self):
+        purchase = self._purchase(document_number="PI-TRANSIT-LOSS-BLOCK-001")
+        post_purchase(purchase=purchase, user=self.user)
+        lot = GoodsInTransitLot.objects.get(purchase_line=purchase.lines.get())
+        sale = create_sale(
+            customer=self.customer, sale_date=date(2026, 2, 3),
+            currency=self.usd, channel=SalesChannel.WHOLESALE,
+            payment_mode=PaymentMode.CREDIT,
+            lines=[{
+                "product": self.product, "unit": self.product.primary_uom,
+                "quantity": 5, "unit_price": "120", "transit_lot": lot,
+            }],
+            user=self.user, document_number="SI-TRANSIT-LOSS-BLOCK-001",
+        )
+        TransitLossEvent.objects.create(
+            lot=lot, quantity=2, loss_date=date(2026, 2, 2),
+            reason="Confirmed loss awaiting valuation replay",
+            idempotency_key="transit-loss-block-001", created_by=self.user,
+        )
+
+        with self.assertRaisesRegex(SalesValidationError, "purchase-wide loss valuation replay"):
+            finalize_sale(sale=sale, user=self.user)
+        with self.assertRaisesRegex(TransitValidationError, "purchase-wide loss valuation replay"):
+            receive_transit(
+                lot=lot, quantity=10, receipt_date=date(2026, 2, 4),
+                user=self.user, idempotency_key="transit-loss-block-receipt-001",
+            )
+
+        sale.refresh_from_db()
+        lot.refresh_from_db()
+        self.assertEqual(sale.status, SaleStatus.DRAFT)
+        self.assertEqual(lot.remaining_quantity, lot.original_quantity)
+        self.assertEqual(TransitSaleAllocation.objects.filter(sale_line__sale=sale).count(), 0)
+        self.assertEqual(TransitReceipt.objects.filter(lot=lot).count(), 0)
+
     def test_landed_cost_allocation_uses_confirmed_good_transit_quantity(self):
         purchase = self._purchase(document_number="PI-TRANSIT-LOSS-COST-001")
         post_purchase(purchase=purchase, user=self.user)
