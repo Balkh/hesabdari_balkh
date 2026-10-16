@@ -180,7 +180,7 @@ def finalize_sale(*, sale, user=None, idempotency_key=None):
         if sale.payment_mode == PaymentMode.CREDIT:
             attribute_journal_line(journal.lines.get(account__code=RECEIVABLE_ACCOUNT), party=sale.customer, user=actor)
 
-        from goods_in_transit.models import GoodsInTransitLot, TransitLotStatus
+        from goods_in_transit.models import GoodsInTransitLot, TransitLotStatus, TransitLossEvent
         transit_lines = list(
             SaleLine.objects.select_for_update().filter(
                 sale_id=sale.pk, transit_lot__isnull=False
@@ -191,6 +191,11 @@ def finalize_sale(*, sale, user=None, idempotency_key=None):
             lot = GoodsInTransitLot.objects.select_for_update(of=("self",)).get(pk=line.transit_lot_id)
             if lot.status != TransitLotStatus.OPEN:
                 raise SalesValidationError("Transit lot is not open.")
+            if TransitLossEvent.objects.filter(lot=lot).exists():
+                raise SalesValidationError(
+                    "Transit sale is blocked because this lot has confirmed loss without "
+                    "a posted purchase-wide loss valuation replay."
+                )
             if sale.sale_date < lot.ownership_date:
                 raise SalesValidationError("Sale date cannot precede Transit ownership date.")
             if line.quantity > lot.remaining_quantity:
