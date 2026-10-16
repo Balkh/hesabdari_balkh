@@ -1,7 +1,8 @@
 from decimal import Decimal
 
 from django.conf import settings
-from django.db import models
+from django.core.exceptions import ValidationError
+from django.db import models, transaction
 
 from accounting.models import JournalEntry, PostedImmutabilityError
 
@@ -160,7 +161,20 @@ class TransitLossEvent(models.Model):
     def save(self, *args, **kwargs):
         if self.pk is not None:
             raise PostedImmutabilityError("Transit loss events are immutable")
-        return super().save(*args, **kwargs)
+        # Serialize aggregate validation on the source lot so direct model
+        # creation cannot bypass the service's cumulative quantity guard.
+        with transaction.atomic():
+            lot = GoodsInTransitLot.objects.select_for_update().get(pk=self.lot_id)
+            if self.loss_date < lot.ownership_date:
+                raise ValidationError("Transit loss date cannot precede company ownership.")
+            already_reported = sum(
+                type(self).objects.filter(lot_id=lot.pk).values_list("quantity", flat=True)
+            )
+            if self.quantity <= 0 or already_reported + self.quantity > lot.original_quantity:
+                raise ValidationError(
+                    "Cumulative transit loss cannot exceed the original purchase quantity."
+                )
+            return super().save(*args, **kwargs)
 
     def delete(self, *args, **kwargs):
         raise PostedImmutabilityError("Transit loss events cannot be deleted")
