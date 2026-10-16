@@ -18,7 +18,7 @@ from security.services import record_audit_event
 from customer_custody.models import CustomerCustodyEvent, CustomerOwnershipEntitlement, CustodyEventType
 from customer_custody.services import place_customer_custody
 
-from .models import GoodsInTransitLot, TransitCustomerCustody, TransitDestinationTransfer, TransitLotStatus, TransitReceipt
+from .models import GoodsInTransitLot, TransitCustomerCustody, TransitDestinationTransfer, TransitLotStatus, TransitReceipt, TransitLossEvent
 
 
 class TransitValidationError(ValueError):
@@ -109,6 +109,11 @@ def _receive_transit_legacy(*, lot, quantity, receipt_date, user=None,
                 ).get(pk=lot_id)
                 if lot.status != TransitLotStatus.OPEN:
                     raise TransitValidationError("Transit lot is not open.")
+                if TransitLossEvent.objects.filter(lot=lot).exists():
+                    raise TransitValidationError(
+                        "Transit receipt is blocked because this lot has confirmed loss without "
+                        "a posted purchase-wide loss valuation replay."
+                    )
                 assert_posting_date_open(receipt_date)
                 if quantity > lot.remaining_quantity:
                     raise TransitValidationError("Receipt exceeds remaining Transit quantity.")
@@ -190,6 +195,11 @@ def transfer_transit_destination(*, lot, warehouse, quantity, transfer_date, use
             lot = GoodsInTransitLot.objects.select_for_update().select_related("destination_warehouse").get(pk=lot_id)
             if lot.status != TransitLotStatus.OPEN:
                 raise TransitValidationError("Transit lot is not open.")
+            if TransitLossEvent.objects.filter(lot=lot).exists():
+                raise TransitValidationError(
+                    "Transit transfer is blocked because this lot has confirmed loss without "
+                    "a posted purchase-wide loss valuation replay."
+                )
             if quantity > lot.remaining_quantity:
                 raise TransitValidationError("Transfer exceeds remaining Transit quantity.")
             # A lot has exactly one destination warehouse. Recording a partial
@@ -229,6 +239,11 @@ def _receive_transit_core(*, lot, quantity, receipt_date, user=None, idempotency
             lot = GoodsInTransitLot.objects.select_for_update().select_related("purchase", "product", "currency", "destination_warehouse").get(pk=lot_id)
             if lot.status != TransitLotStatus.OPEN:
                 raise TransitValidationError("Transit lot is not open.")
+            if TransitLossEvent.objects.filter(lot=lot).exists():
+                raise TransitValidationError(
+                    "Transit receipt is blocked because this lot has confirmed loss without "
+                    "a posted purchase-wide loss valuation replay."
+                )
             assert_posting_date_open(receipt_date)
             allocations = list(TransitSaleAllocation.objects.select_related("sale_line__sale__customer").filter(transit_lot=lot).order_by("id"))
             sale_line_ids = [a.sale_line_id for a in allocations]
