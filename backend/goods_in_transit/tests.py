@@ -28,7 +28,7 @@ from sales.services import (
 from sales.returns_services import create_sales_return, reverse_sales_return
 
 from .models import GoodsInTransitLot, TransitCustomerCustody, TransitDestinationTransfer, TransitLotStatus, TransitReceipt, TransitLossEvent
-from .services import TransitValidationError, receive_transit, transfer_transit_destination
+from .services import TransitValidationError, receive_transit, transfer_transit_destination, record_transit_loss
 
 
 class GoodsInTransitTests(TestCase):
@@ -728,3 +728,60 @@ class GoodsInTransitTests(TestCase):
         # A loss on one purchase must not contaminate another purchase line's
         # good-quantity denominator, even for the same product.
         self.assertEqual(_good_quantity_for_line(second_line, lot=second_lot), second_line.quantity)
+
+
+    def test_record_transit_loss_is_idempotent_and_reconciles_cumulative_quantity(self):
+        purchase = self._purchase(document_number="PI-TRANSIT-LOSS-SERVICE-001")
+        post_purchase(purchase=purchase, user=self.user)
+        lot = GoodsInTransitLot.objects.get(purchase_line=purchase.lines.get())
+
+        first = record_transit_loss(
+            lot=lot, quantity=30, loss_date=date(2026, 2, 2),
+            reason="First confirmed shortage", idempotency_key="loss-service-001",
+            user=self.user,
+        )
+        retry = record_transit_loss(
+            lot=lot, quantity=30, loss_date=date(2026, 2, 2),
+            reason="First confirmed shortage", idempotency_key="loss-service-001",
+            user=self.user,
+        )
+        self.assertEqual(first.pk, retry.pk)
+        self.assertEqual(TransitLossEvent.objects.filter(lot=lot).count(), 1)
+
+        record_transit_loss(
+            lot=lot, quantity=70, loss_date=date(2026, 2, 3),
+            reason="Second confirmed shortage", idempotency_key="loss-service-002",
+            user=self.user,
+        )
+        with self.assertRaisesRegex(TransitValidationError, "cannot exceed the original purchase quantity"):
+            record_transit_loss(
+                lot=lot, quantity=1, loss_date=date(2026, 2, 4),
+                reason="Excess shortage", idempotency_key="loss-service-003",
+                user=self.user,
+            )
+        self.assertEqual(
+            sum(TransitLossEvent.objects.filter(lot=lot).values_list("quantity", flat=True)),
+            lot.original_quantity,
+        )
+
+    def test_record_transit_loss_rejects_conflicting_idempotency_and_pre_ownership_date(self):
+        purchase = self._purchase(document_number="PI-TRANSIT-LOSS-SERVICE-002")
+        post_purchase(purchase=purchase, user=self.user)
+        lot = GoodsInTransitLot.objects.get(purchase_line=purchase.lines.get())
+        record_transit_loss(
+            lot=lot, quantity=2, loss_date=date(2026, 2, 2),
+            reason="Confirmed shortage", idempotency_key="loss-service-conflict-001",
+            user=self.user,
+        )
+        with self.assertRaisesRegex(TransitValidationError, "different loss evidence"):
+            record_transit_loss(
+                lot=lot, quantity=3, loss_date=date(2026, 2, 2),
+                reason="Confirmed shortage", idempotency_key="loss-service-conflict-001",
+                user=self.user,
+            )
+        with self.assertRaisesRegex(TransitValidationError, "cannot precede company ownership"):
+            record_transit_loss(
+                lot=lot, quantity=1, loss_date=date(2026, 1, 31),
+                reason="Invalid historical date", idempotency_key="loss-service-date-001",
+                user=self.user,
+            )
