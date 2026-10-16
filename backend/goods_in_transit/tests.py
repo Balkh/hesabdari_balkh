@@ -755,11 +755,11 @@ class GoodsInTransitTests(TestCase):
         self.assertEqual(TransitLossEvent.objects.filter(lot=lot).count(), 1)
 
         record_transit_loss(
-            lot=lot, quantity=70, loss_date=date(2026, 2, 3),
+            lot=lot, quantity=69, loss_date=date(2026, 2, 3),
             reason="Second confirmed shortage", idempotency_key="loss-service-002",
             user=self.user,
         )
-        with self.assertRaisesRegex(TransitValidationError, "cannot exceed the original purchase quantity"):
+        with self.assertRaisesRegex(TransitValidationError, "leave at least one good unit"):
             record_transit_loss(
                 lot=lot, quantity=1, loss_date=date(2026, 2, 4),
                 reason="Excess shortage", idempotency_key="loss-service-003",
@@ -767,7 +767,7 @@ class GoodsInTransitTests(TestCase):
             )
         self.assertEqual(
             sum(TransitLossEvent.objects.filter(lot=lot).values_list("quantity", flat=True)),
-            lot.original_quantity,
+            lot.original_quantity - 1,
         )
 
     def test_record_transit_loss_rejects_conflicting_idempotency_and_pre_ownership_date(self):
