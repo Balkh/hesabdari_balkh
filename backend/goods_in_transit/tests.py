@@ -692,18 +692,16 @@ class GoodsInTransitTests(TestCase):
         with self.assertRaisesRegex(LandedCostPostingError, "purchase-wide loss valuation replay"):
             _good_quantity_for_line(line, lot=lot)
 
-    def test_landed_cost_allocation_rejects_loss_of_entire_purchase_line(self):
+    def test_transit_loss_rejects_loss_of_entire_purchase_line(self):
         purchase = self._purchase(document_number="PI-TRANSIT-LOSS-COST-002")
         post_purchase(purchase=purchase, user=self.user)
-        line = purchase.lines.get()
-        lot = GoodsInTransitLot.objects.get(purchase_line=line)
-        TransitLossEvent.objects.create(
-            lot=lot, quantity=100, loss_date=date(2026, 2, 2),
-            reason="Entire lot confirmed lost",
-            idempotency_key="transit-loss-cost-002", created_by=self.user,
-        )
-        with self.assertRaisesRegex(LandedCostPostingError, "purchase-wide loss valuation replay"):
-            _good_quantity_for_line(line, lot=lot)
+        lot = GoodsInTransitLot.objects.get(purchase_line=purchase.lines.get())
+        with self.assertRaisesRegex(ValidationError, "leave at least one good unit"):
+            TransitLossEvent.objects.create(
+                lot=lot, quantity=100, loss_date=date(2026, 2, 2),
+                reason="Entire lot confirmed lost",
+                idempotency_key="transit-loss-cost-002", created_by=self.user,
+            )
 
 
     def test_transit_loss_guard_is_scoped_to_its_own_purchase_line(self):
