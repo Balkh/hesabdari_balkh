@@ -405,18 +405,3 @@ def record_transit_loss(*, lot, quantity, loss_date, reason, idempotency_key, us
         reason=reason,
     )
     return event
-    record_audit_event(
-        user=actor, action=AuditAction.CREATE, entity="TransitLossEvent",
-        entity_id=event.pk, reference=locked_lot.purchase.document_number,
-        previous_state=None,
-        new_state={
-            "lot_id": locked_lot.pk,
-            "purchase_line_id": locked_lot.purchase_line_id,
-            "quantity": quantity,
-            "loss_date": loss_date.isoformat(),
-            "reason": reason,
-            "valuation_status": "PENDING_PURCHASE_WIDE_REPLAY",
-        },
-        reason=reason,
-    )
-    return event
