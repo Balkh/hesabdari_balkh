@@ -114,6 +114,35 @@ def _posted_prior_allocations(line_ids):
     ))
 
 
+def _good_quantity_for_line(line, *, lot=None):
+    """Return purchase-line quantity available to absorb capitalized direct costs.
+
+    Transit wastage is purchase-line-specific. The invoice-backed purchase
+    cost remains unchanged; approved direct costs are allocated across the
+    confirmed good quantity. This helper deliberately does not post or infer
+    a loss event: loss events must be confirmed through the Transit workflow.
+    """
+    from goods_in_transit.models import GoodsInTransitLot, TransitLossEvent
+
+    if lot is None:
+        lot = GoodsInTransitLot.objects.filter(purchase_line_id=line.pk).first()
+    if lot is None:
+        return line.quantity
+    if lot.original_quantity != line.quantity:
+        raise LandedCostPostingError(
+            f"Transit lot {lot.pk} original quantity does not match purchase line {line.pk}."
+        )
+    lost_quantity = sum(
+        TransitLossEvent.objects.filter(lot=lot).values_list("quantity", flat=True)
+    )
+    good_quantity = line.quantity - lost_quantity
+    if good_quantity <= 0:
+        raise LandedCostPostingError(
+            f"Transit purchase line {line.pk} has no good quantity remaining after confirmed losses."
+        )
+    return good_quantity
+
+
 def _extra_cost_map(lines, allocations, *, lock=True):
     """Map immutable warehouse movement IDs to additional AFN/unit from posted costs."""
     from goods_in_transit.models import GoodsInTransitLot, TransitReceipt
@@ -133,7 +162,7 @@ def _extra_cost_map(lines, allocations, *, lock=True):
     extra = defaultdict(lambda: Decimal("0"))
     for line_id, allocated_afn in per_line.items():
         line = line_by_id[line_id]
-        delta_per_unit = _q4(allocated_afn / Decimal(line.quantity))
+        delta_per_unit = _q4(allocated_afn / Decimal(_good_quantity_for_line(line)))
         if not delta_per_unit:
             continue
         lot = GoodsInTransitLot.objects.filter(purchase_line_id=line_id).first()
@@ -608,7 +637,7 @@ def post_landed_cost(*, cost_document, user=None):
         if line.pk not in transit_lots:
             continue
         lot = transit_lots[line.pk]
-        per_unit = _q4(row.afn_amount / Decimal(lot.original_quantity))
+        per_unit = _q4(row.afn_amount / Decimal(_good_quantity_for_line(line, lot=lot)))
         transit_delta_by_line[line.pk] = per_unit
         receipts = list(TransitReceipt.objects.filter(
             lot=lot, company_quantity__gt=0, stock_movement__isnull=False
@@ -682,7 +711,7 @@ def post_landed_cost(*, cost_document, user=None):
         source = source_movements.get(line.pk)
         if source is None:
             continue
-        per_unit = _q4(row.afn_amount / Decimal(line.quantity))
+        per_unit = _q4(row.afn_amount / Decimal(_good_quantity_for_line(line)))
         if not per_unit:
             continue
         for resolved in NegativeCOGSReceiptAllocation.objects.filter(
@@ -797,7 +826,7 @@ def post_landed_cost(*, cost_document, user=None):
     # Current landed cost sold directly from Transit is a COGS delta even
     # though no company StockMovement exists for the sale.
     transit_sale_delta = sum(
-        (_q2(_q4(row.afn_amount / Decimal(transit_lots[row.purchase_line_id].original_quantity))
+        (_q2(_q4(row.afn_amount / Decimal(_good_quantity_for_line(row.purchase_line, lot=transit_lots[row.purchase_line_id])))
              * Decimal(allocation.quantity))
          for row in allocations if row.purchase_line_id in transit_lots
          for allocation in TransitSaleAllocation.objects.filter(transit_lot=transit_lots[row.purchase_line_id])),
@@ -805,7 +834,7 @@ def post_landed_cost(*, cost_document, user=None):
     )
     cogs_delta += transit_sale_delta
     transit_remaining_delta = sum(
-        (_q2(_q4(row.afn_amount / Decimal(transit_lots[row.purchase_line_id].original_quantity))
+        (_q2(_q4(row.afn_amount / Decimal(_good_quantity_for_line(row.purchase_line, lot=transit_lots[row.purchase_line_id])))
              * Decimal(transit_lots[row.purchase_line_id].remaining_quantity))
          for row in allocations if row.purchase_line_id in transit_lots),
         Decimal("0.00"),
@@ -930,7 +959,7 @@ def post_transit_receipt_landed_cost_adjustments(*, lot, receipt, user=None):
         cost_document__status=LandedCostStatus.POSTED,
         cost_document__reversal__isnull=True,
     ).select_related("cost_document").order_by("cost_document__cost_date", "id"):
-        per_unit = _q4(allocation.afn_amount / Decimal(lot.original_quantity))
+        per_unit = _q4(allocation.afn_amount / Decimal(_good_quantity_for_line(lot.purchase_line, lot=lot)))
         amount = _q2(per_unit * Decimal(remaining_company_quantity))
         if amount:
             row = _post_adjustment(
