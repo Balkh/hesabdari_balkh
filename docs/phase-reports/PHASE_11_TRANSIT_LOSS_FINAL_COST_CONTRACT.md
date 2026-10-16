@@ -61,3 +61,14 @@ Do not finalize or independently calculate a different final cost per truck simp
 The current landed-cost service divides allocated late costs by original purchase-line quantity. Merely changing that divisor is insufficient: whole-lot loss changes the cost per good unit and can require revaluation of already-sold and remaining units. Implementation must add explicit loss/reconciliation records and integrate their valuation deltas with the existing landed-cost ledger and AVCO replay. A partial truck arrival must never trigger final costing by itself. Any uncertain or unreconcilable history must fail closed.
 
 This contract records the user's confirmed business rule. It does not claim implementation, test success, approval, or freeze.
+
+
+## 6. Purchase isolation clarified by the user
+
+Each posted purchase line is its own source-cost boundary. If goods arrive on several trucks but belong to one purchase line, those arrivals reconcile to that line and share its eventual final unit cost. If goods belong to different purchases, each purchase line retains its own invoice-backed net cost, allocated direct costs, confirmed loss, good-quantity denominator, and final landed unit cost.
+
+Example: Purchase A has a $17.00 invoice unit cost and $0.20 of direct costs; Purchase B has an $18.00 invoice unit cost and $0.40 of direct costs. A confirmed loss on Purchase A must not change Purchase B's good quantity or purchase-specific landed-cost calculation. This isolation applies even if both purchases contain the same product.
+
+This purchase-line cost boundary is not a replacement for the existing product/warehouse AVCO valuation method. Once goods from different purchases are pooled in warehouse inventory, downstream warehouse valuation continues through the existing chronological AVCO replay. Purchase-specific source costs and loss events remain traceable so the replay can compute the correct aggregate inventory and COGS effects without editing posted history.
+
+A regression test now asserts that a loss on one transit lot blocks valuation for that source line while a second purchase line of the same product remains unaffected. This test only proves isolation of the current guard/denominator helper; it does **not** prove that loss posting, whole-lot reconciliation, or compensating AVCO/COGS journals are implemented. Those remain required before approval.
