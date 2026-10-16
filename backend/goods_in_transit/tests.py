@@ -639,7 +639,7 @@ class GoodsInTransitTests(TestCase):
 
         receive_transit(
             lot=lot, quantity=98, receipt_date=date(2026, 2, 2),
-            user=self.user, idempotency_key="transit-loss-receipt-001",
+            user=self.user, idempotency_key="tlr1",
         )
         lot.refresh_from_db()
         loss = record_transit_loss(
@@ -663,7 +663,7 @@ class GoodsInTransitTests(TestCase):
         lot = GoodsInTransitLot.objects.get(purchase_line=purchase.lines.get())
         receive_transit(
             lot=lot, quantity=90, receipt_date=date(2026, 2, 2),
-            user=self.user, idempotency_key="transit-loss-partial-receipt-001",
+            user=self.user, idempotency_key="tlp1",
         )
         lot.refresh_from_db()
         with self.assertRaisesRegex(TransitValidationError, "loss quantity must equal"):
@@ -683,7 +683,7 @@ class GoodsInTransitTests(TestCase):
         self.assertEqual(_good_quantity_for_line(line, lot=lot), 100)
         receive_transit(
             lot=lot, quantity=98, receipt_date=date(2026, 2, 2),
-            user=self.user, idempotency_key="transit-loss-cost-receipt-001",
+            user=self.user, idempotency_key="tlc1",
         )
         lot.refresh_from_db()
         record_transit_loss(
@@ -718,7 +718,7 @@ class GoodsInTransitTests(TestCase):
         self.assertNotEqual(first_lot.purchase_line_id, second_lot.purchase_line_id)
         receive_transit(
             lot=first_lot, quantity=98, receipt_date=date(2026, 2, 2),
-            user=self.user, idempotency_key="transit-loss-scope-receipt-001",
+            user=self.user, idempotency_key="tls1",
         )
         first_lot.refresh_from_db()
         record_transit_loss(
@@ -736,7 +736,7 @@ class GoodsInTransitTests(TestCase):
         lot = GoodsInTransitLot.objects.get(purchase_line=purchase.lines.get())
         receive_transit(
             lot=lot, quantity=70, receipt_date=date(2026, 2, 2),
-            user=self.user, idempotency_key="loss-service-receipt-001",
+            user=self.user, idempotency_key="lsr1",
         )
         lot.refresh_from_db()
         first = record_transit_loss(
@@ -768,7 +768,7 @@ class GoodsInTransitTests(TestCase):
         lot = GoodsInTransitLot.objects.get(purchase_line=purchase.lines.get())
         receive_transit(
             lot=lot, quantity=98, receipt_date=date(2026, 2, 2),
-            user=self.user, idempotency_key="loss-service-date-receipt-001",
+            user=self.user, idempotency_key="lsd1",
         )
         lot.refresh_from_db()
         record_transit_loss(
@@ -801,7 +801,7 @@ class GoodsInTransitTests(TestCase):
             )
         receive_transit(
             lot=lot, quantity=40, receipt_date=date(2026, 2, 2),
-            user=self.user, idempotency_key="loss-model-receipt-001",
+            user=self.user, idempotency_key="lmr1",
         )
         lot.refresh_from_db()
         loss = TransitLossEvent.objects.create(
