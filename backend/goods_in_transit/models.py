@@ -174,6 +174,15 @@ class TransitLossEvent(models.Model):
                 raise ValidationError(
                     "Cumulative transit loss must leave at least one good unit in the purchase line."
                 )
+            if already_reported:
+                raise ValidationError(
+                    "A transit lot can have only one final reconciled loss event."
+                )
+            if self.quantity != lot.remaining_quantity:
+                raise ValidationError(
+                    "Transit loss can be recorded only after all other owned goods are accounted for; "
+                    "loss quantity must equal the lot's remaining transit quantity."
+                )
             return super().save(*args, **kwargs)
 
     def delete(self, *args, **kwargs):
