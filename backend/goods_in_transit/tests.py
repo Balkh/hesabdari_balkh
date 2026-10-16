@@ -626,68 +626,70 @@ class GoodsInTransitTests(TestCase):
         self.assertEqual(stock_for(self.product, self.warehouse), 80)
 
 
-    def test_transit_loss_evidence_is_immutable(self):
+    def test_transit_loss_is_final_reconciled_and_immutable(self):
         purchase = self._purchase(document_number="PI-TRANSIT-LOSS-001")
         post_purchase(purchase=purchase, user=self.user)
         lot = GoodsInTransitLot.objects.get(purchase_line=purchase.lines.get())
-        loss = TransitLossEvent.objects.create(
-            lot=lot, quantity=2, loss_date=date(2026, 2, 2),
+        with self.assertRaisesRegex(ValidationError, "only after all other owned goods"):
+            TransitLossEvent.objects.create(
+                lot=lot, quantity=2, loss_date=date(2026, 2, 2),
+                reason="Premature loss report",
+                idempotency_key="transit-loss-premature-001", created_by=self.user,
+            )
+
+        receive_transit(
+            lot=lot, quantity=98, receipt_date=date(2026, 2, 2),
+            user=self.user, idempotency_key="transit-loss-receipt-001",
+        )
+        lot.refresh_from_db()
+        loss = record_transit_loss(
+            lot=lot, quantity=2, loss_date=date(2026, 2, 3),
             reason="Confirmed transport loss",
-            idempotency_key="transit-loss-evidence-001", created_by=self.user,
+            idempotency_key="transit-loss-evidence-001", user=self.user,
         )
         self.assertEqual(loss.lot_id, lot.pk)
         self.assertEqual(loss.quantity, 2)
+        lot.refresh_from_db()
+        self.assertEqual(lot.remaining_quantity, 0)
+        self.assertEqual(lot.status, TransitLotStatus.CLOSED)
         with self.assertRaises(PostedImmutabilityError):
             loss.save()
         with self.assertRaises(PostedImmutabilityError):
             loss.delete()
 
-    def test_confirmed_loss_blocks_transit_sale_and_receipt_until_revaluation(self):
+    def test_transit_loss_must_equal_all_remaining_quantity(self):
         purchase = self._purchase(document_number="PI-TRANSIT-LOSS-BLOCK-001")
         post_purchase(purchase=purchase, user=self.user)
         lot = GoodsInTransitLot.objects.get(purchase_line=purchase.lines.get())
-        sale = create_sale(
-            customer=self.customer, sale_date=date(2026, 2, 3),
-            currency=self.usd, channel=SalesChannel.WHOLESALE,
-            payment_mode=PaymentMode.CREDIT,
-            lines=[{
-                "product": self.product, "unit": self.product.primary_uom,
-                "quantity": 5, "unit_price": "120", "transit_lot": lot,
-            }],
-            user=self.user, document_number="SI-TRANSIT-LOSS-BLOCK-001",
+        receive_transit(
+            lot=lot, quantity=90, receipt_date=date(2026, 2, 2),
+            user=self.user, idempotency_key="transit-loss-partial-receipt-001",
         )
-        TransitLossEvent.objects.create(
-            lot=lot, quantity=2, loss_date=date(2026, 2, 2),
-            reason="Confirmed loss awaiting valuation replay",
-            idempotency_key="transit-loss-block-001", created_by=self.user,
-        )
-
-        with self.assertRaisesRegex(SalesValidationError, "purchase-wide loss valuation replay"):
-            finalize_sale(sale=sale, user=self.user)
-        with self.assertRaisesRegex(TransitValidationError, "purchase-wide loss valuation replay"):
-            receive_transit(
-                lot=lot, quantity=10, receipt_date=date(2026, 2, 4),
-                user=self.user, idempotency_key="transit-loss-block-receipt-001",
-            )
-
-        sale.refresh_from_db()
         lot.refresh_from_db()
-        self.assertEqual(sale.status, SaleStatus.DRAFT)
-        self.assertEqual(lot.remaining_quantity, lot.original_quantity)
-        self.assertEqual(TransitSaleAllocation.objects.filter(sale_line__sale=sale).count(), 0)
-        self.assertEqual(TransitReceipt.objects.filter(lot=lot).count(), 0)
+        with self.assertRaisesRegex(TransitValidationError, "loss quantity must equal"):
+            record_transit_loss(
+                lot=lot, quantity=2, loss_date=date(2026, 2, 3),
+                reason="Not yet reconciled", idempotency_key="transit-loss-partial-001",
+                user=self.user,
+            )
+        self.assertEqual(lot.remaining_quantity, 10)
+        self.assertEqual(TransitLossEvent.objects.filter(lot=lot).count(), 0)
 
-    def test_landed_cost_allocation_uses_confirmed_good_transit_quantity(self):
+    def test_landed_cost_guard_still_requires_purchase_wide_revaluation(self):
         purchase = self._purchase(document_number="PI-TRANSIT-LOSS-COST-001")
         post_purchase(purchase=purchase, user=self.user)
         line = purchase.lines.get()
         lot = GoodsInTransitLot.objects.get(purchase_line=line)
         self.assertEqual(_good_quantity_for_line(line, lot=lot), 100)
-
-        TransitLossEvent.objects.create(
-            lot=lot, quantity=2, loss_date=date(2026, 2, 2),
-            reason="Confirmed transport loss",
-            idempotency_key="transit-loss-cost-001", created_by=self.user,
+        receive_transit(
+            lot=lot, quantity=98, receipt_date=date(2026, 2, 2),
+            user=self.user, idempotency_key="transit-loss-cost-receipt-001",
+        )
+        lot.refresh_from_db()
+        record_transit_loss(
+            lot=lot, quantity=2, loss_date=date(2026, 2, 3),
+            reason="Confirmed transport loss", idempotency_key="transit-loss-cost-001",
+            user=self.user,
         )
         with self.assertRaisesRegex(LandedCostPostingError, "purchase-wide loss valuation replay"):
             _good_quantity_for_line(line, lot=lot)
@@ -703,114 +705,114 @@ class GoodsInTransitTests(TestCase):
                 idempotency_key="transit-loss-cost-002", created_by=self.user,
             )
 
-
-    def test_transit_loss_guard_is_scoped_to_its_own_purchase_line(self):
+    def test_transit_loss_is_scoped_to_its_own_purchase_line(self):
         first_purchase = self._purchase(document_number="PI-TRANSIT-LOSS-SCOPE-001")
         second_purchase = self._purchase(document_number="PI-TRANSIT-LOSS-SCOPE-002")
         post_purchase(purchase=first_purchase, user=self.user)
         post_purchase(purchase=second_purchase, user=self.user)
-
         first_line = first_purchase.lines.get()
         second_line = second_purchase.lines.get()
         first_lot = GoodsInTransitLot.objects.get(purchase_line=first_line)
         second_lot = GoodsInTransitLot.objects.get(purchase_line=second_line)
         self.assertEqual(first_lot.product_id, second_lot.product_id)
         self.assertNotEqual(first_lot.purchase_line_id, second_lot.purchase_line_id)
-
-        TransitLossEvent.objects.create(
-            lot=first_lot, quantity=2, loss_date=date(2026, 2, 2),
-            reason="Loss belongs only to first purchase",
-            idempotency_key="transit-loss-scope-001", created_by=self.user,
+        receive_transit(
+            lot=first_lot, quantity=98, receipt_date=date(2026, 2, 2),
+            user=self.user, idempotency_key="transit-loss-scope-receipt-001",
         )
-
+        first_lot.refresh_from_db()
+        record_transit_loss(
+            lot=first_lot, quantity=2, loss_date=date(2026, 2, 3),
+            reason="Loss belongs only to first purchase",
+            idempotency_key="transit-loss-scope-001", user=self.user,
+        )
         with self.assertRaisesRegex(LandedCostPostingError, "purchase-wide loss valuation replay"):
             _good_quantity_for_line(first_line, lot=first_lot)
-        # A loss on one purchase must not contaminate another purchase line's
-        # good-quantity denominator, even for the same product.
         self.assertEqual(_good_quantity_for_line(second_line, lot=second_lot), second_line.quantity)
 
-
-    def test_record_transit_loss_is_idempotent_and_reconciles_cumulative_quantity(self):
+    def test_record_transit_loss_is_idempotent_and_rejects_conflicts(self):
         purchase = self._purchase(document_number="PI-TRANSIT-LOSS-SERVICE-001")
         post_purchase(purchase=purchase, user=self.user)
         lot = GoodsInTransitLot.objects.get(purchase_line=purchase.lines.get())
-
+        receive_transit(
+            lot=lot, quantity=70, receipt_date=date(2026, 2, 2),
+            user=self.user, idempotency_key="loss-service-receipt-001",
+        )
+        lot.refresh_from_db()
         first = record_transit_loss(
-            lot=lot, quantity=30, loss_date=date(2026, 2, 2),
-            reason="First confirmed shortage", idempotency_key="loss-service-001",
+            lot=lot, quantity=30, loss_date=date(2026, 2, 3),
+            reason="Final confirmed shortage", idempotency_key="loss-service-001",
             user=self.user,
         )
-        # A retry must return the immutable event even if its original
-        # posting period has since closed; no new posting occurs on retry.
         with patch(
             "goods_in_transit.services.assert_posting_date_open",
             side_effect=TransitValidationError("period is closed"),
         ):
             retry = record_transit_loss(
-                lot=lot, quantity=30, loss_date=date(2026, 2, 2),
-                reason="First confirmed shortage", idempotency_key="loss-service-001",
+                lot=lot, quantity=30, loss_date=date(2026, 2, 3),
+                reason="Final confirmed shortage", idempotency_key="loss-service-001",
                 user=self.user,
             )
         self.assertEqual(first.pk, retry.pk)
         self.assertEqual(TransitLossEvent.objects.filter(lot=lot).count(), 1)
-
-        record_transit_loss(
-            lot=lot, quantity=69, loss_date=date(2026, 2, 3),
-            reason="Second confirmed shortage", idempotency_key="loss-service-002",
-            user=self.user,
-        )
-        with self.assertRaisesRegex(TransitValidationError, "leave at least one good unit"):
+        with self.assertRaisesRegex(TransitValidationError, "different loss evidence"):
             record_transit_loss(
-                lot=lot, quantity=1, loss_date=date(2026, 2, 4),
-                reason="Excess shortage", idempotency_key="loss-service-003",
+                lot=lot, quantity=29, loss_date=date(2026, 2, 3),
+                reason="Conflicting retry", idempotency_key="loss-service-001",
                 user=self.user,
             )
-        self.assertEqual(
-            sum(TransitLossEvent.objects.filter(lot=lot).values_list("quantity", flat=True)),
-            lot.original_quantity - 1,
-        )
 
-    def test_record_transit_loss_rejects_conflicting_idempotency_and_pre_ownership_date(self):
+    def test_transit_loss_rejects_conflicting_idempotency_and_pre_ownership_date(self):
         purchase = self._purchase(document_number="PI-TRANSIT-LOSS-SERVICE-002")
         post_purchase(purchase=purchase, user=self.user)
         lot = GoodsInTransitLot.objects.get(purchase_line=purchase.lines.get())
+        receive_transit(
+            lot=lot, quantity=98, receipt_date=date(2026, 2, 2),
+            user=self.user, idempotency_key="loss-service-date-receipt-001",
+        )
+        lot.refresh_from_db()
         record_transit_loss(
-            lot=lot, quantity=2, loss_date=date(2026, 2, 2),
+            lot=lot, quantity=2, loss_date=date(2026, 2, 3),
             reason="Confirmed shortage", idempotency_key="loss-service-conflict-001",
             user=self.user,
         )
         with self.assertRaisesRegex(TransitValidationError, "different loss evidence"):
             record_transit_loss(
-                lot=lot, quantity=3, loss_date=date(2026, 2, 2),
+                lot=lot, quantity=3, loss_date=date(2026, 2, 3),
                 reason="Confirmed shortage", idempotency_key="loss-service-conflict-001",
                 user=self.user,
             )
         with self.assertRaisesRegex(TransitValidationError, "cannot precede company ownership"):
             record_transit_loss(
                 lot=lot, quantity=1, loss_date=date(2026, 1, 31),
-                reason="Invalid historical date", idempotency_key="loss-service-date-001",
+                reason="Invalid historical date", idempotency_key="loss-service-date-002",
                 user=self.user,
             )
 
-
-    def test_transit_loss_model_cannot_bypass_lot_quantity_invariants(self):
+    def test_transit_loss_model_cannot_bypass_final_reconciliation(self):
         purchase = self._purchase(document_number="PI-TRANSIT-LOSS-MODEL-001")
         post_purchase(purchase=purchase, user=self.user)
         lot = GoodsInTransitLot.objects.get(purchase_line=purchase.lines.get())
-        TransitLossEvent.objects.create(
-            lot=lot, quantity=60, loss_date=date(2026, 2, 2),
-            reason="First part of confirmed loss", idempotency_key="loss-model-001",
-            created_by=self.user,
-        )
-        with self.assertRaisesRegex(ValidationError, "Cumulative transit loss"):
+        with self.assertRaisesRegex(ValidationError, "only after all other owned goods"):
             TransitLossEvent.objects.create(
-                lot=lot, quantity=41, loss_date=date(2026, 2, 3),
-                reason="Would exceed purchased quantity", idempotency_key="loss-model-002",
+                lot=lot, quantity=60, loss_date=date(2026, 2, 2),
+                reason="Premature shortage", idempotency_key="loss-model-001",
                 created_by=self.user,
             )
-        with self.assertRaisesRegex(ValidationError, "cannot precede company ownership"):
+        receive_transit(
+            lot=lot, quantity=40, receipt_date=date(2026, 2, 2),
+            user=self.user, idempotency_key="loss-model-receipt-001",
+        )
+        lot.refresh_from_db()
+        loss = TransitLossEvent.objects.create(
+            lot=lot, quantity=60, loss_date=date(2026, 2, 3),
+            reason="Final shortage", idempotency_key="loss-model-002",
+            created_by=self.user,
+        )
+        self.assertEqual(loss.quantity, 60)
+        with self.assertRaisesRegex(ValidationError, "only one final reconciled loss event"):
             TransitLossEvent.objects.create(
-                lot=lot, quantity=1, loss_date=date(2026, 1, 31),
-                reason="Before ownership", idempotency_key="loss-model-003",
+                lot=lot, quantity=1, loss_date=date(2026, 2, 4),
+                reason="Second final event", idempotency_key="loss-model-003",
                 created_by=self.user,
             )
