@@ -2,6 +2,7 @@ from datetime import date
 from decimal import Decimal
 
 from django.contrib.auth import get_user_model
+from django.core.exceptions import ValidationError
 from django.test import TestCase
 
 from accounting.coa import seed_chart_of_accounts
@@ -784,4 +785,27 @@ class GoodsInTransitTests(TestCase):
                 lot=lot, quantity=1, loss_date=date(2026, 1, 31),
                 reason="Invalid historical date", idempotency_key="loss-service-date-001",
                 user=self.user,
+            )
+
+
+    def test_transit_loss_model_cannot_bypass_lot_quantity_invariants(self):
+        purchase = self._purchase(document_number="PI-TRANSIT-LOSS-MODEL-001")
+        post_purchase(purchase=purchase, user=self.user)
+        lot = GoodsInTransitLot.objects.get(purchase_line=purchase.lines.get())
+        TransitLossEvent.objects.create(
+            lot=lot, quantity=60, loss_date=date(2026, 2, 2),
+            reason="First part of confirmed loss", idempotency_key="loss-model-001",
+            created_by=self.user,
+        )
+        with self.assertRaisesRegex(ValidationError, "Cumulative transit loss"):
+            TransitLossEvent.objects.create(
+                lot=lot, quantity=41, loss_date=date(2026, 2, 3),
+                reason="Would exceed purchased quantity", idempotency_key="loss-model-002",
+                created_by=self.user,
+            )
+        with self.assertRaisesRegex(ValidationError, "cannot precede company ownership"):
+            TransitLossEvent.objects.create(
+                lot=lot, quantity=1, loss_date=date(2026, 1, 31),
+                reason="Before ownership", idempotency_key="loss-model-003",
+                created_by=self.user,
             )
