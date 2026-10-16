@@ -170,9 +170,9 @@ class TransitLossEvent(models.Model):
             already_reported = sum(
                 type(self).objects.filter(lot_id=lot.pk).values_list("quantity", flat=True)
             )
-            if self.quantity <= 0 or already_reported + self.quantity > lot.original_quantity:
+            if self.quantity <= 0 or already_reported + self.quantity >= lot.original_quantity:
                 raise ValidationError(
-                    "Cumulative transit loss cannot exceed the original purchase quantity."
+                    "Cumulative transit loss must leave at least one good unit in the purchase line."
                 )
             return super().save(*args, **kwargs)
 
