@@ -388,8 +388,8 @@ def record_transit_loss(*, lot, quantity, loss_date, reason, idempotency_key, us
     # period has since closed; only a new posting must pass the open-period gate.
     assert_posting_date_open(loss_date)
     reported = sum(TransitLossEvent.objects.filter(lot=locked_lot).values_list("quantity", flat=True))
-    if reported + quantity > locked_lot.original_quantity:
-        raise TransitValidationError("Cumulative transit loss cannot exceed the original purchase quantity.")
+    if reported + quantity >= locked_lot.original_quantity:
+        raise TransitValidationError("Cumulative transit loss must leave at least one good unit in the purchase line.")
     event = TransitLossEvent.objects.create(
         lot=locked_lot, quantity=quantity, loss_date=loss_date, reason=reason,
         idempotency_key=idempotency_key, created_by=actor,
