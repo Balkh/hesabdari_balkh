@@ -293,6 +293,12 @@ def create_sales_return(*, sale_line, warehouse, quantity, return_date,
         inv = None
         return_movement = None
         if allocation is not None:
+            from goods_in_transit.models import TransitLossEvent
+            if TransitLossEvent.objects.filter(lot=allocation.transit_lot).exists():
+                raise ReturnValidationError(
+                    "Transit return is blocked because this lot has confirmed loss without "
+                    "a posted purchase-wide loss valuation replay."
+                )
             # Transit sales have no company SALES_ISSUE movement. A finalized
             # Warehouse Check proves the customer physically received the goods.
             checks = WarehouseCheck.objects.select_for_update().filter(
@@ -695,6 +701,17 @@ def reverse_sales_return(sales_return, *, reversal_date, reason, user=None,
 
         if ret.status != SalesReturnStatus.POSTED:
             raise ReturnValidationError("Only a posted Sales Return can be reversed")
+        if ret.inventory_return_id is None:
+            allocation = TransitSaleAllocation.objects.select_related("transit_lot").filter(
+                sale_line=ret.sale_line
+            ).first()
+            if allocation is not None:
+                from goods_in_transit.models import TransitLossEvent
+                if TransitLossEvent.objects.filter(lot=allocation.transit_lot).exists():
+                    raise ReturnValidationError(
+                        "Transit return reversal is blocked because this lot has confirmed loss without "
+                        "a posted purchase-wide loss valuation replay."
+                    )
         if ret.refunds.filter(status=RefundStatus.POSTED).exists():
             raise ReturnValidationError(
                 "Reverse all posted Refunds before reversing the Sales Return"
