@@ -293,8 +293,8 @@ def create_sales_return(*, sale_line, warehouse, quantity, return_date,
         inv = None
         return_movement = None
         if allocation is not None:
-            from goods_in_transit.models import TransitLossEvent
-            if TransitLossEvent.objects.filter(lot=allocation.transit_lot).exists():
+            from goods_in_transit.models import has_unvalued_transit_loss
+            if has_unvalued_transit_loss(allocation.transit_lot_id):
                 raise ReturnValidationError(
                     "Transit return is blocked because this lot has confirmed loss without "
                     "a posted purchase-wide loss valuation replay."
@@ -706,8 +706,8 @@ def reverse_sales_return(sales_return, *, reversal_date, reason, user=None,
                 sale_line=ret.sale_line
             ).first()
             if allocation is not None:
-                from goods_in_transit.models import TransitLossEvent
-                if TransitLossEvent.objects.filter(lot=allocation.transit_lot).exists():
+                from goods_in_transit.models import has_unvalued_transit_loss
+                if has_unvalued_transit_loss(allocation.transit_lot_id):
                     raise ReturnValidationError(
                         "Transit return reversal is blocked because this lot has confirmed loss without "
                         "a posted purchase-wide loss valuation replay."

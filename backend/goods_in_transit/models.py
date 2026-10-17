@@ -135,6 +135,11 @@ class TransitDestinationTransfer(models.Model):
         raise PostedImmutabilityError("Transit destination transfers cannot be deleted")
 
 
+class TransitLossValuationStatus(models.TextChoices):
+    PENDING = "PENDING", "Pending purchase-wide valuation replay"
+    POSTED = "POSTED", "Valuation replay posted"
+
+
 class TransitLossEvent(models.Model):
     """Immutable evidence of confirmed loss from a purchase-wide transit lot."""
     lot = models.ForeignKey(
@@ -144,6 +149,22 @@ class TransitLossEvent(models.Model):
     loss_date = models.DateField()
     reason = models.TextField()
     idempotency_key = models.CharField(max_length=128, unique=True)
+    # Valuation snapshot, written exactly once by the posting service in the
+    # same transaction that posts the compensating journals. It freezes the
+    # good-quantity denominator and final AFN unit cost so later landed-cost
+    # postings can deterministically rebuild the loss layer.
+    valuation_status = models.CharField(
+        max_length=10, choices=TransitLossValuationStatus.choices,
+        default=TransitLossValuationStatus.PENDING,
+    )
+    good_quantity = models.PositiveIntegerField(null=True, blank=True)
+    final_unit_cost_afn = models.DecimalField(
+        max_digits=20, decimal_places=4, null=True, blank=True
+    )
+    landed_pool_afn_at_valuation = models.DecimalField(
+        max_digits=20, decimal_places=2, default=Decimal("0.00")
+    )
+    valuation_posted_at = models.DateTimeField(null=True, blank=True)
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL, null=True, blank=True,
         on_delete=models.SET_NULL, related_name="transit_loss_events_created",
@@ -158,8 +179,24 @@ class TransitLossEvent(models.Model):
             ),
         ]
 
+    # Fields the valuation posting service may write exactly once.
+    VALUATION_UPDATE_FIELDS = frozenset({
+        "valuation_status", "good_quantity", "final_unit_cost_afn",
+        "landed_pool_afn_at_valuation", "valuation_posted_at",
+    })
+
     def save(self, *args, **kwargs):
         if self.pk is not None:
+            update_fields = set(kwargs.get("update_fields") or ())
+            if update_fields and update_fields <= self.VALUATION_UPDATE_FIELDS:
+                current = type(self).objects.filter(pk=self.pk).values_list(
+                    "valuation_status", flat=True
+                ).first()
+                if current == TransitLossValuationStatus.POSTED:
+                    raise PostedImmutabilityError(
+                        "A posted transit loss valuation cannot be rewritten"
+                    )
+                return super().save(*args, **kwargs)
             raise PostedImmutabilityError("Transit loss events are immutable")
         # Serialize aggregate validation on the source lot so direct model
         # creation cannot bypass the service's cumulative quantity guard.
@@ -187,3 +224,78 @@ class TransitLossEvent(models.Model):
 
     def delete(self, *args, **kwargs):
         raise PostedImmutabilityError("Transit loss events cannot be deleted")
+
+
+class TransitLossValuationAdjustmentQuerySet(models.QuerySet):
+    def update(self, **kwargs):
+        raise PostedImmutabilityError("Transit loss valuation adjustments are immutable")
+
+    def bulk_update(self, objs, fields, batch_size=None):
+        raise PostedImmutabilityError("Transit loss valuation adjustments are immutable")
+
+    def bulk_create(self, objs, **kwargs):
+        raise PostedImmutabilityError(
+            "Create transit loss valuation adjustments only through the posting service"
+        )
+
+    def delete(self):
+        raise PostedImmutabilityError("Transit loss valuation adjustments cannot be deleted")
+
+
+class TransitLossValuationAdjustment(models.Model):
+    """Immutable compensating reallocation posted for a confirmed transit loss.
+
+    This is the durable anchor for loss valuation journals: the existing
+    ``LandedCostValuationAdjustment`` requires a ``LandedCostDocument``
+    parent, which a transit loss does not have. One row per posted
+    compensating journal, traceable to the loss event and stock movement.
+    """
+
+    loss_event = models.ForeignKey(
+        TransitLossEvent, on_delete=models.PROTECT,
+        related_name="valuation_adjustments",
+    )
+    source_reference = models.CharField(max_length=200)
+    adjustment_type = models.CharField(max_length=40)
+    movement = models.ForeignKey(
+        "inventory.StockMovement", null=True, blank=True,
+        on_delete=models.PROTECT, related_name="transit_loss_valuation_adjustments",
+    )
+    amount_afn = models.DecimalField(max_digits=20, decimal_places=2)
+    journal_entry = models.OneToOneField(
+        "accounting.JournalEntry", on_delete=models.PROTECT,
+        related_name="transit_loss_valuation_adjustment",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    objects = TransitLossValuationAdjustmentQuerySet.as_manager()
+
+    class Meta:
+        ordering = ["loss_event_id", "id"]
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(amount_afn__gt=0),
+                name="transit_loss_adjustment_afn_gt0",
+            ),
+            models.UniqueConstraint(
+                fields=["loss_event", "source_reference", "adjustment_type"],
+                name="uniq_transit_loss_valuation_adj_ref",
+            ),
+        ]
+
+    def save(self, *args, **kwargs):
+        if self.pk is not None:
+            raise PostedImmutabilityError("Transit loss valuation adjustments are immutable")
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise PostedImmutabilityError("Transit loss valuation adjustments cannot be deleted")
+
+
+def has_unvalued_transit_loss(lot_id):
+    """True while a lot carries a loss whose valuation replay is not posted."""
+    return TransitLossEvent.objects.filter(
+        lot_id=lot_id,
+    ).exclude(
+        valuation_status=TransitLossValuationStatus.POSTED,
+    ).exists()

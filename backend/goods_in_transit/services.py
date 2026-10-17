@@ -18,7 +18,7 @@ from security.services import record_audit_event
 from customer_custody.models import CustomerCustodyEvent, CustomerOwnershipEntitlement, CustodyEventType
 from customer_custody.services import place_customer_custody
 
-from .models import GoodsInTransitLot, TransitCustomerCustody, TransitDestinationTransfer, TransitLotStatus, TransitReceipt, TransitLossEvent
+from .models import GoodsInTransitLot, TransitCustomerCustody, TransitDestinationTransfer, TransitLotStatus, TransitReceipt, TransitLossEvent, has_unvalued_transit_loss
 
 
 class TransitValidationError(ValueError):
@@ -109,7 +109,7 @@ def _receive_transit_legacy(*, lot, quantity, receipt_date, user=None,
                 ).get(pk=lot_id)
                 if lot.status != TransitLotStatus.OPEN:
                     raise TransitValidationError("Transit lot is not open.")
-                if TransitLossEvent.objects.filter(lot=lot).exists():
+                if has_unvalued_transit_loss(lot.pk):
                     raise TransitValidationError(
                         "Transit receipt is blocked because this lot has confirmed loss without "
                         "a posted purchase-wide loss valuation replay."
@@ -195,7 +195,7 @@ def transfer_transit_destination(*, lot, warehouse, quantity, transfer_date, use
             lot = GoodsInTransitLot.objects.select_for_update().select_related("destination_warehouse").get(pk=lot_id)
             if lot.status != TransitLotStatus.OPEN:
                 raise TransitValidationError("Transit lot is not open.")
-            if TransitLossEvent.objects.filter(lot=lot).exists():
+            if has_unvalued_transit_loss(lot.pk):
                 raise TransitValidationError(
                     "Transit transfer is blocked because this lot has confirmed loss without "
                     "a posted purchase-wide loss valuation replay."
@@ -239,7 +239,7 @@ def _receive_transit_core(*, lot, quantity, receipt_date, user=None, idempotency
             lot = GoodsInTransitLot.objects.select_for_update().select_related("purchase", "product", "currency", "destination_warehouse").get(pk=lot_id)
             if lot.status != TransitLotStatus.OPEN:
                 raise TransitValidationError("Transit lot is not open.")
-            if TransitLossEvent.objects.filter(lot=lot).exists():
+            if has_unvalued_transit_loss(lot.pk):
                 raise TransitValidationError(
                     "Transit receipt is blocked because this lot has confirmed loss without "
                     "a posted purchase-wide loss valuation replay."
@@ -349,10 +349,12 @@ def receive_transit(*, lot, quantity, receipt_date, user=None, idempotency_key=N
 
 @transaction.atomic
 def record_transit_loss(*, lot, quantity, loss_date, reason, idempotency_key, user=None):
-    """Record validated, immutable evidence for a confirmed transit loss.
+    """Record a confirmed transit loss and post its valuation replay atomically.
 
-    This does not post valuation. Downstream value-changing operations remain
-    blocked until purchase-wide replay and its compensating journals exist.
+    The immutable loss evidence, lot closure and the purchase-wide AVCO
+    valuation replay (compensating journals anchored to the loss event)
+    commit together; any replay failure rolls all of them back, leaving no
+    partial event, closure, journal or adjustment behind.
     """
     from .models import TransitLossEvent
 
@@ -406,6 +408,18 @@ def record_transit_loss(*, lot, quantity, loss_date, reason, idempotency_key, us
     locked_lot.remaining_quantity = 0
     locked_lot.status = TransitLotStatus.CLOSED
     locked_lot.save(allow_state_transition=True, update_fields={"remaining_quantity", "status"})
+    # Purchase-wide valuation replay: moves the lost units' cost from 1430
+    # onto the surviving units (warehouse stock, COGS, returns, transfers)
+    # with compensating journals. Inside this transaction, so a failure
+    # leaves no loss event, closure or journal behind.
+    from purchases.landed_cost_posting import (
+        LandedCostPostingError, post_transit_loss_valuation,
+    )
+    try:
+        post_transit_loss_valuation(loss_event=event, user=actor)
+    except LandedCostPostingError as exc:
+        raise TransitValidationError(str(exc)) from exc
+    event.refresh_from_db()
     record_audit_event(
         user=actor, action=AuditAction.CREATE, entity="TransitLossEvent",
         entity_id=event.pk, reference=locked_lot.purchase.document_number,
@@ -416,7 +430,9 @@ def record_transit_loss(*, lot, quantity, loss_date, reason, idempotency_key, us
             "quantity": quantity,
             "loss_date": loss_date.isoformat(),
             "reason": reason,
-            "valuation_status": "PENDING_PURCHASE_WIDE_REPLAY",
+            "valuation_status": event.valuation_status,
+            "good_quantity": event.good_quantity,
+            "final_unit_cost_afn": str(event.final_unit_cost_afn),
         },
         reason=reason,
     )

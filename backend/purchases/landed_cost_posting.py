@@ -114,15 +114,22 @@ def _posted_prior_allocations(line_ids):
     ))
 
 
+def _loss_event_for_lot(lot):
+    from goods_in_transit.models import TransitLossEvent
+    return TransitLossEvent.objects.filter(lot=lot).order_by("id").first()
+
+
 def _good_quantity_for_line(line, *, lot=None):
     """Return the safe denominator for capitalized direct costs.
 
     Without transit loss, the source purchase-line quantity is authoritative.
-    Any recorded transit loss blocks this path until the purchase-wide loss
-    replay can revalue prior sales, receipts, warehouse AVCO, and transit assets
-    together. It is unsafe to change only the denominator.
+    A recorded transit loss blocks this path until its purchase-wide loss
+    valuation replay is posted; after posting, the denominator is the
+    reconciled good quantity (original minus confirmed loss), because the
+    replay has already revalued prior sales, receipts, warehouse AVCO and
+    transit assets with compensating journals.
     """
-    from goods_in_transit.models import GoodsInTransitLot, TransitLossEvent
+    from goods_in_transit.models import GoodsInTransitLot, TransitLossValuationStatus
 
     if lot is None:
         lot = GoodsInTransitLot.objects.filter(purchase_line_id=line.pk).first()
@@ -132,23 +139,52 @@ def _good_quantity_for_line(line, *, lot=None):
         raise LandedCostPostingError(
             f"Transit lot {lot.pk} original quantity does not match purchase line {line.pk}."
         )
-    loss_events = TransitLossEvent.objects.filter(lot=lot)
-    if loss_events.exists():
-        # A loss changes the unit cost of every surviving unit and must also
-        # revalue prior transit sales, receipts, and warehouse AVCO. Merely
-        # changing the denominator here would leave 1430 and historic COGS
-        # inconsistent. Until the purchase-wide loss replay posts those
-        # compensating journals atomically, reject landed-cost posting.
+    loss_event = _loss_event_for_lot(lot)
+    if loss_event is None:
+        return line.quantity
+    if loss_event.valuation_status != TransitLossValuationStatus.POSTED:
         raise LandedCostPostingError(
             f"Transit purchase line {line.pk} has confirmed loss events without "
             "a posted purchase-wide loss valuation replay; landed-cost posting is blocked."
         )
-    return line.quantity
+    good_quantity = loss_event.good_quantity
+    if good_quantity is None:
+        good_quantity = lot.original_quantity - loss_event.quantity
+    if good_quantity <= 0 or good_quantity != lot.original_quantity - loss_event.quantity:
+        raise LandedCostPostingError(
+            f"Transit lot {lot.pk} has an inconsistent posted loss valuation snapshot."
+        )
+    return good_quantity
 
 
-def _extra_cost_map(lines, allocations, *, lock=True):
-    """Map immutable warehouse movement IDs to additional AFN/unit from posted costs."""
-    from goods_in_transit.models import GoodsInTransitLot, TransitReceipt
+def _loss_delta_per_unit_afn(line, lot, loss_event):
+    """Base-cost AFN/unit uplift of a posted loss layer.
+
+    Only the invoice-backed base cost needs a persistent layer: later
+    landed-cost maps re-denominate the landed pool over the good quantity
+    themselves (via ``_good_quantity_for_line``), so including the landed
+    share here would double-count it. Base uplift per good unit is
+    ``old_base_afn * L / G``; the event snapshot keeps it stable.
+    """
+    old_base_afn = _q4(Decimal(lot.unit_cost) * Decimal(lot.rate))
+    good_quantity = Decimal(loss_event.good_quantity or (lot.original_quantity - loss_event.quantity))
+    return _q4(old_base_afn * Decimal(loss_event.quantity) / good_quantity)
+
+
+def _extra_cost_map(lines, allocations, *, lock=True, denominator_by_line_id=None,
+                    extra_delta_by_line_id=None):
+    """Map immutable warehouse movement IDs to additional AFN/unit from posted costs.
+
+    ``denominator_by_line_id`` / ``extra_delta_by_line_id`` let the transit-loss
+    valuation replay build its own baseline/revised maps (denominator N, plus
+    an explicit loss delta) without tripping the fail-closed loss guard.
+    In normal use, a lot with a *posted* loss valuation automatically
+    contributes its base-cost loss layer and its landed pool is divided by
+    the good quantity.
+    """
+    from goods_in_transit.models import (
+        GoodsInTransitLot, TransitReceipt, TransitLossValuationStatus,
+    )
     from sales.models import SalesReturn, TransitSaleAllocation
 
     line_by_id = {line.pk: line for line in lines}
@@ -162,13 +198,25 @@ def _extra_cost_map(lines, allocations, *, lock=True):
         # difference when several direct-cost documents target the same line.
         per_line[line.pk] += allocation.afn_amount
 
+    denominator_by_line_id = denominator_by_line_id or {}
+    extra_delta_by_line_id = extra_delta_by_line_id or {}
     extra = defaultdict(lambda: Decimal("0"))
-    for line_id, allocated_afn in per_line.items():
-        line = line_by_id[line_id]
-        delta_per_unit = _q4(allocated_afn / Decimal(_good_quantity_for_line(line)))
+    for line_id, line in line_by_id.items():
+        allocated_afn = per_line.get(line_id, Decimal("0"))
+        if line_id in denominator_by_line_id:
+            denominator = Decimal(denominator_by_line_id[line_id])
+        else:
+            denominator = Decimal(_good_quantity_for_line(line))
+        delta_per_unit = _q4(allocated_afn / denominator) if allocated_afn else Decimal("0")
+        lot_for_loss = GoodsInTransitLot.objects.filter(purchase_line_id=line_id).first()
+        if lot_for_loss is not None and line_id not in extra_delta_by_line_id:
+            loss_event = _loss_event_for_lot(lot_for_loss)
+            if loss_event is not None and loss_event.valuation_status == TransitLossValuationStatus.POSTED:
+                delta_per_unit += _loss_delta_per_unit_afn(line, lot_for_loss, loss_event)
+        delta_per_unit += Decimal(extra_delta_by_line_id.get(line_id, Decimal("0")))
         if not delta_per_unit:
             continue
-        lot = GoodsInTransitLot.objects.filter(purchase_line_id=line_id).first()
+        lot = lot_for_loss
         if lot is None:
             movement = _source_movement(line, lock=lock)
             extra[movement.pk] += delta_per_unit
@@ -1052,3 +1100,435 @@ def post_transit_sales_return_landed_cost_adjustments(*, lot, sales_return, user
         if row is not None:
             created.append(row)
     return created
+
+
+# ---------------------------------------------------------------------------
+# Transit-loss purchase-wide valuation replay (Phase 11)
+# ---------------------------------------------------------------------------
+
+def _post_loss_adjustment(*, loss_event, adjustment_type, reference, movement,
+                          debit_account, credit_account, amount, posting_day,
+                          actor, party=None):
+    """Post one compensating AFN journal anchored to a transit loss event."""
+    signed = _q2(amount)
+    if signed == 0:
+        return None
+    from goods_in_transit.models import TransitLossValuationAdjustment
+    debit = debit_account if signed > 0 else credit_account
+    credit = credit_account if signed > 0 else debit_account
+    value = abs(signed)
+    base = _base_currency()
+    fingerprint_ref = str(reference)[:200]
+    existing = TransitLossValuationAdjustment.objects.filter(
+        loss_event=loss_event, source_reference=fingerprint_ref,
+        adjustment_type=adjustment_type,
+    ).first()
+    if existing:
+        if existing.amount_afn != value or existing.movement_id != getattr(movement, "pk", None):
+            raise LandedCostPostingError(
+                "Existing transit loss valuation adjustment does not match the planned adjustment."
+            )
+        return existing
+    number = next_document_number("JE", _jalali_year(posting_day))
+    entry = post_journal(
+        number=number, posting_date=posting_day,
+        description=f"Transit loss {adjustment_type.lower()} adjustment: lot {loss_event.lot_id}",
+        lines=[
+            {"account": debit, "debit": value, "reference": reference,
+             "description": f"Transit loss valuation lot {loss_event.lot_id}"},
+            {"account": credit, "credit": value, "reference": reference,
+             "description": f"Transit loss valuation lot {loss_event.lot_id}"},
+        ],
+        source_type="TRANSIT_LOSS_VALUATION_ADJUSTMENT",
+        source_id=f"TRANSIT-LOSS:{loss_event.pk}:{adjustment_type}:{getattr(movement, 'pk', reference)}",
+        currency=base, rate=Decimal("1.0000"), rate_date=posting_day,
+        created_by=actor,
+        idempotency_key=f"transit-loss:{loss_event.pk}:adjustment:{adjustment_type}:{getattr(movement, 'pk', reference)}",
+    )
+    if party is not None:
+        payable_line = (
+            entry.lines.filter(account=debit).first() if debit == _account(PAYABLE_ACCOUNT)
+            else entry.lines.filter(account=credit).first()
+        )
+        if payable_line is not None:
+            attribute_journal_line(payable_line, party=party, user=actor)
+    return TransitLossValuationAdjustment.objects.create(
+        loss_event=loss_event, source_reference=fingerprint_ref,
+        adjustment_type=adjustment_type, movement=movement,
+        amount_afn=value, journal_entry=entry,
+    )
+
+
+def _post_loss_purchase_return_adjustment(*, loss_event, reference, movement,
+                                          warehouse, payable_party,
+                                          inventory_delta, payable_delta,
+                                          posting_day, actor):
+    """Loss analogue of ``_post_purchase_return_adjustment`` (same split rule)."""
+    inventory_delta = _q2(inventory_delta)
+    payable_delta = _q2(payable_delta)
+    if inventory_delta == 0 and payable_delta == 0:
+        return None
+    inventory_account = resolve_warehouse_account(warehouse)
+    payable = _account(PAYABLE_ACCOUNT)
+    cogs = _account(COGS_ACCOUNT)
+    lines = []
+    if payable_delta > 0:
+        lines.append({"account": payable, "debit": payable_delta, "reference": reference,
+                      "description": "Transit-loss adjustment to supplier return claim"})
+    elif payable_delta < 0:
+        lines.append({"account": payable, "credit": abs(payable_delta), "reference": reference,
+                      "description": "Reverse transit-loss adjustment to supplier return claim"})
+    if inventory_delta > 0:
+        lines.append({"account": inventory_account, "credit": inventory_delta, "reference": reference,
+                      "description": "Remove loss-adjusted AVCO from returned stock"})
+    elif inventory_delta < 0:
+        lines.append({"account": inventory_account, "debit": abs(inventory_delta), "reference": reference,
+                      "description": "Reverse loss-adjusted AVCO removal"})
+    debit_total = sum((line.get("debit", Decimal("0")) for line in lines), Decimal("0"))
+    credit_total = sum((line.get("credit", Decimal("0")) for line in lines), Decimal("0"))
+    if debit_total > credit_total:
+        lines.append({"account": cogs, "credit": debit_total - credit_total,
+                      "reference": reference, "description": "Purchase-return cost variance"})
+    elif credit_total > debit_total:
+        lines.append({"account": cogs, "debit": credit_total - debit_total,
+                      "reference": reference, "description": "Purchase-return cost variance"})
+    if sum((line.get("debit", Decimal("0")) for line in lines), Decimal("0")) != sum(
+        (line.get("credit", Decimal("0")) for line in lines), Decimal("0")
+    ):
+        raise LandedCostPostingError("Transit loss purchase-return adjustment journal failed to balance.")
+    base = _base_currency()
+    digest = hashlib.sha256(str(movement.pk).encode()).hexdigest()[:20]
+    entry = post_journal(
+        number=next_document_number("JE", _jalali_year(posting_day)),
+        posting_date=posting_day,
+        description=f"Transit loss purchase-return adjustment: lot {loss_event.lot_id}",
+        lines=lines, source_type="TRANSIT_LOSS_VALUATION_ADJUSTMENT",
+        source_id=f"TRANSIT-LOSS:{loss_event.pk}:PURCHASE_RETURN:{digest}",
+        currency=base, rate=Decimal("1.0000"), rate_date=posting_day,
+        created_by=actor,
+        idempotency_key=f"transit-loss:{loss_event.pk}:adjustment:PURCHASE_RETURN:{movement.pk}",
+    )
+    payable_line = entry.lines.filter(account=payable).first()
+    if payable_line is not None and payable_party is not None:
+        attribute_journal_line(payable_line, party=payable_party, user=actor)
+    from goods_in_transit.models import TransitLossValuationAdjustment
+    return TransitLossValuationAdjustment.objects.create(
+        loss_event=loss_event, source_reference=reference[:200],
+        adjustment_type="PURCHASE_RETURN", movement=movement,
+        amount_afn=max(abs(inventory_delta), abs(payable_delta),
+                       abs(inventory_delta - payable_delta)),
+        journal_entry=entry,
+    )
+
+
+@transaction.atomic
+def post_transit_loss_valuation(*, loss_event, user=None):
+    """Post the purchase-wide valuation replay for a confirmed transit loss.
+
+    Reuses the landed-cost AVCO replay: baseline values this lot's receipts
+    at the old unit cost (invoice base + posted landed costs over N), the
+    revised map values them at the final unit cost over good quantity G.
+    Compensating journals move the lost units' AFN cost from 1430 to the
+    surviving units' destinations. No posted journal/movement is rewritten.
+    The caller owns the surrounding transaction (loss event + lot closure),
+    so any failure here rolls the whole recording back.
+    """
+    from django.utils import timezone as _tz
+    from goods_in_transit.models import (
+        GoodsInTransitLot, TransitLossValuationStatus, TransitReceipt,
+    )
+    from sales.models import NegativeCOGSReceiptAllocation, SalesReturn, TransitSaleAllocation
+    from .models import PurchaseReturn
+
+    event = type(loss_event).objects.select_for_update().get(pk=loss_event.pk)
+    if event.valuation_status == TransitLossValuationStatus.POSTED:
+        return event
+    actor = user or event.created_by
+    if actor is not None and not getattr(actor, "is_authenticated", False):
+        raise LandedCostPostingError("Authenticated user required.")
+    day = event.loss_date
+    assert_posting_date_open(day)
+
+    lot = GoodsInTransitLot.objects.select_for_update().select_related(
+        "purchase", "purchase_line", "purchase_line__purchase",
+        "purchase_line__product", "product", "currency",
+    ).get(pk=event.lot_id)
+    line = lot.purchase_line
+    if lot.original_quantity != line.quantity:
+        raise LandedCostPostingError(
+            f"Transit lot {lot.pk} original quantity does not match purchase line {line.pk}."
+        )
+    # A direct transit purchase return removes units from company ownership
+    # through 1430/payable at the old unit; its claim revaluation is a
+    # separate contract. Fail closed rather than misstate the denominator.
+    if PurchaseReturn.objects.filter(
+        transit_lot=lot, status="POSTED",
+    ).exists():
+        raise LandedCostPostingError(
+            "Transit purchase returns must be resolved before transit loss "
+            "valuation; loss posting is blocked for this lot."
+        )
+
+    original_quantity = lot.original_quantity
+    good_quantity = original_quantity - event.quantity
+    if good_quantity <= 0:
+        raise LandedCostPostingError("Transit loss must leave a positive good quantity.")
+
+    # Lock the product row to serialize against landed-cost posting (same
+    # product-level discipline as post_landed_cost).
+    product_model = type(line.product)
+    list(product_model.objects.select_for_update().filter(
+        pk=line.product_id
+    ).order_by("pk").values_list("pk", flat=True))
+
+    prior = list(LandedCostAllocation.objects.filter(
+        purchase_line__product_id=line.product_id,
+        cost_document__status=LandedCostStatus.POSTED,
+        cost_document__reversal__isnull=True,
+    ).select_related("purchase_line", "cost_document").order_by(
+        "cost_document__cost_date", "id"
+    ))
+    valuation_line_ids = {row.purchase_line_id for row in prior} | {line.pk}
+    valuation_lines = list(PurchaseLine.objects.filter(
+        pk__in=valuation_line_ids
+    ).select_related(
+        "purchase", "purchase__warehouse", "purchase__currency", "product"
+    ).order_by("pk"))
+    landed_pool_afn = sum(
+        (row.afn_amount for row in prior if row.purchase_line_id == line.pk),
+        Decimal("0.00"),
+    )
+
+    old_base_afn = _q4(Decimal(lot.unit_cost) * Decimal(lot.rate))
+    pool_afn = old_base_afn * Decimal(original_quantity) + landed_pool_afn
+    final_unit_afn = _q4(pool_afn / Decimal(good_quantity))
+    old_unit_afn = old_base_afn + (
+        _q4(landed_pool_afn / Decimal(original_quantity)) if landed_pool_afn else Decimal("0")
+    )
+    delta_per_unit = _q4(final_unit_afn - old_unit_afn)
+
+    denominator = {line.pk: original_quantity}
+    baseline_extra = _extra_cost_map(
+        valuation_lines, prior, denominator_by_line_id=denominator,
+    )
+    revised_extra = _extra_cost_map(
+        valuation_lines, prior, denominator_by_line_id=denominator,
+        extra_delta_by_line_id={line.pk: delta_per_unit},
+    )
+    allowed_negative_issue_ids = set(
+        NegativeCOGSReceiptAllocation.objects.filter(
+            obligation__product_id=line.product_id,
+            receipt_movement__product_id=line.product_id,
+        ).values_list("obligation__movement_id", flat=True)
+    )
+    movements, baseline, revised, base_state, revised_state, in_for_out = _simulate_product(
+        line.product_id, baseline_extra, revised_extra, lot.ownership_date,
+        allowed_negative_issue_ids=allowed_negative_issue_ids,
+    )
+
+    transit_account = _account(TRANSIT_ACCOUNT)
+    cogs_account = _account(COGS_ACCOUNT)
+    distributed_dr = Decimal("0.00")   # total debited to surviving destinations
+    transit_credit = Decimal("0.00")   # total credited out of 1430 directly
+
+    # --- Transit receipts: reclass the uplift of already-received goods ---
+    receipts = list(TransitReceipt.objects.filter(
+        lot=lot, company_quantity__gt=0, stock_movement__isnull=False
+    ).select_related("stock_movement", "warehouse").order_by("id"))
+    resolved_by_receipt = {}
+    resolved_by_obligation = defaultdict(int)
+    links_by_receipt = {}
+    for receipt in receipts:
+        links = list(NegativeCOGSReceiptAllocation.objects.filter(
+            receipt_movement=receipt.stock_movement
+        ).select_related("obligation", "obligation__movement").order_by("id"))
+        links_by_receipt[receipt.pk] = links
+        consumed = sum(link.quantity for link in links)
+        if consumed > receipt.company_quantity:
+            raise LandedCostPostingError(
+                f"Transit receipt {receipt.stock_movement.reference} resolves more "
+                "negative stock than its company quantity."
+            )
+        resolved_by_receipt[receipt.pk] = consumed
+        for link in links:
+            resolved_by_obligation[link.obligation_id] += link.quantity
+    for receipt in receipts:
+        remaining_company_qty = receipt.company_quantity - resolved_by_receipt[receipt.pk]
+        value = _q2(delta_per_unit * Decimal(remaining_company_qty))
+        row = _post_loss_adjustment(
+            loss_event=event, adjustment_type="TRANSIT_RECEIPT",
+            reference=receipt.stock_movement.reference,
+            movement=receipt.stock_movement,
+            debit_account=resolve_warehouse_account(receipt.warehouse),
+            credit_account=transit_account, amount=value,
+            posting_day=day, actor=actor,
+        )
+        if row is not None:
+            transit_credit += value
+    for obligation_id, resolved_quantity in sorted(resolved_by_obligation.items()):
+        link = next(
+            link for receipt in receipts for link in links_by_receipt[receipt.pk]
+            if link.obligation_id == obligation_id
+        )
+        amount = _q2(delta_per_unit * Decimal(resolved_quantity))
+        if amount:
+            reference = f"{link.obligation.movement.reference}:NEGATIVE-RECEIPT:{link.receipt_movement_id}"
+            row = _post_loss_adjustment(
+                loss_event=event, adjustment_type="NEGATIVE_COGS_OBLIGATION",
+                reference=reference, movement=link.obligation.movement,
+                debit_account=cogs_account,
+                credit_account=transit_account, amount=amount,
+                posting_day=day, actor=actor,
+            )
+            if row is not None:
+                transit_credit += amount
+                distributed_dr += amount
+
+    # --- Transit sales: sold-in-transit uplift goes straight to COGS ---
+    for sale_allocation in TransitSaleAllocation.objects.filter(
+        transit_lot=lot
+    ).select_related("sale_line", "cogs_journal"):
+        value = _q2(delta_per_unit * Decimal(sale_allocation.quantity))
+        row = _post_loss_adjustment(
+            loss_event=event, adjustment_type="TRANSIT_SALE",
+            reference=f"TRANSIT-SALE:{sale_allocation.sale_line_id}",
+            movement=None, debit_account=cogs_account,
+            credit_account=transit_account, amount=value,
+            posting_day=day, actor=actor,
+        )
+        if row is not None:
+            transit_credit += value
+            distributed_dr += value
+
+    # --- Warehouse Kardex replay deltas (sales, transfers, returns) ---
+    inventory_delta = Decimal("0.00")
+    for movement in movements:
+        if movement.movement_date < lot.ownership_date:
+            continue
+        delta = Decimal("0.00")
+        if movement.movement_type in (
+            MovementType.SALES_ISSUE, MovementType.TRANSFER_OUT,
+            MovementType.PURCHASE_RETURN,
+        ):
+            delta = _q2(revised[movement.pk]["relief"] - baseline[movement.pk]["relief"])
+        elif movement.movement_type == MovementType.SALES_RETURN:
+            delta = _q2(revised[movement.pk]["inbound"] - baseline[movement.pk]["inbound"])
+        if delta == 0:
+            continue
+        if movement.movement_type == MovementType.SALES_ISSUE:
+            if not JournalEntry.objects.filter(
+                source_type="SALES_COGS", source_id=movement.reference
+            ).exists():
+                raise LandedCostPostingError(
+                    f"Sales issue {movement.reference} has no matching posted COGS journal."
+                )
+            _post_loss_adjustment(
+                loss_event=event, adjustment_type="SALES_ISSUE",
+                reference=movement.reference, movement=movement,
+                debit_account=cogs_account,
+                credit_account=resolve_warehouse_account(movement.warehouse),
+                amount=delta, posting_day=day, actor=actor,
+            )
+            distributed_dr += delta
+        elif movement.movement_type == MovementType.TRANSFER_OUT:
+            transfer_in = in_for_out.get(movement.pk)
+            if transfer_in is None:
+                raise LandedCostPostingError("Transfer-out has no paired transfer-in.")
+            _post_loss_adjustment(
+                loss_event=event, adjustment_type="WAREHOUSE_TRANSFER",
+                reference=movement.reference, movement=movement,
+                debit_account=resolve_warehouse_account(transfer_in.warehouse),
+                credit_account=resolve_warehouse_account(movement.warehouse),
+                amount=delta, posting_day=day, actor=actor,
+            )
+        elif movement.movement_type == MovementType.PURCHASE_RETURN:
+            inventory_return, _sales_return, purchase_return = _movement_return_context(movement)
+            if inventory_return is None or purchase_return is None:
+                raise LandedCostPostingError(
+                    f"Purchase return {movement.reference} has no posted supplier-claim document."
+                )
+            source_before = baseline.get(inventory_return.source_movement_id)
+            source_after = revised.get(inventory_return.source_movement_id)
+            if source_before is None or source_after is None:
+                raise LandedCostPostingError(
+                    "Purchase-return source receipt is missing from valuation replay."
+                )
+            source_unit_delta = source_after["unit"] - source_before["unit"]
+            payable_delta = _q2(source_unit_delta * Decimal(abs(movement.quantity)))
+            _post_loss_purchase_return_adjustment(
+                loss_event=event, reference=movement.reference,
+                movement=movement, warehouse=movement.warehouse,
+                payable_party=purchase_return.supplier,
+                inventory_delta=delta, payable_delta=payable_delta,
+                posting_day=day, actor=actor,
+            )
+            distributed_dr += payable_delta + (delta - payable_delta)
+        elif movement.movement_type == MovementType.SALES_RETURN:
+            _inventory_return, sales_return, _purchase_return = _movement_return_context(movement)
+            if sales_return is None:
+                raise LandedCostPostingError(
+                    f"Sales return {movement.reference} has no posted commercial return."
+                )
+            _post_loss_adjustment(
+                loss_event=event, adjustment_type="SALES_RETURN",
+                reference=movement.reference, movement=movement,
+                debit_account=resolve_warehouse_account(movement.warehouse),
+                credit_account=cogs_account, amount=delta,
+                posting_day=day, actor=actor,
+            )
+            distributed_dr -= delta
+    for warehouse_id, pair in revised_state.items():
+        before = base_state.get(warehouse_id, [0, Decimal("0")])
+        inventory_delta += _q2(pair[1] - before[1])
+    # The receipt reclass above debits warehouses for the full received
+    # share; Kardex issue/return deltas then move the sold/returned share
+    # out, leaving exactly the ending-inventory uplift in warehouse accounts.
+    distributed_dr += inventory_delta
+
+    # --- Reconcile against the lost units' value still sitting in 1430 ---
+    expected_transit_credit = _q2(old_unit_afn * Decimal(event.quantity))
+    residual = _q2(expected_transit_credit - transit_credit)
+    if residual:
+        # Receipt reclass + transit-sale credits should already equal the
+        # lost value; a cent-level remainder is posted visibly, never hidden.
+        row = _post_loss_adjustment(
+            loss_event=event, adjustment_type="ROUNDING_RESIDUAL",
+            reference=f"TRANSIT-LOSS:{event.pk}:ROUNDING",
+            movement=None,
+            debit_account=cogs_account if residual > 0 else transit_account,
+            credit_account=transit_account if residual > 0 else cogs_account,
+            amount=residual, posting_day=day, actor=actor,
+        )
+        if row is not None:
+            transit_credit += residual
+            distributed_dr += residual
+    if _q2(transit_credit) != expected_transit_credit:
+        raise LandedCostPostingError(
+            "Transit loss valuation does not reconcile to the lost units' "
+            "value in account 1430; rolling back."
+        )
+
+    event.good_quantity = good_quantity
+    event.final_unit_cost_afn = final_unit_afn
+    event.landed_pool_afn_at_valuation = landed_pool_afn
+    event.valuation_status = TransitLossValuationStatus.POSTED
+    event.valuation_posted_at = _tz.now()
+    event.save(update_fields=[
+        "valuation_status", "good_quantity", "final_unit_cost_afn",
+        "landed_pool_afn_at_valuation", "valuation_posted_at",
+    ])
+    record_audit_event(
+        user=actor, action=AuditAction.POST, entity="TransitLossEvent",
+        entity_id=event.pk, reference=lot.purchase.document_number,
+        previous_state={"valuation_status": TransitLossValuationStatus.PENDING},
+        new_state={
+            "valuation_status": TransitLossValuationStatus.POSTED,
+            "good_quantity": good_quantity,
+            "final_unit_cost_afn": str(final_unit_afn),
+            "adjustment_ids": list(
+                event.valuation_adjustments.order_by("id").values_list("pk", flat=True)
+            ),
+        },
+        reason=event.reason,
+    )
+    return event

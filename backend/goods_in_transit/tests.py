@@ -686,13 +686,15 @@ class GoodsInTransitTests(TestCase):
             user=self.user, idempotency_key="tlc1",
         )
         lot.refresh_from_db()
-        record_transit_loss(
+        event = record_transit_loss(
             lot=lot, quantity=2, loss_date=date(2026, 2, 3),
             reason="Confirmed transport loss", idempotency_key="transit-loss-cost-001",
             user=self.user,
         )
-        with self.assertRaisesRegex(LandedCostPostingError, "purchase-wide loss valuation replay"):
-            _good_quantity_for_line(line, lot=lot)
+        # The valuation replay now posts atomically with the loss evidence,
+        # so the denominator becomes the reconciled good quantity.
+        self.assertEqual(event.valuation_status, "POSTED")
+        self.assertEqual(_good_quantity_for_line(line, lot=lot), 98)
 
     def test_transit_loss_rejects_loss_of_entire_purchase_line(self):
         purchase = self._purchase(document_number="PI-TRANSIT-LOSS-COST-002")
@@ -726,8 +728,7 @@ class GoodsInTransitTests(TestCase):
             reason="Loss belongs only to first purchase",
             idempotency_key="transit-loss-scope-001", user=self.user,
         )
-        with self.assertRaisesRegex(LandedCostPostingError, "purchase-wide loss valuation replay"):
-            _good_quantity_for_line(first_line, lot=first_lot)
+        self.assertEqual(_good_quantity_for_line(first_line, lot=first_lot), 98)
         self.assertEqual(_good_quantity_for_line(second_line, lot=second_lot), second_line.quantity)
 
     def test_record_transit_loss_is_idempotent_and_rejects_conflicts(self):
