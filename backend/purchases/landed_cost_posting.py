@@ -1491,13 +1491,15 @@ def post_transit_loss_valuation(*, loss_event, user=None):
     if residual:
         # Receipt reclass + transit-sale credits should already equal the
         # lost value; a cent-level remainder is posted visibly, never hidden.
+        # Positive residual: more credit must leave 1430 (Dr COGS / Cr 1430).
+        # Negative residual: too much left 1430 (Dr 1430 / Cr COGS).
         row = _post_loss_adjustment(
             loss_event=event, adjustment_type="ROUNDING_RESIDUAL",
             reference=f"TRANSIT-LOSS:{event.pk}:ROUNDING",
             movement=None,
             debit_account=cogs_account if residual > 0 else transit_account,
             credit_account=transit_account if residual > 0 else cogs_account,
-            amount=residual, posting_day=day, actor=actor,
+            amount=abs(residual), posting_day=day, actor=actor,
         )
         if row is not None:
             transit_credit += residual

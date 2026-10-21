@@ -183,3 +183,23 @@ Limitations / still fail-closed:
   merged cleanly into current `main` in a local scratch worktree and its
   sales tests passed locally (33 passed, 1 skipped); it remains a Draft
   and needs fresh exact-head CI + contract review before any merge.
+
+## 11. Verification round 2 (master execution prompt)
+
+- Added master scenarios: 10,000 units / 5 trips / loss 30 (denominator
+  9,970 — caught and fixed a ROUNDING_RESIDUAL debit/credit direction bug
+  for negative residuals), posted-history immutability snapshot,
+  closed-period rejection with rollback, failure-then-retry.
+- PostgreSQL (real server, `config.settings.postgres`): full backend
+  **899 passed, 0 skipped**, including new PG-only concurrency tests in
+  `goods_in_transit/transit_loss_concurrency_tests.py` (same-key duplicate
+  finalization posts once and returns the same event; conflicting keys
+  produce exactly one event/journal set).
+- SQLite: **893 passed, 6 skipped** (the 6 skips are PostgreSQL-only
+  concurrency tests, by design).
+- Fresh-database PostgreSQL `migrate` + `migrate --check`: clean.
+- Frontend build/tests pass; Tauri cargo check unavailable in this
+  environment (no Tauri files changed).
+- Draft PR text: `PHASE_11_TRANSIT_LOSS_PR_DESCRIPTION.md`.
+- Still no GitHub CI evidence for this head: the authoring environment
+  cannot push. Ready for owner review once pushed and exact-head CI runs.

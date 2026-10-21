@@ -351,3 +351,127 @@ class TransitLossValuationFlowTests(TransitLossValuationTests):
         self.assertEqual(self._balance("1430"), Decimal("0.00"))
         self.assertEqual(stock_for(self.product, self.warehouse), 73)
         self._assert_journals_balanced()
+
+
+class TransitLossMasterScenarioTests(TransitLossValuationTests):
+    """Master-prompt scenarios: purchase-wide scale, history, periods, retry."""
+
+    def test_purchase_wide_loss_10000_in_multiple_trips(self):
+        # Contract example: 10,000 purchased, arrivals in several trips,
+        # final confirmed wastage 30 -> denominator 9,970.
+        purchase = create_purchase(
+            supplier=self.supplier, purchase_date=self.day, currency=self.afn,
+            warehouse=self.warehouse,
+            lines=[{"product": self.product, "quantity": 10000,
+                    "unit_price": "10"}],
+            rate="1", rate_date=self.day,
+            delivery_mode=PurchaseDeliveryMode.IN_TRANSIT,
+            user=self.user, document_number="PI-LV-10000",
+        )
+        post_purchase(purchase=purchase, user=self.user)
+        lot = self._lot(purchase)
+        for index, qty in enumerate([2000, 2000, 2000, 2000, 1970]):
+            receive_transit(lot=lot, quantity=qty,
+                            receipt_date=date(2026, 2, 2),
+                            user=self.user, idempotency_key=f"lv10-r{index}")
+        event = record_transit_loss(
+            lot=lot, quantity=30, loss_date=date(2026, 2, 4),
+            reason="Final wastage after all trips arrived",
+            idempotency_key="lv10-loss", user=self.user,
+        )
+        self.assertEqual(event.good_quantity, 9970)
+        # Pool 100,000 AFN / 9,970 = 10.0301 AFN per good unit.
+        self.assertEqual(event.final_unit_cost_afn, Decimal("10.0301"))
+        self.assertEqual(self._balance("1430"), Decimal("0.00"))
+        # 9,970 x 10.0301 (4dp unit) = 100,000.10 on hand; the -0.10
+        # rounding residual is credited to COGS so the total cost pool
+        # distributed stays exactly 100,000.00 (existing residual contract).
+        self.assertEqual(self._balance("1410"), Decimal("100000.10"))
+        self.assertEqual(
+            self._balance("1410") + self._balance("5100"), Decimal("100000.00"))
+        self.assertEqual(stock_for(self.product, self.warehouse), 9970)
+        self._assert_journals_balanced()
+
+    def test_posted_history_is_never_mutated_by_loss_valuation(self):
+        from accounting.models import JournalLine
+        from inventory.models import StockMovement
+
+        purchase = self._purchase("PI-LV-HIST")
+        lot = self._lot(purchase)
+        receive_transit(lot=lot, quantity=98, receipt_date=date(2026, 2, 2),
+                        user=self.user, idempotency_key="lvh-r1")
+        lines_before = sorted(
+            JournalLine.objects.values_list("pk", "debit", "credit"))
+        movements_before = sorted(
+            StockMovement.objects.values_list("pk", "quantity", "unit_cost_afn"))
+        entries_before = JournalEntry.objects.count()
+
+        record_transit_loss(
+            lot=lot, quantity=2, loss_date=date(2026, 2, 4),
+            reason="Confirmed transport wastage", idempotency_key="lvh-loss",
+            user=self.user,
+        )
+        # Every pre-existing line/movement is byte-identical; only new
+        # compensating journals were appended.
+        self.assertEqual(
+            sorted(JournalLine.objects.filter(
+                pk__in=[row[0] for row in lines_before]
+            ).values_list("pk", "debit", "credit")),
+            lines_before,
+        )
+        self.assertEqual(
+            sorted(StockMovement.objects.values_list(
+                "pk", "quantity", "unit_cost_afn")),
+            movements_before,
+        )
+        self.assertGreater(JournalEntry.objects.count(), entries_before)
+
+    def test_closed_period_rejects_loss_and_rolls_back(self):
+        from fiscal_periods.services import close_period, create_period
+
+        purchase = self._purchase("PI-LV-PERIOD")
+        lot = self._lot(purchase)
+        receive_transit(lot=lot, quantity=98, receipt_date=date(2026, 2, 2),
+                        user=self.user, idempotency_key="lvp-r1")
+        period = create_period(
+            name="LV Feb 4", start_date=date(2026, 2, 4),
+            end_date=date(2026, 2, 4), user=self.user,
+        )
+        close_period(period, user=self.user, reason="test close")
+        journal_count = JournalEntry.objects.count()
+        with self.assertRaises(Exception):
+            record_transit_loss(
+                lot=lot, quantity=2, loss_date=date(2026, 2, 4),
+                reason="Confirmed transport wastage",
+                idempotency_key="lvp-loss", user=self.user,
+            )
+        self.assertEqual(TransitLossEvent.objects.filter(lot=lot).count(), 0)
+        self.assertEqual(JournalEntry.objects.count(), journal_count)
+        lot.refresh_from_db()
+        self.assertEqual(lot.remaining_quantity, 2)
+        self.assertEqual(lot.status, "OPEN")
+
+    def test_failure_then_retry_succeeds_exactly_once(self):
+        purchase = self._purchase("PI-LV-RETRY")
+        lot = self._lot(purchase)
+        receive_transit(lot=lot, quantity=98, receipt_date=date(2026, 2, 2),
+                        user=self.user, idempotency_key="lvr-r1")
+        with patch(
+            "purchases.landed_cost_posting.post_transit_loss_valuation",
+            side_effect=RuntimeError("simulated replay failure"),
+        ):
+            with self.assertRaises(RuntimeError):
+                record_transit_loss(
+                    lot=lot, quantity=2, loss_date=date(2026, 2, 4),
+                    reason="Confirmed transport wastage",
+                    idempotency_key="lvr-loss", user=self.user,
+                )
+        event = record_transit_loss(
+            lot=lot, quantity=2, loss_date=date(2026, 2, 4),
+            reason="Confirmed transport wastage",
+            idempotency_key="lvr-loss", user=self.user,
+        )
+        self.assertEqual(event.valuation_status, "POSTED")
+        self.assertEqual(TransitLossEvent.objects.filter(lot=lot).count(), 1)
+        self.assertEqual(self._balance("1430"), Decimal("0.00"))
+        self.assertEqual(self._balance("1410"), Decimal("10000.00"))
