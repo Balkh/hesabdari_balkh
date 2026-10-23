@@ -1,7 +1,8 @@
 from decimal import Decimal
 
 from django.conf import settings
-from django.db import models
+from django.core.exceptions import ValidationError
+from django.db import models, transaction
 
 from accounting.models import JournalEntry, PostedImmutabilityError
 
@@ -132,3 +133,57 @@ class TransitDestinationTransfer(models.Model):
         return super().save(*args, **kwargs)
     def delete(self, *args, **kwargs):
         raise PostedImmutabilityError("Transit destination transfers cannot be deleted")
+
+
+class TransitLossEvent(models.Model):
+    """Immutable evidence of confirmed loss from a purchase-wide transit lot."""
+    lot = models.ForeignKey(
+        GoodsInTransitLot, on_delete=models.PROTECT, related_name="loss_events"
+    )
+    quantity = models.PositiveIntegerField()
+    loss_date = models.DateField()
+    reason = models.TextField()
+    idempotency_key = models.CharField(max_length=128, unique=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True,
+        on_delete=models.SET_NULL, related_name="transit_loss_events_created",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["loss_date", "id"]
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(quantity__gt=0), name="transit_loss_qty_gt0"
+            ),
+        ]
+
+    def save(self, *args, **kwargs):
+        if self.pk is not None:
+            raise PostedImmutabilityError("Transit loss events are immutable")
+        # Serialize aggregate validation on the source lot so direct model
+        # creation cannot bypass the service's cumulative quantity guard.
+        with transaction.atomic():
+            lot = GoodsInTransitLot.objects.select_for_update().get(pk=self.lot_id)
+            if self.loss_date < lot.ownership_date:
+                raise ValidationError("Transit loss date cannot precede company ownership.")
+            already_reported = sum(
+                type(self).objects.filter(lot_id=lot.pk).values_list("quantity", flat=True)
+            )
+            if self.quantity <= 0 or already_reported + self.quantity >= lot.original_quantity:
+                raise ValidationError(
+                    "Cumulative transit loss must leave at least one good unit in the purchase line."
+                )
+            if already_reported:
+                raise ValidationError(
+                    "A transit lot can have only one final reconciled loss event."
+                )
+            if self.quantity != lot.remaining_quantity:
+                raise ValidationError(
+                    "Transit loss can be recorded only after all other owned goods are accounted for; "
+                    "loss quantity must equal the lot's remaining transit quantity."
+                )
+            return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise PostedImmutabilityError("Transit loss events cannot be deleted")
