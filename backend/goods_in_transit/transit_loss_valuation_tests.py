@@ -475,3 +475,33 @@ class TransitLossMasterScenarioTests(TransitLossValuationTests):
         self.assertEqual(TransitLossEvent.objects.filter(lot=lot).count(), 1)
         self.assertEqual(self._balance("1430"), Decimal("0.00"))
         self.assertEqual(self._balance("1410"), Decimal("10000.00"))
+
+    def test_direct_transit_purchase_return_fails_closed_before_loss(self):
+        # A direct transit purchase return removes units through
+        # 1430/payable under a separate claim contract; until that
+        # revaluation contract exists, loss finalization must fail
+        # closed and roll back completely (design doc limitation).
+        from purchases.services import post_transit_purchase_return
+
+        purchase = self._purchase("PI-LV-TPR")
+        lot = self._lot(purchase)
+        post_transit_purchase_return(
+            purchase=purchase, transit_lot=lot, quantity=10,
+            return_date=date(2026, 2, 2), reason="Defective in transit",
+            user=self.user, document_number="PRTN-LV-TPR",
+            idempotency_key="lvtpr-return",
+        )
+        receive_transit(lot=lot, quantity=88, receipt_date=date(2026, 2, 3),
+                        user=self.user, idempotency_key="lvtpr-r1")
+        journal_count = JournalEntry.objects.count()
+        with self.assertRaises(TransitValidationError):
+            record_transit_loss(
+                lot=lot, quantity=2, loss_date=date(2026, 2, 4),
+                reason="Confirmed transport wastage",
+                idempotency_key="lvtpr-loss", user=self.user,
+            )
+        self.assertEqual(TransitLossEvent.objects.filter(lot=lot).count(), 0)
+        self.assertEqual(JournalEntry.objects.count(), journal_count)
+        lot.refresh_from_db()
+        self.assertEqual(lot.remaining_quantity, 2)
+        self.assertEqual(lot.status, "OPEN")
