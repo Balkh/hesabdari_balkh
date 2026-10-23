@@ -23,7 +23,7 @@ from sales.models import PaymentMode, SalesChannel, TransitSaleAllocation
 from sales.services import create_sale, finalize_sale
 
 from .models import (
-    GoodsInTransitLot, TransitLossEvent, TransitLossValuationAdjustment,
+    GoodsInTransitLot, TransitLossEvent, TransitLossValuationAdjustment, TransitPurchaseCompletion,
 )
 from .services import TransitValidationError, receive_transit, record_transit_loss as record_transit_loss_service, complete_transit_purchase
 from .transit_loss_valuation_tests import TransitLossValuationTests
@@ -43,6 +43,28 @@ class FindingAHardeningTests(TransitLossValuationTests):
             created_by=self.user,
         )
         return event
+
+    def test_purchase_completion_cannot_be_fabricated_or_bulk_created(self):
+        purchase = self._purchase("PI-HARD-COMPLETE-GATE")
+        lot = self._lot(purchase)
+        receive_transit(
+            lot=lot, quantity=98, receipt_date=date(2026, 2, 2),
+            user=self.user, idempotency_key="hard-complete-gate-r1",
+        )
+        with self.assertRaises(PostedImmutabilityError):
+            TransitPurchaseCompletion.objects.create(
+                purchase=purchase, completion_date=date(2026, 2, 4),
+                reason="forged completion", idempotency_key="hard-forged-completion",
+                completed_by=self.user,
+            )
+        candidate = TransitPurchaseCompletion(
+            purchase=purchase, completion_date=date(2026, 2, 4),
+            reason="bulk forged completion", idempotency_key="hard-bulk-completion",
+            completed_by=self.user,
+        )
+        with self.assertRaises(PostedImmutabilityError):
+            TransitPurchaseCompletion.objects.bulk_create([candidate])
+        self.assertFalse(TransitPurchaseCompletion.objects.filter(purchase=purchase).exists())
 
     def test_model_save_cannot_fabricate_posted_snapshot(self):
         event = self._pending_event("A1")

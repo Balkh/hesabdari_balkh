@@ -135,6 +135,21 @@ class TransitDestinationTransfer(models.Model):
         raise PostedImmutabilityError("Transit destination transfers cannot be deleted")
 
 
+class TransitPurchaseCompletionQuerySet(models.QuerySet):
+    """Completion evidence cannot be fabricated or rewritten through bulk ORM paths."""
+    def update(self, **kwargs):
+        raise PostedImmutabilityError("Transit purchase completion is immutable")
+
+    def bulk_update(self, objs, fields, batch_size=None):
+        raise PostedImmutabilityError("Transit purchase completion is immutable")
+
+    def bulk_create(self, objs, **kwargs):
+        raise PostedImmutabilityError("Transit purchase completion must use the validated service")
+
+    def delete(self):
+        raise PostedImmutabilityError("Transit purchase completion cannot be deleted")
+
+
 class TransitPurchaseCompletion(models.Model):
     """Immutable operator attestation that every line of a transit purchase has arrived."""
     purchase = models.OneToOneField("purchases.Purchase", on_delete=models.PROTECT, related_name="transit_completion")
@@ -144,12 +159,16 @@ class TransitPurchaseCompletion(models.Model):
     completed_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="transit_purchases_completed")
     completed_at = models.DateTimeField(auto_now_add=True)
 
+    objects = TransitPurchaseCompletionQuerySet.as_manager()
+
     class Meta:
         ordering = ["completion_date", "id"]
 
     def save(self, *args, **kwargs):
         if self.pk is not None:
             raise PostedImmutabilityError("Transit purchase completion is immutable")
+        if not getattr(self, "_completion_authorized", False):
+            raise PostedImmutabilityError("Create transit purchase completion through the validated service")
         if not self.reason or not self.reason.strip():
             raise ValidationError("A reason is required to confirm purchase completion.")
         return super().save(*args, **kwargs)

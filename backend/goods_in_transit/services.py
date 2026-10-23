@@ -387,10 +387,12 @@ def complete_transit_purchase(*, purchase, completion_date, reason, idempotency_
                 )
             if TransitLossEvent.objects.filter(lot=lot).exists():
                 raise TransitValidationError("Purchase completion must be confirmed before recording final transit loss.")
-        completion = TransitPurchaseCompletion.objects.create(
+        completion = TransitPurchaseCompletion(
             purchase=locked_purchase, completion_date=completion_date, reason=reason.strip(),
             idempotency_key=key, completed_by=actor,
         )
+        completion._completion_authorized = True
+        completion.save(force_insert=True)
         record_audit_event(
             user=actor, action=AuditAction.CREATE, entity="TransitPurchaseCompletion",
             entity_id=completion.pk, reference=locked_purchase.document_number,
