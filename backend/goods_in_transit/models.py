@@ -159,6 +159,15 @@ class TransitLossEventQuerySet(models.QuerySet):
             "Transit loss events cannot be changed through bulk updates"
         )
 
+    def bulk_create(self, objs, **kwargs):
+        # bulk_create() bypasses Model.save(), including the invariant that a
+        # loss event must start PENDING and can become POSTED only through the
+        # valuation service after compensating journals have been written.
+        raise PostedImmutabilityError(
+            "Create transit loss events through the validated service/model path; "
+            "bulk_create bypasses required accounting validation"
+        )
+
     def delete(self):
         raise PostedImmutabilityError("Transit loss events cannot be deleted")
 
