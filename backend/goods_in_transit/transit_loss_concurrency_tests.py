@@ -21,7 +21,7 @@ from uom.services import create_uom
 from warehouses.services import create_warehouse
 
 from .models import GoodsInTransitLot, TransitLossEvent, TransitLossValuationAdjustment
-from .services import receive_transit, record_transit_loss
+from .services import receive_transit, record_transit_loss, complete_transit_purchase
 
 
 @skipUnless(connection.vendor == "postgresql", "Row-lock concurrency is verified on PostgreSQL")
@@ -56,6 +56,9 @@ class TransitLossConcurrentPostingTests(TransactionTestCase):
         self.lot = GoodsInTransitLot.objects.get(purchase_line=purchase.lines.get())
         receive_transit(lot=self.lot, quantity=98, receipt_date=date(2026, 2, 2),
                         user=self.user, idempotency_key="lvconc-r1")
+        complete_transit_purchase(purchase=purchase, completion_date=date(2026, 2, 2),
+            reason="All goods for this purchase invoice arrived; trip receipts consolidated.",
+            idempotency_key="lvconc-complete", user=self.user)
 
     def _attempt(self, key, results):
         def run():
