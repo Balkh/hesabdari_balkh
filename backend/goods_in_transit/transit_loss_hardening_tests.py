@@ -73,6 +73,23 @@ class FindingAHardeningTests(TransitLossValuationTests):
         event.refresh_from_db()
         self.assertEqual(event.valuation_status, "PENDING")
 
+    def test_bulk_create_is_rejected_for_transit_loss_events(self):
+        event = self._pending_event("A7")
+        from django.utils import timezone
+
+        candidate = TransitLossEvent(
+            lot=event.lot, quantity=2, loss_date=date(2026, 2, 4),
+            reason="hardening regression", idempotency_key="hardA7-bulk",
+            created_by=self.user, valuation_status="POSTED",
+            good_quantity=98, final_unit_cost_afn=Decimal("99999.0000"),
+            valuation_posted_at=timezone.now(),
+        )
+        with self.assertRaises(PostedImmutabilityError):
+            TransitLossEvent.objects.bulk_create([candidate])
+        self.assertFalse(
+            TransitLossEvent.objects.filter(idempotency_key="hardA7-bulk").exists()
+        )
+
     def test_event_cannot_be_created_already_posted(self):
         purchase = self._purchase("PI-HARD-A4")
         lot = self._lot(purchase)
