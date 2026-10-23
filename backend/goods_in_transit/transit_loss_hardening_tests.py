@@ -25,7 +25,7 @@ from sales.services import create_sale, finalize_sale
 from .models import (
     GoodsInTransitLot, TransitLossEvent, TransitLossValuationAdjustment,
 )
-from .services import TransitValidationError, receive_transit, record_transit_loss
+from .services import TransitValidationError, receive_transit, record_transit_loss as record_transit_loss_service, complete_transit_purchase
 from .transit_loss_valuation_tests import TransitLossValuationTests
 
 
@@ -36,6 +36,7 @@ class FindingAHardeningTests(TransitLossValuationTests):
         receive_transit(lot=lot, quantity=98, receipt_date=date(2026, 2, 2),
                         user=self.user, idempotency_key=f"hard{suffix}-r1")
         lot.refresh_from_db()
+        complete_transit_purchase(purchase=purchase, completion_date=date(2026, 2, 4), reason="All goods for this purchase invoice arrived; trip receipts consolidated.", idempotency_key=f"hard-complete-{lot.purchase_id}", user=self.user)
         event = TransitLossEvent.objects.create(
             lot=lot, quantity=2, loss_date=date(2026, 2, 4),
             reason="hardening repro", idempotency_key=f"hard{suffix}-loss",
@@ -172,7 +173,7 @@ class FindingBHardeningTests(TransitLossValuationTests):
         with patch.object(TransitSaleAllocation.objects, "filter",
                           return_value=TransitSaleAllocation.objects.none()):
             with self.assertRaises(TransitValidationError):
-                record_transit_loss(
+                self._record_loss_after_completion(
                     lot=lot, quantity=2, loss_date=date(2026, 2, 4),
                     reason="Confirmed transport wastage",
                     idempotency_key="hardB1-loss", user=self.user,
@@ -194,7 +195,7 @@ class FindingBHardeningTests(TransitLossValuationTests):
         lot = self._lot(purchase)
         receive_transit(lot=lot, quantity=98, receipt_date=date(2026, 2, 2),
                         user=self.user, idempotency_key="hardB2-r1")
-        event = record_transit_loss(
+        event = self._record_loss_after_completion(
             lot=lot, quantity=2, loss_date=date(2026, 2, 4),
             reason="Confirmed transport wastage",
             idempotency_key="hardB2-loss", user=self.user,

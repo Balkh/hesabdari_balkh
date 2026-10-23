@@ -18,7 +18,7 @@ from security.services import record_audit_event
 from customer_custody.models import CustomerCustodyEvent, CustomerOwnershipEntitlement, CustodyEventType
 from customer_custody.services import place_customer_custody
 
-from .models import GoodsInTransitLot, TransitCustomerCustody, TransitDestinationTransfer, TransitLotStatus, TransitReceipt, TransitLossEvent, has_unvalued_transit_loss
+from .models import GoodsInTransitLot, TransitCustomerCustody, TransitDestinationTransfer, TransitLotStatus, TransitReceipt, TransitLossEvent, TransitPurchaseCompletion, has_unvalued_transit_loss
 
 
 class TransitValidationError(ValueError):
@@ -348,6 +348,56 @@ def receive_transit(*, lot, quantity, receipt_date, user=None, idempotency_key=N
 
 
 @transaction.atomic
+def complete_transit_purchase(*, purchase, completion_date, reason, idempotency_key, user=None):
+    """Record purchase-wide confirmation after all transport-trip receipts are consolidated."""
+    from purchases.models import Purchase, PurchaseDeliveryMode, PurchaseStatus
+    actor = _actor(user)
+    purchase_id = getattr(purchase, "pk", purchase)
+    if not isinstance(idempotency_key, str) or not idempotency_key.strip():
+        raise TransitValidationError("A non-empty idempotency key is required.")
+    key = idempotency_key.strip()
+    if not isinstance(reason, str) or not reason.strip():
+        raise TransitValidationError("A reason is required to confirm purchase completion.")
+    if completion_date is None:
+        raise TransitValidationError("Purchase completion date is required.")
+    with transaction.atomic():
+        locked_purchase = Purchase.objects.select_for_update().get(pk=purchase_id)
+        existing = TransitPurchaseCompletion.objects.filter(purchase=locked_purchase).first()
+        if existing:
+            if existing.idempotency_key == key and existing.completion_date == completion_date and existing.reason == reason.strip():
+                return existing
+            raise TransitValidationError("This transit purchase has already been marked complete.")
+        if locked_purchase.status != PurchaseStatus.POSTED:
+            raise TransitValidationError("Only a posted purchase can be marked complete.")
+        if locked_purchase.delivery_mode != PurchaseDeliveryMode.IN_TRANSIT:
+            raise TransitValidationError("Only an in-transit purchase can use transit completion.")
+        if completion_date < locked_purchase.purchase_date:
+            raise TransitValidationError("Completion date cannot precede the purchase date.")
+        lots = list(GoodsInTransitLot.objects.select_for_update().filter(purchase_id=locked_purchase.pk).order_by("id"))
+        lines = list(locked_purchase.lines.all().order_by("id"))
+        if not lines or len(lots) != len(lines):
+            raise TransitValidationError("Every purchase line must have its immutable Goods-in-Transit lot before completion.")
+        for lot in lots:
+            if not TransitReceipt.objects.filter(lot=lot).exists():
+                raise TransitValidationError(f"Purchase cannot be completed: transit lot {lot.pk} has no recorded physical receipt.")
+            if TransitLossEvent.objects.filter(lot=lot).exists():
+                raise TransitValidationError("Purchase completion must be confirmed before recording final transit loss.")
+        completion = TransitPurchaseCompletion.objects.create(
+            purchase=locked_purchase, completion_date=completion_date, reason=reason.strip(),
+            idempotency_key=key, completed_by=actor,
+        )
+        record_audit_event(
+            user=actor, action=AuditAction.CREATE, entity="TransitPurchaseCompletion",
+            entity_id=completion.pk, reference=locked_purchase.document_number,
+            previous_state=None,
+            new_state={"purchase_id": locked_purchase.pk, "completion_date": completion_date.isoformat(),
+                       "lot_ids": [lot.pk for lot in lots], "line_count": len(lines)},
+            reason=reason.strip(),
+        )
+        return completion
+
+
+@transaction.atomic
 def record_transit_loss(*, lot, quantity, loss_date, reason, idempotency_key, user=None):
     """Record a confirmed transit loss and post its valuation replay atomically.
 
@@ -386,6 +436,8 @@ def record_transit_loss(*, lot, quantity, loss_date, reason, idempotency_key, us
             raise TransitValidationError("Idempotency key was already used for different loss evidence.")
         return existing
 
+    if not TransitPurchaseCompletion.objects.filter(purchase_id=locked_lot.purchase_id).exists():
+        raise TransitValidationError("Transit loss is blocked until the whole purchase is marked complete after all goods arrive.")
     # A genuine retry of an already-recorded event is safe even if the fiscal
     # period has since closed; only a new posting must pass the open-period gate.
     assert_posting_date_open(loss_date)

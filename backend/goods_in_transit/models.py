@@ -135,6 +135,29 @@ class TransitDestinationTransfer(models.Model):
         raise PostedImmutabilityError("Transit destination transfers cannot be deleted")
 
 
+class TransitPurchaseCompletion(models.Model):
+    """Immutable operator attestation that every line of a transit purchase has arrived."""
+    purchase = models.OneToOneField("purchases.Purchase", on_delete=models.PROTECT, related_name="transit_completion")
+    completion_date = models.DateField()
+    reason = models.TextField()
+    idempotency_key = models.CharField(max_length=128, unique=True)
+    completed_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="transit_purchases_completed")
+    completed_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["completion_date", "id"]
+
+    def save(self, *args, **kwargs):
+        if self.pk is not None:
+            raise PostedImmutabilityError("Transit purchase completion is immutable")
+        if not self.reason or not self.reason.strip():
+            raise ValidationError("A reason is required to confirm purchase completion.")
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise PostedImmutabilityError("Transit purchase completion cannot be deleted")
+
+
 class TransitLossValuationStatus(models.TextChoices):
     PENDING = "PENDING", "Pending purchase-wide valuation replay"
     POSTED = "POSTED", "Valuation replay posted"

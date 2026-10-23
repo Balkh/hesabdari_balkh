@@ -36,7 +36,7 @@ from sales.services import (
 )
 
 from .models import GoodsInTransitLot, TransitLossEvent, TransitLossValuationAdjustment
-from .services import TransitValidationError, receive_transit, record_transit_loss
+from .services import (TransitValidationError, receive_transit, record_transit_loss as record_transit_loss_service, complete_transit_purchase)
 
 
 class TransitLossValuationTests(TestCase):
@@ -89,6 +89,32 @@ class TransitLossValuationTests(TestCase):
             self.assertGreater(entry.total_debit, Decimal("0"), entry.number)
 
     # -- scenarios -------------------------------------------------------
+    def _record_loss_after_completion(self, *, lot, quantity, loss_date, reason, idempotency_key, user=None):
+        complete_transit_purchase(
+            purchase=lot.purchase, completion_date=loss_date,
+            reason="All goods for this purchase invoice arrived; trip receipts consolidated.",
+            idempotency_key=f"test-complete-{lot.purchase_id}", user=user or self.user,
+        )
+        return record_transit_loss_service(
+            lot=lot, quantity=quantity, loss_date=loss_date, reason=reason,
+            idempotency_key=idempotency_key, user=user or self.user,
+        )
+
+    def test_loss_is_blocked_until_whole_purchase_completion(self):
+        purchase = self._purchase("PI-LV-COMPLETE-GATE")
+        lot = self._lot(purchase)
+        receive_transit(lot=lot, quantity=98, receipt_date=date(2026, 2, 2), user=self.user, idempotency_key="lv-complete-gate-r1")
+        with self.assertRaises(TransitValidationError):
+            record_transit_loss_service(lot=lot, quantity=2, loss_date=date(2026, 2, 4),
+                reason="Confirmed final purchase-wide wastage", idempotency_key="lv-complete-gate-loss", user=self.user)
+        completion = complete_transit_purchase(purchase=purchase, completion_date=date(2026, 2, 4),
+            reason="All invoice goods arrived across the recorded trips.", idempotency_key="lv-complete-gate-complete", user=self.user)
+        self.assertEqual(completion.purchase_id, purchase.pk)
+        event = record_transit_loss_service(lot=lot, quantity=2, loss_date=date(2026, 2, 4),
+            reason="Confirmed final purchase-wide wastage", idempotency_key="lv-complete-gate-loss", user=self.user)
+        self.assertEqual(event.valuation_status, "POSTED")
+        self.assertEqual(event.good_quantity, 98)
+
     def test_loss_after_partial_receipts_revalues_on_hand_and_clears_1430(self):
         purchase = self._purchase("PI-LV-001")
         lot = self._lot(purchase)
@@ -99,7 +125,7 @@ class TransitLossValuationTests(TestCase):
         self.assertEqual(self._balance("1430"), Decimal("200.00"))
         self.assertEqual(self._balance("1410"), Decimal("9800.00"))
 
-        event = record_transit_loss(
+        event = self._record_loss_after_completion(
             lot=lot, quantity=2, loss_date=date(2026, 2, 4),
             reason="Confirmed transport wastage", idempotency_key="lv1-loss",
             user=self.user,
@@ -137,7 +163,7 @@ class TransitLossValuationTests(TestCase):
                         user=self.user, idempotency_key="lv2-r1")
         self.assertEqual(self._balance("5100"), Decimal("4000.00"))
 
-        record_transit_loss(
+        self._record_loss_after_completion(
             lot=lot, quantity=2, loss_date=date(2026, 2, 4),
             reason="Confirmed transport wastage", idempotency_key="lv2-loss",
             user=self.user,
@@ -169,7 +195,7 @@ class TransitLossValuationTests(TestCase):
         finalize_warehouse_check(check=check)
         self.assertEqual(self._balance("5100"), Decimal("3000.00"))
 
-        record_transit_loss(
+        self._record_loss_after_completion(
             lot=lot, quantity=2, loss_date=date(2026, 2, 4),
             reason="Confirmed transport wastage", idempotency_key="lv3-loss",
             user=self.user,
@@ -198,7 +224,7 @@ class TransitLossValuationTests(TestCase):
         )
         post_landed_cost(cost_document=cost1, user=self.user)
 
-        event = record_transit_loss(
+        event = self._record_loss_after_completion(
             lot=lot, quantity=2, loss_date=date(2026, 2, 4),
             reason="Confirmed transport wastage", idempotency_key="lv4-loss",
             user=self.user,
@@ -230,14 +256,14 @@ class TransitLossValuationTests(TestCase):
         lot = self._lot(purchase)
         receive_transit(lot=lot, quantity=98, receipt_date=date(2026, 2, 2),
                         user=self.user, idempotency_key="lv5-r1")
-        first = record_transit_loss(
+        first = self._record_loss_after_completion(
             lot=lot, quantity=2, loss_date=date(2026, 2, 4),
             reason="Confirmed transport wastage", idempotency_key="lv5-loss",
             user=self.user,
         )
         journal_count = JournalEntry.objects.count()
         adjustment_count = TransitLossValuationAdjustment.objects.count()
-        retry = record_transit_loss(
+        retry = self._record_loss_after_completion(
             lot=lot, quantity=2, loss_date=date(2026, 2, 4),
             reason="Confirmed transport wastage", idempotency_key="lv5-loss",
             user=self.user,
@@ -257,7 +283,7 @@ class TransitLossValuationTests(TestCase):
             side_effect=RuntimeError("simulated replay failure"),
         ):
             with self.assertRaises(RuntimeError):
-                record_transit_loss(
+                self._record_loss_after_completion(
                     lot=lot, quantity=2, loss_date=date(2026, 2, 4),
                     reason="Confirmed transport wastage",
                     idempotency_key="lv6-loss", user=self.user,
@@ -303,7 +329,7 @@ class TransitLossValuationFlowTests(TransitLossValuationTests):
             description="Move to B", user=self.user,
             idempotency_key="lv8-transfer",
         )
-        record_transit_loss(
+        self._record_loss_after_completion(
             lot=lot, quantity=2, loss_date=date(2026, 2, 4),
             reason="Confirmed transport wastage", idempotency_key="lv8-loss",
             user=self.user,
@@ -340,7 +366,7 @@ class TransitLossValuationFlowTests(TransitLossValuationTests):
             document_number="SR-LV-009", idempotency_key="lv9-return",
             user=self.user,
         )
-        record_transit_loss(
+        self._record_loss_after_completion(
             lot=lot, quantity=2, loss_date=date(2026, 2, 5),
             reason="Confirmed transport wastage", idempotency_key="lv9-loss",
             user=self.user,
@@ -374,7 +400,7 @@ class TransitLossMasterScenarioTests(TransitLossValuationTests):
             receive_transit(lot=lot, quantity=qty,
                             receipt_date=date(2026, 2, 2),
                             user=self.user, idempotency_key=f"lv10-r{index}")
-        event = record_transit_loss(
+        event = self._record_loss_after_completion(
             lot=lot, quantity=30, loss_date=date(2026, 2, 4),
             reason="Final wastage after all trips arrived",
             idempotency_key="lv10-loss", user=self.user,
@@ -406,7 +432,7 @@ class TransitLossMasterScenarioTests(TransitLossValuationTests):
             StockMovement.objects.values_list("pk", "quantity", "unit_cost_afn"))
         entries_before = JournalEntry.objects.count()
 
-        record_transit_loss(
+        self._record_loss_after_completion(
             lot=lot, quantity=2, loss_date=date(2026, 2, 4),
             reason="Confirmed transport wastage", idempotency_key="lvh-loss",
             user=self.user,
@@ -440,7 +466,7 @@ class TransitLossMasterScenarioTests(TransitLossValuationTests):
         close_period(period, user=self.user, reason="test close")
         journal_count = JournalEntry.objects.count()
         with self.assertRaises(Exception):
-            record_transit_loss(
+            self._record_loss_after_completion(
                 lot=lot, quantity=2, loss_date=date(2026, 2, 4),
                 reason="Confirmed transport wastage",
                 idempotency_key="lvp-loss", user=self.user,
@@ -461,12 +487,12 @@ class TransitLossMasterScenarioTests(TransitLossValuationTests):
             side_effect=RuntimeError("simulated replay failure"),
         ):
             with self.assertRaises(RuntimeError):
-                record_transit_loss(
+                self._record_loss_after_completion(
                     lot=lot, quantity=2, loss_date=date(2026, 2, 4),
                     reason="Confirmed transport wastage",
                     idempotency_key="lvr-loss", user=self.user,
                 )
-        event = record_transit_loss(
+        event = self._record_loss_after_completion(
             lot=lot, quantity=2, loss_date=date(2026, 2, 4),
             reason="Confirmed transport wastage",
             idempotency_key="lvr-loss", user=self.user,
@@ -495,7 +521,7 @@ class TransitLossMasterScenarioTests(TransitLossValuationTests):
                         user=self.user, idempotency_key="lvtpr-r1")
         journal_count = JournalEntry.objects.count()
         with self.assertRaises(TransitValidationError):
-            record_transit_loss(
+            self._record_loss_after_completion(
                 lot=lot, quantity=2, loss_date=date(2026, 2, 4),
                 reason="Confirmed transport wastage",
                 idempotency_key="lvtpr-loss", user=self.user,

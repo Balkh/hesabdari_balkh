@@ -1268,7 +1268,7 @@ def post_transit_loss_valuation(*, loss_event, user=None):
     """
     from django.utils import timezone as _tz
     from goods_in_transit.models import (
-        GoodsInTransitLot, TransitLossValuationStatus, TransitReceipt,
+        GoodsInTransitLot, TransitLossValuationStatus, TransitReceipt, TransitPurchaseCompletion,
     )
     from sales.models import NegativeCOGSReceiptAllocation, SalesReturn, TransitSaleAllocation
     from .models import PurchaseReturn
@@ -1286,6 +1286,8 @@ def post_transit_loss_valuation(*, loss_event, user=None):
         "purchase", "purchase_line", "purchase_line__purchase",
         "purchase_line__product", "product", "currency",
     ).get(pk=event.lot_id)
+    if not TransitPurchaseCompletion.objects.filter(purchase_id=lot.purchase_id).exists():
+        raise LandedCostPostingError("Transit loss valuation is blocked until the whole purchase is marked complete.")
     line = lot.purchase_line
     if lot.original_quantity != line.quantity:
         raise LandedCostPostingError(
