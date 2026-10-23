@@ -140,6 +140,29 @@ class TransitLossValuationStatus(models.TextChoices):
     POSTED = "POSTED", "Valuation replay posted"
 
 
+class TransitLossEventQuerySet(models.QuerySet):
+    """Loss events are immutable: no queryset-level rewrite path exists.
+
+    ``Model.save()`` alone cannot be the integrity boundary because
+    ``QuerySet.update()``/``bulk_update()`` bypass it, so every bulk
+    mutation pathway is closed here. Creation goes through ``create()``,
+    which still runs the model's serialized aggregate validation.
+    """
+
+    def update(self, **kwargs):
+        raise PostedImmutabilityError(
+            "Transit loss events cannot be changed through queryset updates"
+        )
+
+    def bulk_update(self, objs, fields, batch_size=None):
+        raise PostedImmutabilityError(
+            "Transit loss events cannot be changed through bulk updates"
+        )
+
+    def delete(self):
+        raise PostedImmutabilityError("Transit loss events cannot be deleted")
+
+
 class TransitLossEvent(models.Model):
     """Immutable evidence of confirmed loss from a purchase-wide transit lot."""
     lot = models.ForeignKey(
@@ -171,11 +194,51 @@ class TransitLossEvent(models.Model):
     )
     created_at = models.DateTimeField(auto_now_add=True)
 
+    objects = TransitLossEventQuerySet.as_manager()
+
     class Meta:
         ordering = ["loss_date", "id"]
         constraints = [
             models.CheckConstraint(
                 condition=models.Q(quantity__gt=0), name="transit_loss_qty_gt0"
+            ),
+            # Database-level completeness: a POSTED valuation must carry
+            # its full snapshot; a PENDING event must not be timestamped
+            # as posted. (Cross-row consistency with the lot quantity is
+            # validated by the model/service layer inside the posting
+            # transaction; a CHECK constraint cannot join the lot table.)
+            models.CheckConstraint(
+                condition=(
+                    models.Q(valuation_status="PENDING")
+                    | (
+                        models.Q(valuation_status="POSTED")
+                        & models.Q(good_quantity__isnull=False)
+                        & models.Q(final_unit_cost_afn__isnull=False)
+                        & models.Q(valuation_posted_at__isnull=False)
+                    )
+                ),
+                name="transit_loss_posted_snapshot_complete",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(valuation_status="POSTED")
+                    | models.Q(valuation_posted_at__isnull=True)
+                ),
+                name="transit_loss_pending_not_timestamped",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(good_quantity__isnull=True)
+                    | models.Q(good_quantity__gt=0)
+                ),
+                name="transit_loss_good_qty_positive",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(final_unit_cost_afn__isnull=True)
+                    | models.Q(final_unit_cost_afn__gte=0)
+                ),
+                name="transit_loss_final_unit_gte0",
             ),
         ]
 
@@ -189,6 +252,25 @@ class TransitLossEvent(models.Model):
         if self.pk is not None:
             update_fields = set(kwargs.get("update_fields") or ())
             if update_fields and update_fields <= self.VALUATION_UPDATE_FIELDS:
+                # The ONLY legal post-creation write is the complete,
+                # service-authorized PENDING -> POSTED valuation transition.
+                # A bare flag is not proof: the posting service must set the
+                # private authorization attribute on this instance, and all
+                # snapshot fields must be present and mutually consistent.
+                if not getattr(self, "_valuation_posting_authorized", False):
+                    raise PostedImmutabilityError(
+                        "Transit loss valuation may only be posted by the "
+                        "authorized valuation posting service"
+                    )
+                if update_fields != self.VALUATION_UPDATE_FIELDS:
+                    raise PostedImmutabilityError(
+                        "Transit loss valuation snapshot must be written "
+                        "completely in one transition, not field by field"
+                    )
+                if self.valuation_status != TransitLossValuationStatus.POSTED:
+                    raise PostedImmutabilityError(
+                        "Transit loss valuation transition must target POSTED"
+                    )
                 current = type(self).objects.filter(pk=self.pk).values_list(
                     "valuation_status", flat=True
                 ).first()
@@ -196,8 +278,39 @@ class TransitLossEvent(models.Model):
                     raise PostedImmutabilityError(
                         "A posted transit loss valuation cannot be rewritten"
                     )
+                if self.good_quantity is None or self.good_quantity <= 0:
+                    raise ValidationError(
+                        "Posted transit loss valuation requires a positive good quantity."
+                    )
+                lot = GoodsInTransitLot.objects.filter(pk=self.lot_id).values_list(
+                    "original_quantity", flat=True
+                ).first()
+                if lot is None or self.good_quantity != lot - self.quantity:
+                    raise ValidationError(
+                        "Posted transit loss good quantity must equal the lot's "
+                        "original quantity minus the confirmed loss quantity."
+                    )
+                if self.final_unit_cost_afn is None or self.final_unit_cost_afn < 0:
+                    raise ValidationError(
+                        "Posted transit loss valuation requires a non-negative "
+                        "final AFN unit cost."
+                    )
+                if self.landed_pool_afn_at_valuation is None or self.landed_pool_afn_at_valuation < 0:
+                    raise ValidationError(
+                        "Posted transit loss valuation requires a non-negative "
+                        "landed-cost pool snapshot."
+                    )
+                if self.valuation_posted_at is None:
+                    raise ValidationError(
+                        "Posted transit loss valuation requires a posting timestamp."
+                    )
                 return super().save(*args, **kwargs)
             raise PostedImmutabilityError("Transit loss events are immutable")
+        if self.valuation_status != TransitLossValuationStatus.PENDING:
+            raise ValidationError(
+                "A transit loss event must be created in PENDING valuation "
+                "status; posting is owned by the valuation service."
+            )
         # Serialize aggregate validation on the source lot so direct model
         # creation cannot bypass the service's cumulative quantity guard.
         with transaction.atomic():
@@ -286,6 +399,27 @@ class TransitLossValuationAdjustment(models.Model):
     def save(self, *args, **kwargs):
         if self.pk is not None:
             raise PostedImmutabilityError("Transit loss valuation adjustments are immutable")
+        # An adjustment row is evidence OF a posted journal; it must never
+        # exist without its matching, correctly-sourced journal entry.
+        entry = self.journal_entry
+        if entry is None or entry.pk is None:
+            raise ValidationError(
+                "Transit loss valuation adjustments require a posted journal entry."
+            )
+        if entry.source_type != "TRANSIT_LOSS_VALUATION_ADJUSTMENT":
+            raise ValidationError(
+                "Transit loss valuation adjustment journal has the wrong source type."
+            )
+        if not entry.source_id.startswith(f"TRANSIT-LOSS:{self.loss_event_id}:"):
+            raise ValidationError(
+                "Transit loss valuation adjustment journal is not linked to "
+                "this loss event."
+            )
+        from accounting.models import JournalStatus
+        if entry.status not in (JournalStatus.POSTED, JournalStatus.REVERSED):
+            raise ValidationError(
+                "Transit loss valuation adjustment journal is not posted."
+            )
         return super().save(*args, **kwargs)
 
     def delete(self, *args, **kwargs):

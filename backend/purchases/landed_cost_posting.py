@@ -1159,6 +1159,39 @@ def _post_loss_adjustment(*, loss_event, adjustment_type, reference, movement,
     )
 
 
+def _loss_rounding_tolerance_afn(*, good_quantity, credit_terms):
+    """Maximum legitimate |residual| for a transit-loss valuation, in AFN.
+
+    Derivation from the project's own precision contract (no invented
+    allowance):
+    - ``delta_per_unit`` is a difference of two 4dp HALF_UP values
+      (final unit and old unit), so its error is at most
+      0.00005 + 0.00005 = 0.0001 AFN per good unit -> ``0.0001 * G``.
+    - Each amount that was summed into the transit credit was rounded to
+      the 2dp journal precision, error at most 0.005 each ->
+      ``0.005 * credit_terms``.
+    - The expected lost-unit value itself is one 2dp rounding -> ``0.005``.
+    Anything larger cannot be rounding: it means a source allocation is
+    missing, duplicated, or the replay maps disagree, and the posting
+    must fail closed instead of hiding the gap in COGS.
+    """
+    return _q2(
+        Decimal("0.0001") * Decimal(good_quantity)
+        + Decimal("0.005") * Decimal(credit_terms)
+        + Decimal("0.005")
+    )
+
+
+def _assert_loss_residual_within_tolerance(*, residual, tolerance_afn, lot_id):
+    if abs(residual) > tolerance_afn:
+        raise LandedCostPostingError(
+            f"Transit loss valuation for lot {lot_id} leaves a discrepancy of "
+            f"{residual} AFN against account 1430, exceeding the maximum "
+            f"rounding tolerance of {tolerance_afn} AFN; a source allocation "
+            "is missing, duplicated, or inconsistent. Rolling back."
+        )
+
+
 def _post_loss_purchase_return_adjustment(*, loss_event, reference, movement,
                                           warehouse, payable_party,
                                           inventory_delta, payable_delta,
@@ -1330,6 +1363,7 @@ def post_transit_loss_valuation(*, loss_event, user=None):
     cogs_account = _account(COGS_ACCOUNT)
     distributed_dr = Decimal("0.00")   # total debited to surviving destinations
     transit_credit = Decimal("0.00")   # total credited out of 1430 directly
+    transit_credit_terms = 0           # number of 2dp amounts summed above
 
     # --- Transit receipts: reclass the uplift of already-received goods ---
     receipts = list(TransitReceipt.objects.filter(
@@ -1365,6 +1399,7 @@ def post_transit_loss_valuation(*, loss_event, user=None):
         )
         if row is not None:
             transit_credit += value
+            transit_credit_terms += 1
     for obligation_id, resolved_quantity in sorted(resolved_by_obligation.items()):
         link = next(
             link for receipt in receipts for link in links_by_receipt[receipt.pk]
@@ -1382,6 +1417,7 @@ def post_transit_loss_valuation(*, loss_event, user=None):
             )
             if row is not None:
                 transit_credit += amount
+                transit_credit_terms += 1
                 distributed_dr += amount
 
     # --- Transit sales: sold-in-transit uplift goes straight to COGS ---
@@ -1398,6 +1434,7 @@ def post_transit_loss_valuation(*, loss_event, user=None):
         )
         if row is not None:
             transit_credit += value
+            transit_credit_terms += 1
             distributed_dr += value
 
     # --- Warehouse Kardex replay deltas (sales, transfers, returns) ---
@@ -1488,6 +1525,17 @@ def post_transit_loss_valuation(*, loss_event, user=None):
     # --- Reconcile against the lost units' value still sitting in 1430 ---
     expected_transit_credit = _q2(old_unit_afn * Decimal(event.quantity))
     residual = _q2(expected_transit_credit - transit_credit)
+    # A residual is legitimate ONLY as accumulated precision rounding.
+    # Beyond the derived tolerance it proves a missing/duplicated source
+    # allocation or a replay inconsistency: fail closed, roll back, and
+    # never hide the difference in COGS as a fake "rounding" amount.
+    _assert_loss_residual_within_tolerance(
+        residual=residual,
+        tolerance_afn=_loss_rounding_tolerance_afn(
+            good_quantity=good_quantity, credit_terms=transit_credit_terms,
+        ),
+        lot_id=lot.pk,
+    )
     if residual:
         # Receipt reclass + transit-sale credits should already equal the
         # lost value; a cent-level remainder is posted visibly, never hidden.
@@ -1510,11 +1558,48 @@ def post_transit_loss_valuation(*, loss_event, user=None):
             "value in account 1430; rolling back."
         )
 
+    # Destination-side reconciliation, verified from the actual posted
+    # journal lines (not just the in-memory plan): every adjustment must
+    # carry its journal, every journal must balance, and the net credit
+    # leaving 1430 must equal the net debit absorbed by the destination
+    # accounts (warehouse inventory, COGS, payable, ...).
+    from accounting.models import JournalLine
+    adjustment_rows = list(event.valuation_adjustments.select_related("journal_entry"))
+    journal_ids = [row.journal_entry_id for row in adjustment_rows]
+    if len(journal_ids) != len(set(journal_ids)):
+        raise LandedCostPostingError(
+            "Transit loss valuation adjustments share a journal entry; rolling back."
+        )
+    lines = JournalLine.objects.filter(entry_id__in=journal_ids)
+    net_transit_credit = sum(
+        (row.credit - row.debit for row in lines if row.account_id == transit_account.pk),
+        Decimal("0.00"),
+    )
+    net_destination_debit = sum(
+        (row.debit - row.credit for row in lines if row.account_id != transit_account.pk),
+        Decimal("0.00"),
+    )
+    total_debit = sum((row.debit for row in lines), Decimal("0.00"))
+    total_credit = sum((row.credit for row in lines), Decimal("0.00"))
+    if total_debit != total_credit or total_debit <= 0 and expected_transit_credit > 0:
+        raise LandedCostPostingError(
+            "Transit loss valuation journals do not balance; rolling back."
+        )
+    if _q2(net_transit_credit) != expected_transit_credit or _q2(net_destination_debit) != expected_transit_credit:
+        raise LandedCostPostingError(
+            "Transit loss destination accounts do not reconcile to the "
+            "amount leaving account 1430; rolling back."
+        )
+
     event.good_quantity = good_quantity
     event.final_unit_cost_afn = final_unit_afn
     event.landed_pool_afn_at_valuation = landed_pool_afn
     event.valuation_status = TransitLossValuationStatus.POSTED
     event.valuation_posted_at = _tz.now()
+    # Private, per-instance authorization for the single legal
+    # PENDING -> POSTED transition (enforced in TransitLossEvent.save).
+    # It is never persisted and no public helper sets it.
+    event._valuation_posting_authorized = True
     event.save(update_fields=[
         "valuation_status", "good_quantity", "final_unit_cost_afn",
         "landed_pool_afn_at_valuation", "valuation_posted_at",

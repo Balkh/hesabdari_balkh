@@ -203,3 +203,58 @@ Limitations / still fail-closed:
 - Draft PR text: `PHASE_11_TRANSIT_LOSS_PR_DESCRIPTION.md`.
 - Still no GitHub CI evidence for this head: the authoring environment
   cannot push. Ready for owner review once pushed and exact-head CI runs.
+
+## 12. Security-hardening round (Findings A & B)
+
+**Finding A — fabricated POSTED snapshot (REPRODUCED, FIXED).**
+Reproduction on `bdceee5`: `event.save(update_fields=[...])` accepted
+`good_quantity=1, final_unit_cost_afn=99999` with zero journals, and
+`QuerySet.update()` bypassed `save()` entirely. Root cause: the model
+allowed *any subset* of valuation fields from *any* caller, and no
+queryset guard existed. Fix:
+- `TransitLossEvent.save()` now permits exactly one write after creation:
+  the complete `VALUATION_UPDATE_FIELDS` set, targeting POSTED, with all
+  snapshot fields present and consistent (`good == lot.original − loss`,
+  non-negative costs, timestamp), and only when the posting service set
+  the private per-instance `_valuation_posting_authorized` flag.
+- `TransitLossEventQuerySet` closes `update`/`bulk_update`/`delete`.
+- Creating an event already POSTED is rejected.
+- Migration `0005_transit_loss_snapshot_constraints`: DB CHECK
+  constraints (POSTED ⇒ complete snapshot; PENDING ⇒ no posted
+  timestamp; positivity). Cross-table quantity consistency stays in the
+  posting transaction (CHECK cannot join the lot table) — documented
+  boundary.
+- `TransitLossValuationAdjustment.save()` now refuses any journal that
+  is not a posted `TRANSIT_LOSS_VALUATION_ADJUSTMENT` entry linked to
+  the same loss event: no evidence row without its journal.
+
+**Finding B — unbounded ROUNDING_RESIDUAL (REPRODUCED, FIXED).**
+Reproduction: with a transit-sale allocation missing during valuation,
+an 81.63 AFN discrepancy (40 units, not rounding) was silently posted
+to COGS and the event marked POSTED. Root cause: residual had no bound
+and no destination-side verification. Fix:
+- `_loss_rounding_tolerance_afn(G, terms) = 0.0001*G + 0.005*terms +
+  0.005` AFN, derived from the precision contract (two 4dp roundings
+  per unit; one 2dp rounding per summed amount and for the expected
+  value). Beyond tolerance → `LandedCostPostingError`, full rollback.
+- After posting, destination-side reconciliation is recomputed from
+  actual journal lines: journals balance, no shared journal between
+  adjustments, net credit out of 1430 == net debit into destinations
+  == `old_unit × L`.
+
+**Related-issue classification (§6 of the hardening prompt):**
+- Fixed here: fabricated POSTED, queryset bypass, adjustment-without-
+  journal, unbounded residual, destination reconciliation.
+- Already safely handled (regression-tested previously): duplicate /
+  conflicting idempotency keys, concurrent finalization on PostgreSQL,
+  closed-period rejection, atomic rollback, posted-history immutability,
+  purchase-lot isolation, landed costs before/after loss.
+- Deliberately fail-closed: direct transit purchase returns on the lot;
+  loss of already transit-sold (customer-owned) units.
+- Unresolved / owner decision: reversal flow for a posted loss
+  valuation; CI on exact head (workflow triggers exclude stacked base).
+
+**Evidence (this round):** SQLite full **923 passed, 6 skipped**
+(PostgreSQL-only concurrency skips by design); PostgreSQL full
+**929 passed, 0 skipped** incl. concurrency tests; fresh-PG migration
+clean; `makemigrations --check` clean; Django check clean.
