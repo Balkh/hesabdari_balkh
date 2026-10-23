@@ -148,7 +148,7 @@ class TransitLossValuationTests(TestCase):
         lot.refresh_from_db()
         self.assertEqual(lot.remaining_quantity, 0)
 
-    def test_loss_after_transit_sale_revalues_cogs_and_received_stock(self):
+    def test_purchase_completion_blocks_while_sold_goods_remain_in_transit(self):
         purchase = self._purchase("PI-LV-002")
         lot = self._lot(purchase)
         sale = create_sale(
@@ -161,19 +161,15 @@ class TransitLossValuationTests(TestCase):
         finalize_sale(sale=sale, user=self.user)
         receive_transit(lot=lot, quantity=58, receipt_date=date(2026, 2, 3),
                         user=self.user, idempotency_key="lv2-r1")
-        self.assertEqual(self._balance("5100"), Decimal("4000.00"))
-
-        self._record_loss_after_completion(
-            lot=lot, quantity=2, loss_date=date(2026, 2, 4),
-            reason="Confirmed transport wastage", idempotency_key="lv2-loss",
-            user=self.user,
-        )
-
-        # 40 sold units: COGS 40 x 102.0408; 58 on hand: 58 x 102.0408.
-        self.assertEqual(self._balance("5100"), Decimal("4081.63"))
-        self.assertEqual(self._balance("1410"), Decimal("5918.37"))
-        self.assertEqual(self._balance("1430"), Decimal("0.00"))
-        self._assert_journals_balanced()
+        with self.assertRaisesRegex(TransitValidationError, "sold goods still in transit"):
+            complete_transit_purchase(
+                purchase=purchase, completion_date=date(2026, 2, 4),
+                reason="Attempted premature purchase completion",
+                idempotency_key="lv2-premature-complete", user=self.user,
+            )
+        self.assertEqual(TransitLossEvent.objects.filter(lot=lot).count(), 0)
+        lot.refresh_from_db()
+        self.assertEqual(lot.remaining_quantity, 2)
 
     def test_loss_after_warehouse_sale_revalues_prior_cogs_via_avco_replay(self):
         purchase = self._purchase("PI-LV-003")

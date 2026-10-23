@@ -155,7 +155,7 @@ class FindingBHardeningTests(TransitLossValuationTests):
                 residual=-(tolerance + Decimal("0.01")),
                 tolerance_afn=tolerance, lot_id=1)
 
-    def test_missing_transit_sale_allocation_fails_closed_and_rolls_back(self):
+    def test_loss_completion_fails_closed_while_sold_transit_goods_are_unreceived(self):
         purchase = self._purchase("PI-HARD-B1")
         lot = self._lot(purchase)
         sale = create_sale(

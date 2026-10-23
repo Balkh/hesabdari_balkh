@@ -380,6 +380,11 @@ def complete_transit_purchase(*, purchase, completion_date, reason, idempotency_
         for lot in lots:
             if not TransitReceipt.objects.filter(lot=lot).exists():
                 raise TransitValidationError(f"Purchase cannot be completed: transit lot {lot.pk} has no recorded physical receipt.")
+            received_quantity = sum(TransitReceipt.objects.filter(lot=lot).values_list("quantity", flat=True))
+            if received_quantity + lot.remaining_quantity != lot.original_quantity:
+                raise TransitValidationError(
+                    "Purchase cannot be completed: received quantity and remaining company-owned transit quantity do not reconcile; sold goods still in transit must be physically received first."
+                )
             if TransitLossEvent.objects.filter(lot=lot).exists():
                 raise TransitValidationError("Purchase completion must be confirmed before recording final transit loss.")
         completion = TransitPurchaseCompletion.objects.create(
