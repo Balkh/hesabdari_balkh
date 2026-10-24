@@ -181,7 +181,8 @@ class TransitLossReversalTests(TransitLossValuationTests):
             currency=self.afn, channel=SalesChannel.WHOLESALE,
             payment_mode=PaymentMode.CREDIT,
             lines=[{"product": self.product, "unit": self.uom, "quantity": 30,
-                    "unit_price": "120"}],
+                    "unit_price": "120",
+                    "allocations": [{"warehouse": self.warehouse, "quantity": 30}]}],
             user=self.user, document_number="SI-LVR-R5",
         )
         finalize_sale(sale=sale, user=self.user)
