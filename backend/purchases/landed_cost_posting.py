@@ -1474,9 +1474,19 @@ def post_transit_loss_valuation(*, loss_event, user=None):
         if delta == 0:
             continue
         if movement.movement_type == MovementType.SALES_ISSUE:
-            if not JournalEntry.objects.filter(
-                source_type="SALES_COGS", source_id=movement.reference
-            ).exists():
+            # Recognise both legacy Warehouse-Check COGS (source_id ==
+            # movement reference) and invoice-time allocation COGS
+            # (source_id "<reference>:LINE:<line>:WH:<warehouse>", also
+            # linked from the SaleLine warehouse allocation).
+            if not (
+                JournalEntry.objects.filter(
+                    source_type="SALES_COGS", source_id=movement.reference
+                ).exists()
+                or JournalEntry.objects.filter(
+                    source_type="SALES_COGS",
+                    source_id__startswith=f"{movement.reference}:LINE:",
+                ).exists()
+            ):
                 raise LandedCostPostingError(
                     f"Sales issue {movement.reference} has no matching posted COGS journal."
                 )
