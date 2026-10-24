@@ -356,8 +356,9 @@ class ConcurrentReturnTests(TransactionTestCase):
             close_old_connections()
             try:
                 barrier.wait(timeout=5)
+                from .models import SaleLine
                 create_sales_return(
-                    sale_line=self.line.pk, warehouse=self.warehouse, quantity=4,
+                    sale_line=SaleLine.objects.get(pk=self.line.pk), warehouse=self.warehouse, quantity=4,
                     return_date=self.day, reason=f"Concurrent return {index}",
                     document_number=f"SR-CONC-{index}", idempotency_key=f"ret-conc-{index}",
                 )
