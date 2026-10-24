@@ -1,83 +1,31 @@
 # Phase 11 — Open Policy Decisions Memo (for owner/accountant)
 
-**Status:** AWAITING OWNER DECISION. Nothing in this memo is implemented.
+**Status:** Decision A resolved by owner clarification (2026-10-24); Decision B remains open. Phase 11 changes are not merged/frozen until exact-head CI and user review.
 **Context:** PR #38 (head at time of writing includes the owner's
 2026-10-23 addendum: loss cost is capitalized over good units; in-tolerance
 rounding residual may go to 5100, out-of-tolerance rolls back) and PR #39
-(transit-loss valuation replay, head `3b87f34`). Two matters were
-explicitly **not** decided by that addendum. Both are currently
-fail-closed in code. This memo states the facts, a concrete example, the
+(transit-loss valuation replay, head `3b87f34`). Decision A is now resolved by the owner's 2026-10-24 clarification. Decision B remains open. This memo states the facts, a concrete example, the
 options, and the minimum decision needed for each.
 
 ---
 
 ## Decision A — Direct purchase returns / supplier claims while goods are in transit
 
-### What exists today
-- `post_transit_purchase_return()` (purchases/services.py) posts
-  Dr 2110 (supplier payable) / Cr 1430 at the lot's *original* unit cost
-  (`lot.unit_cost`), reduces `remaining_quantity`, and creates an
-  immutable `PurchaseReturn(transit_lot=...)`. Supplier refunds against it
-  settle through the existing supplier-refund implementation.
-- Warehouse purchase returns (after physical receipt) already flow
-  through the AVCO replay in landed-cost/loss valuation: the supplier
-  claim is kept at source-receipt cost and the difference is an explicit
-  COGS variance (`_post_loss_purchase_return_adjustment`). That path is
-  supported and tested.
-- **Blocked combination:** if a posted direct transit purchase return
-  exists on the lot, `post_transit_loss_valuation()` raises
-  *"Transit purchase returns must be resolved before transit loss
-  valuation"* and `record_transit_loss()` rolls back completely (no loss
-  event, lot unchanged, no journals). Regression test:
-  `test_direct_transit_purchase_return_fails_closed_before_loss`.
+**Resolved by owner clarification on 2026-10-24; implementation added to PR #39 and awaiting exact-head CI.**
 
-### Why it is blocked (worked example)
-Purchase 100 units × 100 AFN = 10,000 AFN (Dr 1430). Before final
-reconciliation, 10 units are returned to the supplier directly from
-transit: claim posted Dr 2110 / Cr 1430 = 1,000 AFN at the old unit cost.
-The other 88 arrive, 2 are confirmed lost, 880 AFN of direct costs were
-posted. Final unit cost = (10,000 + 880) / 98 = **111.0204 AFN** — but
-which units does the claim cover?
+### Approved operating rule
+- A posted supplier return reduces the purchased quantity and the purchase-invoice base value by the returned quantity at the original invoice unit cost. Its existing journal remains Dr 2110 / Cr 1430; posted history is never rewritten.
+- A quantity still held by the supplier is not a warehouse receipt. It becomes received only when the physical receipt is recorded.
+- Final wastage is determined after all purchase-wide trips/receipts have been accounted for. Returned quantity is not wastage.
+- Final good quantity is **G = N − R − L**, where N is original purchase quantity, R is posted supplier-return quantity, and L is the final confirmed transit loss. The base-cost pool is reduced by R at the original purchase unit cost. Direct costs already incurred remain capitalized and are allocated over G.
+- Transit completion reconciliation is **received quantity + posted supplier-return quantity + remaining owned Transit quantity = original quantity**.
+- The posted loss valuation replays existing receipt/sale/warehouse destinations using compensating journals. No posted journal or stock movement is edited; account 1430 and destination accounts must reconcile, with the existing precision-derived residual tolerance unchanged.
+- A return is not revalued as though the returned units were retained good inventory. The supplier claim remains at the original invoice unit cost under the owner’s stated rule; landed costs already incurred are allocated to surviving good units.
 
-- If the returned 10 units are valued at the final unit, the claim
-  should be 1,110.20 AFN, not 1,000.00: a further Dr 2110 / Cr ? —
-  110.20 AFN must come from somewhere (the surviving units' cost pool),
-  and the good-quantity denominator changes meaning: is `G = 88`
-  (survivors only) with the pool reduced by the final claim, or
-  `G = 98` with the claim treated as one more "destination" of the pool
-  (the same way warehouse purchase returns are handled in the replay)?
-- The current contract defines `G = N − L` (98 here), which counts the
-  returned units as "good". That is coherent **only if** the claim is
-  simultaneously revalued to the final unit cost, mirroring the
-  warehouse purchase-return treatment. Revaluing the claim without
-  owner approval would invent a supplier-claim policy; not revaluing it
-  would leave the claim understated by 110.20 AFN.
+### Implementation / regression evidence
+PR #39 removes the fail-closed return blocker and adds a regression scenario combining 100 purchased units, 980 AFN freight, 10 units returned, 88 physically received and 2 units lost. Expected good quantity is 88; final cost is (9,000 + 980) / 88 = 113.4091 AFN/unit (4dp HALF_UP); account 1430 should reconcile to zero and warehouse inventory to 9,980 AFN, subject to exact-head CI.
 
-### Options for the owner
-1. **Keep fail-closed (current behavior; zero accounting risk).** A lot
-   with a direct transit return cannot finalize a loss until the return
-   combination is decided. Operational workaround: reverse the transit
-   purchase return (existing reversal restores the lot) before loss
-   finalization, if business-correct.
-2. **Mirror the warehouse contract:** denominator stays `G = N − L`;
-   on loss finalization the transit claim is adjusted by a compensating
-   journal Dr/Cr 2110 vs 1430/COGS variance so the claim equals
-   returned-qty × final unit cost. Requires: approval of the claim
-   revaluation rule, of the COGS-variance destination, and of behavior
-   when a supplier refund was already settled at the old claim amount.
-3. **Exclude returned units from the denominator** (`G = N − L − R`,
-   pool reduced by the claim at *original* cost). Simpler claim story,
-   but contradicts the addendum's `G = N − L` definition and changes the
-   final unit cost for every other destination.
-
-**Minimum decision needed:** choose option 1, 2, or 3; if 2, confirm the
-claim-revaluation journal destinations (2110 vs 1430/5100) and the
-already-settled-refund rule.
-
-**Recommendation (non-binding):** option 2, because it reuses the exact
-treatment already approved and tested for warehouse purchase returns in
-the same replay engine, and keeps one denominator definition across the
-project. Until decided, option 1 stays in force.
+**Status:** owner policy resolved; technical approval remains gated on CI and review of the exact diff.
 
 ---
 
