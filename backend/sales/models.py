@@ -153,7 +153,7 @@ class OwnershipEvent(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
 
 
-class NegativeCOGSObligation(models.Model):
+class NegativeCOGSObligation(models.Model):  # exactly one of warehouse_check / sale_allocation (DB constraint below)
     movement = models.OneToOneField("inventory.StockMovement", on_delete=models.PROTECT, related_name="negative_cogs_obligation")
     # Legacy obligations were created by a Warehouse Check; invoice-time
     # obligations link to the SaleLine warehouse allocation instead. Exactly
@@ -170,6 +170,15 @@ class NegativeCOGSObligation(models.Model):
 
     class Meta:
         ordering = ["movement_date", "id"]
+        constraints = [
+            models.CheckConstraint(
+                condition=(
+                    models.Q(warehouse_check__isnull=True, sale_allocation__isnull=False)
+                    | models.Q(warehouse_check__isnull=False, sale_allocation__isnull=True)
+                ),
+                name="negative_cogs_obligation_exactly_one_source",
+            ),
+        ]
 
 
 class COGSAdjustment(models.Model):
@@ -245,6 +254,36 @@ from .returns_models import CrossCurrencyRefund, CrossCurrencyRefundStatus, Refu
 
 
 
+_ALLOCATION_COMPLETION_FIELDS = {
+    "unit_cost_afn", "inventory_account", "stock_movement", "cogs_journal",
+}
+
+
+class SaleLineWarehouseAllocationQuerySet(models.QuerySet):
+    """Close queryset bypasses around allocation immutability.
+
+    The single legitimate queryset write is finalize_sale completing an
+    as-yet-unissued allocation intent (stock_movement still NULL) with the
+    completion fields. Everything else is rejected.
+    """
+
+    def update(self, **kwargs):
+        if not set(kwargs) <= _ALLOCATION_COMPLETION_FIELDS:
+            raise PostedImmutabilityError("SaleLine warehouse allocations are immutable")
+        if self.filter(stock_movement__isnull=False).exists():
+            raise PostedImmutabilityError("A completed SaleLine warehouse allocation cannot be changed")
+        return super().update(**kwargs)
+
+    def bulk_update(self, objs, fields, batch_size=None):
+        raise PostedImmutabilityError("SaleLine warehouse allocations are immutable")
+
+    def bulk_create(self, objs, **kwargs):
+        raise PostedImmutabilityError("Create SaleLine warehouse allocations through the Sales service")
+
+    def delete(self):
+        raise PostedImmutabilityError("SaleLine warehouse allocations cannot be deleted")
+
+
 class SaleLineWarehouseAllocation(models.Model):
     """Immutable warehouse allocation of a finalized ordinary SaleLine.
 
@@ -265,6 +304,8 @@ class SaleLineWarehouseAllocation(models.Model):
     cogs_journal = models.OneToOneField("accounting.JournalEntry", null=True, blank=True, on_delete=models.PROTECT, related_name="sale_line_allocation")
     idempotency_key = models.CharField(max_length=128, unique=True)
     created_at = models.DateTimeField(auto_now_add=True)
+
+    objects = SaleLineWarehouseAllocationQuerySet.as_manager()
 
     class Meta:
         ordering = ["id"]

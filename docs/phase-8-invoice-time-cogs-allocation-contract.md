@@ -1,6 +1,8 @@
 # Phase 8 — Invoice-Time COGS and Warehouse Allocation Contract
 
-Status: owner-approved target contract; implementation and verification are not yet complete.
+Status: owner-approved contract; **implemented on PR #40** (branch
+`phase/8-invoice-time-cogs-allocation`, stacked on PR #38). Draft —
+owner review pending; not merged, not approved, not frozen.
 
 ## Owner decisions
 
@@ -35,9 +37,43 @@ Status: owner-approved target contract; implementation and verification are not 
 9. Existing legacy records are reconciled safely and explicitly.
 10. CI evidence must correspond to the exact proposed head SHA; passing CI alone does not constitute accounting-contract approval.
 
-## Current source finding
+## Historical baseline (pre-implementation)
 
-At the reviewed Phase 11 head, ordinary warehouse-stock COGS is currently posted during Warehouse Check, while transit COGS is posted at invoice finalization. SaleLine currently has no authoritative warehouse allocation. The implementation must address both facts together; moving the journal call alone is not sufficient.
+At the reviewed Phase 11 head, ordinary warehouse-stock COGS was posted
+during Warehouse Check, while transit COGS was posted at invoice
+finalization. SaleLine had no authoritative warehouse allocation.
+
+## Implemented behavior (PR #40)
+
+- `SaleLineWarehouseAllocation` records explicit immutable allocation
+  intents at sale creation (multi-warehouse, sum == line quantity);
+  queryset update/delete/bulk paths are guarded, with finalize_sale's
+  one-time completion of an unissued intent as the only queryset write.
+- finalize_sale issues stock per allocation (warehouse AVCO; existing
+  negative-stock acknowledgement/temporary-cost policy) and posts
+  Dr 5100 / Cr mapped warehouse inventory account once per allocation.
+  NegativeCOGSObligation links the allocation (legacy rows keep the
+  warehouse_check link; a DB XOR constraint enforces exactly one source).
+- Warehouse Check for allocated sales is custody-only with a
+  per-warehouse allocation guard; legacy checks keep the legacy path.
+  Cancellation is blocked by unresolved negative-COGS obligations and
+  by return history on the allocation's issue.
+- Custody placement remains a Warehouse-Check-time event from the
+  unallocated ownership pool, bounded by the allocated quantity for
+  that warehouse (audited invariant; checks against non-allocated
+  warehouses or beyond allocated quantity are rejected).
+
+## Verified evidence
+
+Maintained on PR #40's evidence comment (exact-head local SQLite and
+PostgreSQL suites, migration fresh + 0008->latest upgrade, exact-head
+CI). CI green alone is not accounting approval.
+
+## Known limitations / open decisions
+
+- Phase 11 gates (cost-pool correction after downstream activity,
+  transit COGS-timing question) remain owner decisions; not resolved
+  by this implementation.
 
 ## Review gate
 

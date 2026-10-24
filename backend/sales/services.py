@@ -619,6 +619,13 @@ def cancel_warehouse_check(*, check, reversal_date, reason, user=None,
             raise SalesValidationError(
                 "This check has a negative-cost obligation; coordinated reversal is not supported until that obligation is resolved"
             )
+        if NegativeCOGSObligation.objects.filter(
+            sale_allocation__sale_line_id=locked.sale_line_id,
+            resolved_quantity__lt=models.F("original_quantity"),
+        ).exists():
+            raise SalesValidationError(
+                "This sale has an unresolved negative-cost obligation; cancellation is blocked until that obligation is resolved"
+            )
 
         release = CustomerCustodyEvent.objects.select_for_update().filter(
             event_type="RELEASED",

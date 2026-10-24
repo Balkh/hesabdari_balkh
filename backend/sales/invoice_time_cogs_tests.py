@@ -127,3 +127,173 @@ class InvoiceTimeCogsAllocationTests(TestCase):
         second = prepare_warehouse_check(sale_line=line, warehouse=self.wh_a, quantity=6, number="WC-ALLOC-2")
         finalize_warehouse_check(check=second)
         self.assertEqual(StockMovement.objects.filter(movement_type="SALES_ISSUE").count(), 1)
+
+
+class AllocationAuditRegressionTests(TestCase):
+    """Audit findings: queryset immutability, obligation XOR, rollback, guards."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.afn = Currency.objects.create(code="AFN", name="Afghani", is_base=True)
+        seed_chart_of_accounts()
+
+    def setUp(self):
+        category = create_category(name="Audit Category")
+        self.unit = create_uom(name="Audit Unit")
+        self.product = create_product(code="AUDIT-1", name="Audit Product", name_fa="محصول ممیزی", category=category, primary_uom=self.unit)
+        self.customer = create_party(name="Audit Customer", is_customer=True)
+        self.wh_a = create_warehouse(name="Audit A")
+        assign_warehouse_account(warehouse=self.wh_a, account="1410")
+        self.day = date(2026, 2, 2)
+
+    def _sale(self, *, allocations, quantity=5, number="SI-AUDIT-1"):
+        return create_sale(
+            customer=self.customer, sale_date=self.day, currency=self.afn,
+            channel=SalesChannel.WHOLESALE, payment_mode=PaymentMode.CREDIT,
+            document_number=number,
+            lines=[{"product": self.product, "unit": self.unit, "quantity": quantity,
+                    "unit_price": "10", "allocations": allocations}],
+        )
+
+    def test_completed_allocation_rejects_queryset_update_and_delete(self):
+        from accounting.models import PostedImmutabilityError
+        from .models import SaleLineWarehouseAllocation
+        receive_stock(product=self.product, warehouse=self.wh_a, quantity=5, unit_cost="4",
+                      currency=self.afn, movement_date=self.day, reference="AUDIT-RCPT")
+        sale = self._sale(allocations=[{"warehouse": self.wh_a, "quantity": 5}])
+        finalize_sale(sale=sale)
+        alloc = SaleLineWarehouseAllocation.objects.get()
+        with self.assertRaises(PostedImmutabilityError):
+            SaleLineWarehouseAllocation.objects.filter(pk=alloc.pk).update(quantity=1)
+        with self.assertRaises(PostedImmutabilityError):
+            SaleLineWarehouseAllocation.objects.filter(pk=alloc.pk).update(unit_cost_afn="9")
+        with self.assertRaises(PostedImmutabilityError):
+            SaleLineWarehouseAllocation.objects.filter(pk=alloc.pk).delete()
+        with self.assertRaises(PostedImmutabilityError):
+            alloc.save()
+        alloc.refresh_from_db()
+        self.assertEqual(alloc.quantity, 5)
+
+    def test_unmapped_second_warehouse_rolls_back_all_allocations(self):
+        from inventory.services import InventoryValidationError
+        wh_b = create_warehouse(name="Audit Unmapped")  # no GL mapping
+        sale = self._sale(
+            quantity=10, number="SI-AUDIT-ROLLBACK",
+            allocations=[{"warehouse": self.wh_a, "quantity": 5},
+                         {"warehouse": wh_b, "quantity": 5}],
+        )
+        with self.assertRaises(InventoryValidationError):
+            finalize_sale(sale=sale, acknowledge_negative=True, temporary_unit_cost="4")
+        sale.refresh_from_db()
+        self.assertEqual(sale.status, "DRAFT")
+        self.assertEqual(JournalEntry.objects.count(), 0)
+        self.assertEqual(StockMovement.objects.filter(movement_type="SALES_ISSUE").count(), 0)
+
+    def test_negative_obligation_requires_exactly_one_source(self):
+        from django.db import IntegrityError, transaction as db_transaction
+        from .models import NegativeCOGSObligation
+        sale = self._sale(allocations=[{"warehouse": self.wh_a, "quantity": 5}], number="SI-AUDIT-XOR")
+        finalize_sale(sale=sale, acknowledge_negative=True, temporary_unit_cost="3")
+        obligation = NegativeCOGSObligation.objects.get()
+        self.assertIsNotNone(obligation.sale_allocation_id)
+        self.assertIsNone(obligation.warehouse_check_id)
+        with self.assertRaises(IntegrityError):
+            with db_transaction.atomic():
+                NegativeCOGSObligation.objects.create(
+                    movement=obligation.movement, product=self.product,
+                    warehouse=self.wh_a, original_quantity=1,
+                    temporary_unit_cost_afn="3", movement_date=self.day,
+                )
+
+    def test_cancel_blocked_by_unresolved_negative_obligation(self):
+        from .services import cancel_warehouse_check
+        sale = self._sale(allocations=[{"warehouse": self.wh_a, "quantity": 5}], number="SI-AUDIT-NEG")
+        finalize_sale(sale=sale, acknowledge_negative=True, temporary_unit_cost="3")
+        check = prepare_warehouse_check(sale_line=sale.lines.get(), warehouse=self.wh_a, quantity=5, number="WC-AUDIT-NEG")
+        finalize_warehouse_check(check=check)
+        with self.assertRaises(SalesValidationError):
+            cancel_warehouse_check(
+                check=check, reversal_date=self.day, reason="Not delivered",
+                idempotency_key="audit-neg-cancel", confirm_not_delivered=True,
+            )
+
+    def test_return_after_check_cancellation_is_rejected(self):
+        from .returns_services import ReturnValidationError, create_sales_return
+        from .services import cancel_warehouse_check
+        receive_stock(product=self.product, warehouse=self.wh_a, quantity=5, unit_cost="4",
+                      currency=self.afn, movement_date=self.day, reference="AUDIT-RCPT-3")
+        sale = self._sale(allocations=[{"warehouse": self.wh_a, "quantity": 5}], number="SI-AUDIT-RET")
+        finalize_sale(sale=sale)
+        line = sale.lines.get()
+        check = prepare_warehouse_check(sale_line=line, warehouse=self.wh_a, quantity=5, number="WC-AUDIT-RET")
+        finalize_warehouse_check(check=check)
+        cancel_warehouse_check(
+            check=check, reversal_date=self.day, reason="Not delivered",
+            idempotency_key="audit-ret-cancel", confirm_not_delivered=True,
+        )
+        with self.assertRaises(ReturnValidationError):
+            create_sales_return(
+                sale_line=line, warehouse=self.wh_a, quantity=1,
+                return_date=self.day, reason="Returned after cancelled delivery",
+                idempotency_key="audit-ret-1",
+            )
+        self.assertEqual(stock_for(self.product, self.wh_a), 0)
+
+
+import threading
+from django.db import close_old_connections, connection
+from django.test import TransactionTestCase
+
+
+class ConcurrentFinalizationTests(TransactionTestCase):
+    """PostgreSQL: concurrent finalize of one sale posts COGS exactly once."""
+
+    def setUp(self):
+        self.afn = Currency.objects.create(code="AFN", name="Afghani", is_base=True)
+        seed_chart_of_accounts()
+        category = create_category(name="ConcAlloc Category")
+        unit = create_uom(name="ConcAlloc Unit")
+        self.product = create_product(code="ALLOC-CONC", name="Conc Product", name_fa="همزمان", category=category, primary_uom=unit)
+        self.unit = unit
+        self.customer = create_party(name="Conc Customer", is_customer=True)
+        self.warehouse = create_warehouse(name="Conc Warehouse")
+        assign_warehouse_account(warehouse=self.warehouse, account="1410")
+        self.day = date(2026, 2, 3)
+        receive_stock(product=self.product, warehouse=self.warehouse, quantity=10, unit_cost="4",
+                      currency=self.afn, movement_date=self.day, reference="ALLOC-CONC-RCPT")
+
+    def test_concurrent_finalize_posts_once(self):
+        if connection.vendor != "postgresql":
+            self.skipTest("Requires PostgreSQL row-level locking semantics")
+        sale = create_sale(
+            customer=self.customer, sale_date=self.day, currency=self.afn,
+            channel=SalesChannel.WHOLESALE, payment_mode=PaymentMode.CREDIT,
+            document_number="SI-ALLOC-CONC",
+            lines=[{"product": self.product, "unit": self.unit, "quantity": 5, "unit_price": "10",
+                    "allocations": [{"warehouse": self.warehouse, "quantity": 5}]}],
+        )
+        outcomes = []
+        barrier = threading.Barrier(3)
+
+        def worker(index):
+            close_old_connections()
+            try:
+                barrier.wait(timeout=5)
+                finalize_sale(sale=sale.pk)
+                outcomes.append((index, "ok"))
+            except Exception as exc:  # noqa: BLE001
+                outcomes.append((index, "error", type(exc).__name__, str(exc)))
+            finally:
+                close_old_connections()
+
+        workers = [threading.Thread(target=worker, args=(i,)) for i in (1, 2)]
+        for w in workers:
+            w.start()
+        barrier.wait(timeout=5)
+        for w in workers:
+            w.join(timeout=20)
+            self.assertFalse(w.is_alive())
+        self.assertEqual([o for o in outcomes if o[1] == "ok"].__len__(), 2, outcomes)
+        self.assertEqual(JournalEntry.objects.filter(source_type="SALES_COGS").count(), 1)
+        self.assertEqual(StockMovement.objects.filter(movement_type="SALES_ISSUE").count(), 1)
+        self.assertEqual(stock_for(self.product, self.warehouse), 5)
