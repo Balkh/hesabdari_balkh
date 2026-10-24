@@ -1,111 +1,64 @@
-# Phase 11 — Open Decisions Memo (owner decision required)
+# Phase 11 — Owner Decisions and Accounting Boundaries
 
-Status: **UNDECIDED — no policy implemented from this memo.**
-Prepared during the PR #38/#39/#40 audit. Nothing in this memo changes
-code or approved contracts; it isolates the two questions that cannot
-safely be answered from the repository.
-
----
+Status: **OWNER DECISIONS RECEIVED — 2026-10-24**. This memo records the owner's explicit selections A1 and B1. It does not authorize a merge or a phase freeze.
 
 ## Decision A — Cost-pool correction after downstream warehouse activity
 
-### Exact current behavior
-- `reverse_landed_cost` (backend/purchases/landed_cost_reversal.py:131)
-  posts dated mirror journals, but
-  `_assert_no_later_activity` (:84) **fails closed** when, after the
-  landed cost was posted, there is any later StockMovement for the
-  product, later TransitReceipt, later TransitSaleAllocation, or a
-  later active landed-cost layer for the same product.
-- `reverse_transit_loss_valuation` (PR #39, migration 0007) likewise
-  fails closed after dependent stock movements / receipts / sales /
-  later landed-cost postings; it restores lot state and re-opens the
-  loss so a corrected loss can be re-recorded.
-- Posted journals are never edited; corrections are compensating only.
+### Owner decision: A1 — keep fail-closed behavior
 
-### What can be corrected safely today
-1. Wrong freight/direct cost with **no** later activity: reverse landed
-   cost → repost corrected → re-finalize loss valuation. Regression
-   proven end-to-end (unit 112.0408 scenario on PR #39).
-2. Wrong loss valuation with no dependent postings: governed reversal
-   → re-record corrected loss; prior sale COGS replay is proven
-   (COGS 3,000 → 3,061.22 → reversal → 3,361.22 corrected).
-3. Anything else: owner-approved manual compensating journal.
+The owner selected **A1: retain the current fail-closed guard**. When downstream stock movements, receipts, sales, returns, transfers, or later valuation layers make a correction unsafe under the approved reversal rules, the system must refuse the automatic correction. The case requires accountant review and an explicitly approved compensating journal/controlled correction. Do not implement a new general chronological-replay engine under this decision.
 
-### What cannot be reconstructed safely today
-A wrong cost pool after sales/transfers/returns/partial releases have
-consumed AVCO layers: the posted COGS of each historical issue depends
-on the exact chronological order of receipts, issues, returns and
-valuation layers. The current data preserves movements and journals,
-but no approved contract defines replay ordering across warehouses,
-returned-quantity cost relief, negative-COGS obligations, or
-multi-layer interaction — and the approved reversal guard explicitly
-refuses to guess.
+### Current behavior and boundaries
 
-### Options
-- **A1 — Keep fail-closed (status quo).** Corrections after downstream
-  activity require manual review and an owner-approved compensating
-  journal. Lowest risk; corrections are slower and manual.
-- **A2 — Bounded chronological replay (new contract required).** Would
-  need owner-approved rules for: event ordering (movement_date vs
-  created_at vs posting chronology), cost provenance per movement,
-  idempotency keys per replay step, row-lock ordering, compensating
-  journal design, returned quantities, negative-COGS obligations,
-  multi-warehouse transfers, period gates, and failure recovery; plus
-  a migration/audit design and the full regression matrix before any
-  code. This is a new accounting contract, not a bug fix.
+- `reverse_landed_cost` in `backend/purchases/landed_cost_reversal.py` uses `_assert_no_later_activity` to refuse reversal when later dependent activity exists.
+- The transit-loss valuation reversal has its own guards and must retain its existing narrowly scoped behavior and regression coverage. Do not broaden it into a general replay engine or bypass a guard.
+- Posted journals remain immutable. Corrections must use authorized reversals/compensating entries, never edits to posted history.
+- Where no later dependent activity exists and the approved reversal workflow proves safe, reverse → repost corrected cost → re-finalize the relevant valuation may be used as currently implemented and tested.
+- Where the existing guard rejects the correction, stop atomically and escalate for accountant review. Do not silently post a manual journal automatically or pretend that a compensating journal reconstructs all historical inventory valuation.
 
-### Owner question A
-**Do you approve A1 (keep fail-closed + manual compensating journals),
-or do you want a design proposal for A2 (bounded chronological replay)
-as a separate, separately-approved workstream?**
+### Consequences and controls
 
-Blocked until answered: any automatic correction of a cost pool after
-downstream warehouse activity; Phase 11 freeze.
+A1 favors preservation of audit history and avoids inventing event ordering for consumed AVCO layers. It may require slower manual review and an approved compensating entry. Record the source transaction, reason, affected accounts/warehouses, valuation impact, authorizer, and link to the original posted journals. Never change original documents or posted journals.
 
----
+### Explicitly not authorized
+
+- A new general chronological-replay engine.
+- Automatic rewriting/recalculation of historical COGS after downstream activity when current guards cannot prove a safe correction.
+- Weakening or bypassing existing reversal guards.
+- Any new migration that fabricates historical allocation or movement data.
+
+### Owner decision status
+
+**RESOLVED — A1 selected by owner on 2026-10-24.** The A1 policy is now the governing decision for this scope. The remaining implementation/review task is to verify that code, tests, and documentation consistently preserve fail-closed behavior and do not claim a general replay engine is approved.
 
 ## Decision B — Transit COGS timing
 
-### Where the question lives
-`docs/phase-reports/PHASE_11_WAREHOUSE_CHECK_CANCELLATION_DECISION.md`
-(§"Accounting boundary") explicitly does **not** decide "the initial
-revenue-recognition timing, COGS timing, inventory-reduction timing,
-or the financial valuation policy for customer-owned custody."
+### Owner decision: B1 — invoice-finalization timing
 
-### Current behavior (code-proven, PR #38/#39)
-- Transit COGS posts at **sales-invoice finalization**:
-  Dr 5100 / Cr 1430 at the lot's current unit cost, with a
-  `TransitSaleAllocation` recording lot, quantity and unit cost
-  (backend/sales/services.py, `finalize_sale` transit branch).
-- Later landed costs adjust already-sold transit quantities through
-  `post_transit_sale_landed_cost_adjustments`; purchase-wide final
-  costing uses `G = N − R − L` after all arrivals; loss valuation
-  replays affected COGS through compensating journals (PR #39).
-- Physical receipt into a warehouse does not post transit COGS again.
+The owner selected **B1: confirm transit COGS at sales-invoice finalization**, using the specific transit purchase lot's cost.
 
-### Alternatives and consequences
-- **B1 — Keep invoice-time transit COGS (status quo).** COGS matches
-  the ownership transfer; later final-cost corrections flow through
-  the existing adjustment/replay journals. No migration.
-- **B2 — COGS at physical receipt/delivery.** Would defer COGS for
-  goods sold in transit, change 1430 clearing behavior, require new
-  journals at receipt, rework returns/custody, and a migration/
-  compatibility plan for existing TransitSaleAllocations. This is a
-  policy change requiring explicit approval and a new test matrix.
+Current approved journal at transit-sale invoice finalization:
 
-### Owner question B
-**Do you confirm B1 (transit COGS at invoice finalization, as currently
-implemented and tested), or do you direct B2 (receipt/delivery-time
-COGS) as a new contract?**
+- Dr `5100` — Cost of Goods Sold.
+- Cr `1430` — Goods in Transit.
+- Amount: the sold quantity multiplied by that lot's applicable current unit cost, using the approved money/rounding helpers.
 
-Blocked until answered: any change to transit COGS timing; Phase 11
-freeze statement. PR #40's ordinary-stock invoice-time contract does
-not by itself authorize changing the transit rule.
+A `TransitSaleAllocation` must preserve the source lot, quantity, and unit-cost traceability. Physical warehouse receipt must not post the same transit COGS a second time. Later direct-cost or final-loss corrections must use the existing approved, guarded adjustment/reversal paths. If a guard cannot establish a safe correction, fail closed under Decision A1.
 
----
+### Explicitly not authorized
 
-## What is NOT blocked
-PR #38/#39/#40 technical review, testing, and merge-readiness evidence
-proceed independently. Merge still requires explicit owner
-authorization; freeze requires both decisions above plus post-merge
-verification on `main`.
+- Deferring transit COGS to physical receipt or delivery.
+- Changing the transit journal boundary or clearing behavior.
+- Blending transit lot cost into ordinary warehouse AVCO before the approved stock receipt/valuation process.
+- Treating the ordinary-stock invoice-time COGS contract as permission to change unrelated transit accounting behavior.
+
+### Owner decision status
+
+**RESOLVED — B1 selected by owner on 2026-10-24.** Preserve invoice-finalization COGS for transit sales. No timing change or migration is authorized by this decision.
+
+## Release gates that remain
+
+- Technical review, exact-head tests, migration verification, and dependency-aware merge-readiness review remain required.
+- PR #38 remains the stack root; PRs #39 and #40 depend on it. Verify actual ancestry and exact heads before any integration.
+- Merge requires separate explicit owner authorization. These accounting decisions do **not** authorize merging.
+- Phase freeze requires authorized integration, required post-merge evidence on `main`, and review of any remaining technical risks. Do not describe A or B as still undecided; both decisions are resolved.
