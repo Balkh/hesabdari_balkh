@@ -381,9 +381,13 @@ def complete_transit_purchase(*, purchase, completion_date, reason, idempotency_
             if not TransitReceipt.objects.filter(lot=lot).exists():
                 raise TransitValidationError(f"Purchase cannot be completed: transit lot {lot.pk} has no recorded physical receipt.")
             received_quantity = sum(TransitReceipt.objects.filter(lot=lot).values_list("quantity", flat=True))
-            if received_quantity + lot.remaining_quantity != lot.original_quantity:
+            from purchases.models import PurchaseReturn
+            returned_quantity = sum(PurchaseReturn.objects.filter(
+                transit_lot=lot, status="POSTED"
+            ).values_list("quantity", flat=True))
+            if received_quantity + lot.remaining_quantity + returned_quantity != lot.original_quantity:
                 raise TransitValidationError(
-                    "Purchase cannot be completed: received quantity and remaining company-owned transit quantity do not reconcile; sold goods still in transit must be physically received first."
+                    "Purchase cannot be completed: received, supplier-returned, and remaining company-owned transit quantities do not reconcile; sold goods still in transit must be physically received first."
                 )
             if TransitLossEvent.objects.filter(lot=lot).exists():
                 raise TransitValidationError("Purchase completion must be confirmed before recording final transit loss.")
@@ -449,8 +453,12 @@ def record_transit_loss(*, lot, quantity, loss_date, reason, idempotency_key, us
     # period has since closed; only a new posting must pass the open-period gate.
     assert_posting_date_open(loss_date)
     reported = sum(TransitLossEvent.objects.filter(lot=locked_lot).values_list("quantity", flat=True))
-    if reported + quantity >= locked_lot.original_quantity:
-        raise TransitValidationError("Cumulative transit loss must leave at least one good unit in the purchase line.")
+    from purchases.models import PurchaseReturn
+    returned_quantity = sum(PurchaseReturn.objects.filter(
+        transit_lot=locked_lot, status="POSTED"
+    ).values_list("quantity", flat=True))
+    if reported + quantity + returned_quantity >= locked_lot.original_quantity:
+        raise TransitValidationError("Cumulative transit loss and supplier returns must leave at least one good unit in the purchase line.")
     if reported:
         raise TransitValidationError("A transit lot can have only one final reconciled loss event.")
     if quantity != locked_lot.remaining_quantity:
