@@ -19,21 +19,26 @@ finalized. This design adds that replay, reusing the existing AVCO replay in
 ## 2. Definitions (per purchase line / transit lot)
 
 - `N` = lot `original_quantity` = purchase-line quantity (asserted equal).
-- `L` = confirmed loss quantity (single final event; service requires
-  `L == lot.remaining_quantity` at recording, `0 < L < N`).
-- `G = N − L` = good quantity.
-- Base pool (transaction currency) = line `net_total + freight_allocated`;
-  `lot.unit_cost = q4(base_pool / N)` (existing snapshot, never rewritten).
+- `R` = quantity covered by posted supplier returns directly from Transit;
+  each return reduces the purchase base pool at the original invoice unit cost
+  and is already journaled Dr 2110 / Cr 1430.
+- `L` = confirmed final transit-loss quantity (single final event; service
+  requires `L == lot.remaining_quantity` at recording).
+- `G = N − R − L` = surviving good quantity.
+- Base pool (AFN) for retained company-owned goods =
+  `old_base_afn × (N − R)`; the returned base value is excluded, while
+  posted direct costs already incurred remain capitalized.
 - Base pool (AFN) per unit `old_base_afn = q4(lot.unit_cost × lot.rate)`
-  (matches `StockMovement.unit_cost_afn` of transit receipts).
+  (matches `StockMovement.unit_cost_afn` of transit receipts; snapshot remains
+  immutable).
 - Landed pool (AFN) = Σ `afn_amount` of posted, non-reversed
   `LandedCostAllocation`s for this line.
-  `old_landed_afn_per_unit = q4(landed_pool_afn / N)` (existing convention:
-  sum exact AFN first, round once per unit at 4dp).
+  `old_landed_afn_per_unit = q4(landed_pool_afn / (N − R))` (sum exact AFN
+  first, round once per unit at 4dp).
 - `old_unit_afn = old_base_afn + old_landed_afn_per_unit`
-- `new_unit_afn = q4((old_base_afn × N + landed_pool_afn) / G)` — i.e. the
-  whole AFN cost pool (invoice-backed base cost + all posted direct costs)
-  divided by good quantity. Equivalent form used for the replay delta:
+- `new_unit_afn = q4((old_base_afn × (N − R) + landed_pool_afn) / G)` —
+  the retained base pool plus direct costs divided by surviving good quantity.
+  Equivalent form used for the replay delta:
   `delta_per_unit_afn = new_unit_afn − old_unit_afn` (4dp).
 - Example (contract): 10,000 bbl; pool $173,000 (170,000 + 3,000 direct);
   L=30, G=9,970 → final unit = 173,000 / 9,970 ≈ $17.3521 (in AFN terms the
@@ -172,8 +177,11 @@ Local evidence on this branch (SQLite, Python 3.13):
 - Frontend: `npm run build` OK, `npm test` OK (no frontend changes).
 
 Limitations / still fail-closed:
-- Direct transit purchase returns on the lot block loss valuation.
-- Loss of customer-owned (already transit-sold) units is outside the
+- Direct supplier returns from Transit are now included in the purchase-wide
+  reconciliation and excluded from the retained base pool and good-quantity
+  denominator. The return remains at original invoice cost; incurred direct
+  costs are spread over surviving good units.
+- Loss of customer-owned (already transit-sold) units remains outside the
   retained service rule `L == remaining company-owned quantity`.
 - No PostgreSQL or GitHub CI evidence for this branch's exact head yet;
   no reversal flow for a posted loss valuation.
@@ -249,8 +257,9 @@ and no destination-side verification. Fix:
   conflicting idempotency keys, concurrent finalization on PostgreSQL,
   closed-period rejection, atomic rollback, posted-history immutability,
   purchase-lot isolation, landed costs before/after loss.
-- Deliberately fail-closed: direct transit purchase returns on the lot;
-  loss of already transit-sold (customer-owned) units.
+- Resolved in this update: direct transit purchase returns are reconciled
+  purchase-wide with loss and direct costs.
+- Deliberately fail-closed: loss of already transit-sold (customer-owned) units.
 - Unresolved / owner decision: reversal flow for a posted loss
   valuation; CI on exact head (workflow triggers exclude stacked base).
 
