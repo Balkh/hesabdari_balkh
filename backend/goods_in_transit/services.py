@@ -18,7 +18,7 @@ from security.services import record_audit_event
 from customer_custody.models import CustomerCustodyEvent, CustomerOwnershipEntitlement, CustodyEventType
 from customer_custody.services import place_customer_custody
 
-from .models import GoodsInTransitLot, TransitCustomerCustody, TransitDestinationTransfer, TransitLotStatus, TransitReceipt, TransitLossEvent
+from .models import GoodsInTransitLot, TransitCustomerCustody, TransitDestinationTransfer, TransitLotStatus, TransitReceipt, TransitLossEvent, TransitPurchaseCompletion, has_unvalued_transit_loss
 
 
 class TransitValidationError(ValueError):
@@ -109,7 +109,7 @@ def _receive_transit_legacy(*, lot, quantity, receipt_date, user=None,
                 ).get(pk=lot_id)
                 if lot.status != TransitLotStatus.OPEN:
                     raise TransitValidationError("Transit lot is not open.")
-                if TransitLossEvent.objects.filter(lot=lot).exists():
+                if has_unvalued_transit_loss(lot.pk):
                     raise TransitValidationError(
                         "Transit receipt is blocked because this lot has confirmed loss without "
                         "a posted purchase-wide loss valuation replay."
@@ -195,7 +195,7 @@ def transfer_transit_destination(*, lot, warehouse, quantity, transfer_date, use
             lot = GoodsInTransitLot.objects.select_for_update().select_related("destination_warehouse").get(pk=lot_id)
             if lot.status != TransitLotStatus.OPEN:
                 raise TransitValidationError("Transit lot is not open.")
-            if TransitLossEvent.objects.filter(lot=lot).exists():
+            if has_unvalued_transit_loss(lot.pk):
                 raise TransitValidationError(
                     "Transit transfer is blocked because this lot has confirmed loss without "
                     "a posted purchase-wide loss valuation replay."
@@ -239,7 +239,7 @@ def _receive_transit_core(*, lot, quantity, receipt_date, user=None, idempotency
             lot = GoodsInTransitLot.objects.select_for_update().select_related("purchase", "product", "currency", "destination_warehouse").get(pk=lot_id)
             if lot.status != TransitLotStatus.OPEN:
                 raise TransitValidationError("Transit lot is not open.")
-            if TransitLossEvent.objects.filter(lot=lot).exists():
+            if has_unvalued_transit_loss(lot.pk):
                 raise TransitValidationError(
                     "Transit receipt is blocked because this lot has confirmed loss without "
                     "a posted purchase-wide loss valuation replay."
@@ -348,11 +348,74 @@ def receive_transit(*, lot, quantity, receipt_date, user=None, idempotency_key=N
 
 
 @transaction.atomic
-def record_transit_loss(*, lot, quantity, loss_date, reason, idempotency_key, user=None):
-    """Record validated, immutable evidence for a confirmed transit loss.
+def complete_transit_purchase(*, purchase, completion_date, reason, idempotency_key, user=None):
+    """Record purchase-wide confirmation after all transport-trip receipts are consolidated."""
+    from purchases.models import Purchase, PurchaseDeliveryMode, PurchaseStatus
+    actor = _actor(user)
+    purchase_id = getattr(purchase, "pk", purchase)
+    if not isinstance(idempotency_key, str) or not idempotency_key.strip():
+        raise TransitValidationError("A non-empty idempotency key is required.")
+    key = idempotency_key.strip()
+    if not isinstance(reason, str) or not reason.strip():
+        raise TransitValidationError("A reason is required to confirm purchase completion.")
+    if completion_date is None:
+        raise TransitValidationError("Purchase completion date is required.")
+    with transaction.atomic():
+        locked_purchase = Purchase.objects.select_for_update().get(pk=purchase_id)
+        existing = TransitPurchaseCompletion.objects.filter(purchase=locked_purchase).first()
+        if existing:
+            if existing.idempotency_key == key and existing.completion_date == completion_date and existing.reason == reason.strip():
+                return existing
+            raise TransitValidationError("This transit purchase has already been marked complete.")
+        if locked_purchase.status != PurchaseStatus.POSTED:
+            raise TransitValidationError("Only a posted purchase can be marked complete.")
+        if locked_purchase.delivery_mode != PurchaseDeliveryMode.IN_TRANSIT:
+            raise TransitValidationError("Only an in-transit purchase can use transit completion.")
+        if completion_date < locked_purchase.purchase_date:
+            raise TransitValidationError("Completion date cannot precede the purchase date.")
+        lots = list(GoodsInTransitLot.objects.select_for_update().filter(purchase_id=locked_purchase.pk).order_by("id"))
+        lines = list(locked_purchase.lines.all().order_by("id"))
+        if not lines or len(lots) != len(lines):
+            raise TransitValidationError("Every purchase line must have its immutable Goods-in-Transit lot before completion.")
+        for lot in lots:
+            if not TransitReceipt.objects.filter(lot=lot).exists():
+                raise TransitValidationError(f"Purchase cannot be completed: transit lot {lot.pk} has no recorded physical receipt.")
+            received_quantity = sum(TransitReceipt.objects.filter(lot=lot).values_list("quantity", flat=True))
+            from purchases.models import PurchaseReturn
+            returned_quantity = sum(PurchaseReturn.objects.filter(
+                transit_lot=lot, status="POSTED"
+            ).values_list("quantity", flat=True))
+            if received_quantity + lot.remaining_quantity + returned_quantity != lot.original_quantity:
+                raise TransitValidationError(
+                    "Purchase cannot be completed: received, supplier-returned, and remaining company-owned transit quantities do not reconcile; sold goods still in transit must be physically received first."
+                )
+            if TransitLossEvent.objects.filter(lot=lot).exists():
+                raise TransitValidationError("Purchase completion must be confirmed before recording final transit loss.")
+        completion = TransitPurchaseCompletion(
+            purchase=locked_purchase, completion_date=completion_date, reason=reason.strip(),
+            idempotency_key=key, completed_by=actor,
+        )
+        completion._completion_authorized = True
+        completion.save(force_insert=True)
+        record_audit_event(
+            user=actor, action=AuditAction.CREATE, entity="TransitPurchaseCompletion",
+            entity_id=completion.pk, reference=locked_purchase.document_number,
+            previous_state=None,
+            new_state={"purchase_id": locked_purchase.pk, "completion_date": completion_date.isoformat(),
+                       "lot_ids": [lot.pk for lot in lots], "line_count": len(lines)},
+            reason=reason.strip(),
+        )
+        return completion
 
-    This does not post valuation. Downstream value-changing operations remain
-    blocked until purchase-wide replay and its compensating journals exist.
+
+@transaction.atomic
+def record_transit_loss(*, lot, quantity, loss_date, reason, idempotency_key, user=None):
+    """Record a confirmed transit loss and post its valuation replay atomically.
+
+    The immutable loss evidence, lot closure and the purchase-wide AVCO
+    valuation replay (compensating journals anchored to the loss event)
+    commit together; any replay failure rolls all of them back, leaving no
+    partial event, closure, journal or adjustment behind.
     """
     from .models import TransitLossEvent
 
@@ -384,12 +447,18 @@ def record_transit_loss(*, lot, quantity, loss_date, reason, idempotency_key, us
             raise TransitValidationError("Idempotency key was already used for different loss evidence.")
         return existing
 
+    if not TransitPurchaseCompletion.objects.filter(purchase_id=locked_lot.purchase_id).exists():
+        raise TransitValidationError("Transit loss is blocked until the whole purchase is marked complete after all goods arrive.")
     # A genuine retry of an already-recorded event is safe even if the fiscal
     # period has since closed; only a new posting must pass the open-period gate.
     assert_posting_date_open(loss_date)
-    reported = sum(TransitLossEvent.objects.filter(lot=locked_lot).values_list("quantity", flat=True))
-    if reported + quantity >= locked_lot.original_quantity:
-        raise TransitValidationError("Cumulative transit loss must leave at least one good unit in the purchase line.")
+    reported = sum(TransitLossEvent.objects.filter(lot=locked_lot).exclude(valuation_status="REVERSED").values_list("quantity", flat=True))
+    from purchases.models import PurchaseReturn
+    returned_quantity = sum(PurchaseReturn.objects.filter(
+        transit_lot=locked_lot, status="POSTED"
+    ).values_list("quantity", flat=True))
+    if reported + quantity + returned_quantity >= locked_lot.original_quantity:
+        raise TransitValidationError("Cumulative transit loss and supplier returns must leave at least one good unit in the purchase line.")
     if reported:
         raise TransitValidationError("A transit lot can have only one final reconciled loss event.")
     if quantity != locked_lot.remaining_quantity:
@@ -406,6 +475,18 @@ def record_transit_loss(*, lot, quantity, loss_date, reason, idempotency_key, us
     locked_lot.remaining_quantity = 0
     locked_lot.status = TransitLotStatus.CLOSED
     locked_lot.save(allow_state_transition=True, update_fields={"remaining_quantity", "status"})
+    # Purchase-wide valuation replay: moves the lost units' cost from 1430
+    # onto the surviving units (warehouse stock, COGS, returns, transfers)
+    # with compensating journals. Inside this transaction, so a failure
+    # leaves no loss event, closure or journal behind.
+    from purchases.landed_cost_posting import (
+        LandedCostPostingError, post_transit_loss_valuation,
+    )
+    try:
+        post_transit_loss_valuation(loss_event=event, user=actor)
+    except LandedCostPostingError as exc:
+        raise TransitValidationError(str(exc)) from exc
+    event.refresh_from_db()
     record_audit_event(
         user=actor, action=AuditAction.CREATE, entity="TransitLossEvent",
         entity_id=event.pk, reference=locked_lot.purchase.document_number,
@@ -416,7 +497,9 @@ def record_transit_loss(*, lot, quantity, loss_date, reason, idempotency_key, us
             "quantity": quantity,
             "loss_date": loss_date.isoformat(),
             "reason": reason,
-            "valuation_status": "PENDING_PURCHASE_WIDE_REPLAY",
+            "valuation_status": event.valuation_status,
+            "good_quantity": event.good_quantity,
+            "final_unit_cost_afn": str(event.final_unit_cost_afn),
         },
         reason=reason,
     )
