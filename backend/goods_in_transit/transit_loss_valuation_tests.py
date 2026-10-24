@@ -498,11 +498,10 @@ class TransitLossMasterScenarioTests(TransitLossValuationTests):
         self.assertEqual(self._balance("1430"), Decimal("0.00"))
         self.assertEqual(self._balance("1410"), Decimal("10000.00"))
 
-    def test_direct_transit_purchase_return_fails_closed_before_loss(self):
-        # A direct transit purchase return removes units through
-        # 1430/payable under a separate claim contract; until that
-        # revaluation contract exists, loss finalization must fail
-        # closed and roll back completely (design doc limitation).
+    def test_direct_transit_purchase_return_and_loss_reconcile_purchase_wide(self):
+        # 100 purchased; 10 returned to supplier; 88 received; 2 lost.
+        # Returned purchase value is removed first, then the remaining
+        # $9,000 base pool is allocated across 88 good units.
         from purchases.services import post_transit_purchase_return
 
         purchase = self._purchase("PI-LV-TPR")
@@ -515,15 +514,16 @@ class TransitLossMasterScenarioTests(TransitLossValuationTests):
         )
         receive_transit(lot=lot, quantity=88, receipt_date=date(2026, 2, 3),
                         user=self.user, idempotency_key="lvtpr-r1")
-        journal_count = JournalEntry.objects.count()
-        with self.assertRaises(TransitValidationError):
-            self._record_loss_after_completion(
-                lot=lot, quantity=2, loss_date=date(2026, 2, 4),
-                reason="Confirmed transport wastage",
-                idempotency_key="lvtpr-loss", user=self.user,
-            )
-        self.assertEqual(TransitLossEvent.objects.filter(lot=lot).count(), 0)
-        self.assertEqual(JournalEntry.objects.count(), journal_count)
-        lot.refresh_from_db()
-        self.assertEqual(lot.remaining_quantity, 2)
-        self.assertEqual(lot.status, "OPEN")
+        event = self._record_loss_after_completion(
+            lot=lot, quantity=2, loss_date=date(2026, 2, 4),
+            reason="Confirmed transport wastage",
+            idempotency_key="lvtpr-loss", user=self.user,
+        )
+        self.assertEqual(event.valuation_status, "POSTED")
+        self.assertEqual(event.good_quantity, 88)
+        self.assertEqual(event.final_unit_cost_afn, Decimal("102.2727"))
+        self.assertEqual(_good_quantity_for_line(purchase.lines.get(), lot=lot), 88)
+        self.assertEqual(self._balance("1430"), Decimal("0.00"))
+        self.assertEqual(self._balance("1410"), Decimal("9000.00"))
+        self.assertEqual(stock_for(self.product, self.warehouse), 88)
+        self._assert_journals_balanced()
