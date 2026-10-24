@@ -34,7 +34,7 @@ PR #38 records immutable transit-loss evidence but downstream flows need a purch
 ## Known limitations (fail closed)
 - Direct transit supplier returns reduce the base purchase pool at original invoice unit cost; incurred direct costs remain capitalized and are allocated over surviving good quantity. Regression coverage combines return + freight + final loss.
 - Loss of already transit-sold (customer-owned) units is outside the current rule `L == remaining company-owned quantity`.
-- No reversal flow for a posted loss valuation yet.
+- Governed reversal implemented (migration 0007); see design doc §13.
 
 ## Owner / accountant review checklist
 - [ ] Confirm loss cost is capitalized over good units (no separate loss-expense account).

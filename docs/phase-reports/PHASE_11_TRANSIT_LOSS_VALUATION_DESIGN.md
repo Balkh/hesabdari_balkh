@@ -184,7 +184,7 @@ Limitations / still fail-closed:
 - Loss of customer-owned (already transit-sold) units remains outside the
   retained service rule `L == remaining company-owned quantity`.
 - No PostgreSQL or GitHub CI evidence for this branch's exact head yet;
-  no reversal flow for a posted loss valuation.
+  (superseded: governed reversal implemented — see §13.)
 - PR #19 (`phase/8-sales`, merge-base at Phase 4 merge `e65a73a`) is a
   divergent historical Sales implementation already superseded on `main`;
   recommendation: do not merge. PR #36 (`phase/8-sales-api-foundation`)
@@ -267,3 +267,27 @@ and no destination-side verification. Fix:
 (PostgreSQL-only concurrency skips by design); PostgreSQL full
 **929 passed, 0 skipped** incl. concurrency tests; fresh-PG migration
 clean; `makemigrations --check` clean; Django check clean.
+
+
+## 13. Governed correction of a posted valuation (A.4, implemented)
+
+`reverse_transit_loss_valuation()` mirrors `LandedCostReversal`: mirror
+journals on the reversal date, lot state restored, event REVERSED, and a
+corrected loss may be re-recorded. Verified end-to-end that a correction
+propagates to *prior* warehouse-sale COGS: sale of 30 (COGS 3,000) →
+loss (COGS 3,061.22) → reversal (COGS back to 3,000) → late freight 980
+→ corrected loss at 112.0408 (COGS 3,361.22; inventory 7,618.78; 1430
+zero). Two-lot regression proves a loss on purchase A (final unit
+102.0408) leaves purchase B's denominator/basis (100 units at 200)
+untouched, while warehouse value pools under the approved product AVCO.
+
+**Remaining boundary (owner decision, not silently implemented):**
+correcting a *cost pool* after downstream warehouse activity (e.g. a
+wrong freight invoice after sales) is still blocked by the approved
+`LandedCostReversal` later-activity guard, and reversing a loss after
+later stock movements is likewise fail-closed. Extending either
+requires a chronology-replay correction contract approved by the owner;
+the current governed paths are: (1) reverse loss → reverse/repost
+landed cost → re-record corrected loss when no dependent activity
+blocks, exactly as regression-tested; (2) otherwise an owner-approved
+manual compensating journal. No posted history is ever rewritten.

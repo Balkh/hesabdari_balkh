@@ -14,7 +14,8 @@ from purchases.landed_cost_posting import (
     LandedCostPostingError, post_landed_cost, reverse_transit_loss_valuation,
 )
 from purchases.landed_cost_services import create_landed_cost_draft
-from purchases.models import LandedCostAllocationMethod
+from purchases.models import LandedCostAllocationMethod, PurchaseDeliveryMode
+from purchases.services import create_purchase, post_purchase
 
 from .models import (
     GoodsInTransitLot, TransitLossEvent, TransitLossValuationReversal,
@@ -158,3 +159,103 @@ class TransitLossReversalTests(TransitLossValuationTests):
         self.assertEqual(TransitLossValuationReversal.objects.count(), 0)
         event.refresh_from_db()
         self.assertEqual(event.valuation_status, "POSTED")
+
+    def test_correction_propagates_to_prior_warehouse_sale_cogs(self):
+        # 4.6 scenario with a downstream (prior) warehouse sale:
+        # sale of 30 at the old unit, loss posted, then the valuation is
+        # reversed, a late freight cost arrives, and the corrected loss
+        # revalues BOTH the prior COGS and the remaining inventory.
+        from purchases.landed_cost_posting import reverse_transit_loss_valuation
+        from sales.services import (
+            create_sale, finalize_sale, finalize_warehouse_check,
+            prepare_warehouse_check,
+        )
+        from sales.models import PaymentMode, SalesChannel
+
+        purchase = self._purchase("PI-LVR-R5")
+        lot = self._lot(purchase)
+        receive_transit(lot=lot, quantity=98, receipt_date=date(2026, 2, 2),
+                        user=self.user, idempotency_key="lvrR5-r1")
+        sale = create_sale(
+            customer=self.customer, sale_date=date(2026, 2, 3),
+            currency=self.afn, channel=SalesChannel.WHOLESALE,
+            payment_mode=PaymentMode.CREDIT,
+            lines=[{"product": self.product, "unit": self.uom, "quantity": 30,
+                    "unit_price": "120"}],
+            user=self.user, document_number="SI-LVR-R5",
+        )
+        finalize_sale(sale=sale, user=self.user)
+        check = prepare_warehouse_check(
+            sale_line=sale.lines.get(), warehouse=self.warehouse,
+            quantity=30, number="WC-LVR-R5")
+        finalize_warehouse_check(check=check)
+        event = self._record_loss_after_completion(
+            lot=lot, quantity=2, loss_date=date(2026, 2, 4),
+            reason="Initial wastage report",
+            idempotency_key="lvrR5-loss", user=self.user)
+        # 30 sold and 68 on hand at 102.0408.
+        self.assertEqual(self._balance("5100"), Decimal("3061.22"))
+        self.assertEqual(self._balance("1410"), Decimal("6938.78"))
+
+        reverse_transit_loss_valuation(
+            loss_event=event, reversal_date=date(2026, 2, 5),
+            reason="Freight invoice omitted from first valuation",
+            user=self.user, idempotency_key="lvrR5-reversal")
+        self.assertEqual(self._balance("5100"), Decimal("3000.00"))
+
+        line = purchase.lines.get()
+        cost = create_landed_cost_draft(
+            document_number="LC-LVR-R5", payee=self.supplier,
+            cost_date=date(2026, 2, 6), currency=self.afn, amount="980",
+            exchange_rate="1", rate_date=date(2026, 2, 6), category="FREIGHT",
+            purchase_line_ids=[line.pk],
+            allocation_method=LandedCostAllocationMethod.DIRECT,
+            user=self.user, idempotency_key="lvrR5-lc")
+        post_landed_cost(cost_document=cost, user=self.user)
+        corrected = record_transit_loss(
+            lot=lot, quantity=2, loss_date=date(2026, 2, 7),
+            reason="Corrected final wastage",
+            idempotency_key="lvrR5-loss-corrected", user=self.user)
+        # (10,000 + 980) / 98 = 112.0408: prior COGS and stock corrected.
+        self.assertEqual(corrected.final_unit_cost_afn, Decimal("112.0408"))
+        self.assertEqual(self._balance("5100"), Decimal("3361.22"))
+        self.assertEqual(self._balance("1410"), Decimal("7618.78"))
+        self.assertEqual(self._balance("1430"), Decimal("0.00"))
+        self._assert_journals_balanced()
+
+
+class TwoPurchaseLotIsolationTests(TransitLossValuationTests):
+    def test_loss_on_one_purchase_does_not_change_other_lot_basis(self):
+        # Same product, two purchases at different invoice costs.
+        purchase_a = self._purchase("PI-LOT-A")
+        lot_a = self._lot(purchase_a)
+        purchase_b = create_purchase(
+            supplier=self.supplier, purchase_date=self.day, currency=self.afn,
+            warehouse=self.warehouse,
+            lines=[{"product": self.product, "quantity": 100,
+                    "unit_price": "200"}],
+            rate="1", rate_date=self.day,
+            delivery_mode=PurchaseDeliveryMode.IN_TRANSIT,
+            user=self.user, document_number="PI-LOT-B",
+        )
+        post_purchase(purchase=purchase_b, user=self.user)
+        lot_b = self._lot(purchase_b)
+        receive_transit(lot=lot_a, quantity=98, receipt_date=date(2026, 2, 2),
+                        user=self.user, idempotency_key="lotA-r1")
+        receive_transit(lot=lot_b, quantity=100, receipt_date=date(2026, 2, 2),
+                        user=self.user, idempotency_key="lotB-r1")
+        event_a = self._record_loss_after_completion(
+            lot=lot_a, quantity=2, loss_date=date(2026, 2, 4),
+            reason="Lot A wastage", idempotency_key="lotA-loss",
+            user=self.user)
+        self.assertEqual(event_a.final_unit_cost_afn, Decimal("102.0408"))
+        # Lot B keeps its own denominator and cost basis (200.00/unit).
+        from purchases.landed_cost_posting import _good_quantity_for_line
+        self.assertEqual(
+            _good_quantity_for_line(purchase_b.lines.get(), lot=lot_b), 100)
+        # Warehouse AVCO pools the product (approved architecture), while
+        # purchase-level source layers stay traceable: total value is the
+        # sum of both pools, and 1430 is fully cleared for both lots.
+        self.assertEqual(self._balance("1410"), Decimal("30000.00"))
+        self.assertEqual(self._balance("1430"), Decimal("0.00"))
+        self._assert_journals_balanced()
