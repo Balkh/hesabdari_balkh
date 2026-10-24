@@ -324,15 +324,22 @@ def create_sales_return(*, sale_line, warehouse, quantity, return_date,
         else:
             # Ordinary stock sales remain tied to the original SALES_ISSUE
             # movement; never manufacture a source movement for Transit.
+            from django.db.models import Q
             source_rows = list(
                 StockMovement.objects.select_for_update().filter(
+                    Q(sale_line_allocation__sale_line=line)
+                    | Q(
+                        warehouse_checks__sale_line=line,
+                        warehouse_checks__status="FINALIZED",
+                    ),
                     movement_type=MovementType.SALES_ISSUE,
                     product=line.product,
                     source_party=sale.customer,
                     warehouse=warehouse,
-                    warehouse_checks__sale_line=line,
-                    warehouse_checks__status="FINALIZED",
-                ).exclude(warehouse_checks__reversal__isnull=False).order_by("id")
+                ).exclude(
+                    Q(warehouse_checks__reversal__isnull=False)
+                    & ~Q(sale_line_allocation__sale_line=line)
+                ).distinct().order_by("id")
             )
             source = None
             for candidate in source_rows:

@@ -29,15 +29,24 @@ def allocation_setup(db):
     return user, afn, usd, customer
 
 
+def _alloc_warehouse():
+    from warehouses.models import Warehouse
+    from inventory.services import assign_warehouse_account
+    warehouse, _ = Warehouse.objects.get_or_create(name="Allocation Warehouse")
+    assign_warehouse_account(warehouse=warehouse, account="1410")
+    return warehouse
+
+
 def make_credit_sale(user, customer, currency, total=Decimal("100.00"), number="SI-ALLOC-1"):
     sale = create_sale(
         customer=customer, sale_date=date(2026, 9, 28), currency=currency,
         channel=SalesChannel.WHOLESALE, payment_mode=PaymentMode.CREDIT,
-        lines=[{"product": 1, "unit": 1, "quantity": 1, "unit_price": total}],
+        lines=[{"product": 1, "unit": 1, "quantity": 1, "unit_price": total,
+                "allocations": [{"warehouse": _alloc_warehouse(), "quantity": 1}]}],
         rate=None if currency.is_base else "70.0000", rate_date=None if currency.is_base else date(2026, 9, 28),
         user=user, document_number=number,
     )
-    finalize_sale(sale=sale, user=user)
+    finalize_sale(sale=sale, user=user, acknowledge_negative=True, temporary_unit_cost="4")
     return sale
 
 
@@ -57,11 +66,12 @@ def make_sale(user, customer, currency, product, total=Decimal("100.00"), number
     sale = create_sale(
         customer=customer, sale_date=date(2026, 9, 28), currency=currency,
         channel=SalesChannel.WHOLESALE, payment_mode=PaymentMode.CREDIT,
-        lines=[{"product": product, "unit": product.primary_uom, "quantity": 1, "unit_price": total}],
+        lines=[{"product": product, "unit": product.primary_uom, "quantity": 1, "unit_price": total,
+                "allocations": [{"warehouse": _alloc_warehouse(), "quantity": 1}]}],
         rate=None if currency.is_base else "70.0000", rate_date=None if currency.is_base else date(2026, 9, 28),
         user=user, document_number=number,
     )
-    finalize_sale(sale=sale, user=user)
+    finalize_sale(sale=sale, user=user, acknowledge_negative=True, temporary_unit_cost="4")
     return sale
 
 
@@ -143,9 +153,10 @@ def test_cash_sale_rejected(master_data):
     user, afn, usd, customer, product = master_data
     sale = create_sale(customer=customer, sale_date=date(2026, 9, 28), currency=afn,
                        channel=SalesChannel.WHOLESALE, payment_mode=PaymentMode.CASH,
-                       lines=[{"product": product, "unit": product.primary_uom, "quantity": 1, "unit_price": 100}],
+                       lines=[{"product": product, "unit": product.primary_uom, "quantity": 1, "unit_price": 100,
+                               "allocations": [{"warehouse": _alloc_warehouse(), "quantity": 1}]}],
                        user=user, document_number="SI-ALLOC-7")
-    finalize_sale(sale=sale, user=user)
+    finalize_sale(sale=sale, user=user, acknowledge_negative=True, temporary_unit_cost="4")
     payment = make_payment(user, customer, afn, 100, number="PMT-ALLOC-7")
     with pytest.raises(AllocationValidationError):
         allocate_payment(payment=payment, sale=sale, amount=100, user=user, idempotency_key="alloc-7")

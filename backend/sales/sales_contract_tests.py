@@ -66,7 +66,8 @@ class ResolvedContractTests(TestCase):
             customer=self.customer, sale_date=self.day, currency=self.afn,
             channel=channel, payment_mode=payment_mode, document_number=document_number,
             lines=[{"product": self.product, "unit": self.unit,
-                    "quantity": quantity, "unit_price": unit_price}],
+                    "quantity": quantity, "unit_price": unit_price,
+                    "allocations": [{"warehouse": self.warehouse, "quantity": quantity}]}],
         )
 
     def balance(self, code):
@@ -78,7 +79,8 @@ class ResolvedContractTests(TestCase):
             entries = entries.filter(source_id=source_id)
         return {line.account.code: line for line in entries.get().lines.all()}
 
-    # Clause 1 — Warehouse belongs to WarehouseCheck, not SaleLine.
+    # Clause 1 — warehouse allocation binds the SaleLine at invoice time;
+    # SaleLine itself carries no direct warehouse field.
 
     def test_warehouse_binds_to_the_check_and_never_to_the_sale_line(self):
         self.assertNotIn("warehouse", [f.name for f in SaleLine._meta.get_fields()])
@@ -86,18 +88,23 @@ class ResolvedContractTests(TestCase):
         self.assertIn("warehouse", [f.name for f in WarehouseCheck._meta.get_fields()])
 
         sale = self.sale()
-        finalize_sale(sale=sale)
+        finalize_sale(sale=sale, acknowledge_negative=True, temporary_unit_cost="4")
         line = sale.lines.get()
+        allocation = line.warehouse_allocations.get()
+        self.assertEqual(allocation.warehouse, self.warehouse)
+        self.assertEqual(allocation.quantity, 10)
+        self.assertFalse(hasattr(line, "warehouse_id"))
+        self.assertEqual(stock_for(self.product, self.warehouse), -10)
+
         check = prepare_warehouse_check(
             sale_line=line, warehouse=self.warehouse, quantity=10, number="WC-CT-1",
         )
         self.assertEqual(check.warehouse, self.warehouse)
-        self.assertFalse(hasattr(line, "warehouse_id"))
-        finalize_warehouse_check(
-            check=check, acknowledge_negative=True, temporary_unit_cost="4",
-        )
-        movement = StockMovement.objects.get(reference="WC-CT-1")
+        finalize_warehouse_check(check=check)
+        # Custody-only check: the single SALES_ISSUE remains the invoice one.
+        movement = allocation.stock_movement
         self.assertEqual(movement.warehouse, check.warehouse)
+        self.assertEqual(StockMovement.objects.filter(movement_type="SALES_ISSUE").count(), 1)
         self.assertEqual(stock_for(self.product, self.warehouse), -10)
 
     # Clause 2 — Sales Channel selects 4110 versus 4120.
@@ -105,8 +112,8 @@ class ResolvedContractTests(TestCase):
     def test_sales_channel_selects_4110_wholesale_and_4120_retail(self):
         wholesale = self.sale(channel=SalesChannel.WHOLESALE, document_number="SI-CT-W")
         retail = self.sale(channel=SalesChannel.RETAIL, document_number="SI-CT-R")
-        finalize_sale(sale=wholesale)
-        finalize_sale(sale=retail)
+        finalize_sale(sale=wholesale, acknowledge_negative=True, temporary_unit_cost="4")
+        finalize_sale(sale=retail, acknowledge_negative=True, temporary_unit_cost="4")
 
         wholesale_lines = self.posted_lines("SALE", source_id="SI-CT-W")
         retail_lines = self.posted_lines("SALE", source_id="SI-CT-R")
@@ -118,30 +125,30 @@ class ResolvedContractTests(TestCase):
         self.assertNotIn("4120", wholesale_lines)
         self.assertNotIn("4110", retail_lines)
 
-    # Clause 3 — Revenue at Sales Finalization. Clause 4 — COGS at finalized check.
+    # Clause 3 — Revenue AND COGS at Sales Finalization (owner-approved
+    # invoice-time COGS); Warehouse Check is custody-only afterwards.
 
     def test_revenue_posts_at_finalization_and_cogs_posts_only_at_check_finalization(self):
         sale = self.sale()
         self.assertEqual(JournalEntry.objects.count(), 0)
         self.assertEqual(StockMovement.objects.count(), 0)
 
-        finalize_sale(sale=sale)
+        finalize_sale(sale=sale, acknowledge_negative=True, temporary_unit_cost="4")
         self.assertEqual(JournalEntry.objects.filter(source_type="SALE").count(), 1)
-        self.assertEqual(JournalEntry.objects.filter(source_type="SALES_COGS").count(), 0)
+        self.assertEqual(JournalEntry.objects.filter(source_type="SALES_COGS").count(), 1)
         self.assertEqual(self.balance("4110"), Decimal("100.00"))
-        self.assertEqual(self.balance("5100"), Decimal("0.00"))
+        cogs = self.posted_lines("SALES_COGS")
+        self.assertEqual(cogs["5100"].debit, Decimal("40.00"))
+        self.assertEqual(cogs["1410"].credit, Decimal("40.00"))
+        self.assertEqual(self.balance("5100"), Decimal("40.00"))
 
         check = prepare_warehouse_check(
             sale_line=sale.lines.get(), warehouse=self.warehouse, quantity=10, number="WC-CT-2",
         )
-        self.assertEqual(JournalEntry.objects.filter(source_type="SALES_COGS").count(), 0)
-
-        finalize_warehouse_check(
-            check=check, acknowledge_negative=True, temporary_unit_cost="4",
-        )
-        cogs = self.posted_lines("SALES_COGS")
-        self.assertEqual(cogs["5100"].debit, Decimal("40.00"))
-        self.assertEqual(cogs["1410"].credit, Decimal("40.00"))
+        finalize_warehouse_check(check=check)
+        # No second COGS / stock issue at physical handover.
+        self.assertEqual(JournalEntry.objects.filter(source_type="SALES_COGS").count(), 1)
+        self.assertEqual(StockMovement.objects.filter(movement_type="SALES_ISSUE").count(), 1)
         self.assertEqual(self.balance("5100"), Decimal("40.00"))
         self.assertEqual(JournalEntry.objects.filter(source_type="SALE").count(), 1)
 
@@ -149,7 +156,7 @@ class ResolvedContractTests(TestCase):
 
     def test_sale_finalization_creates_ownership_and_warehouse_check_releases_custody(self):
         sale = self.sale(quantity=10)
-        finalize_sale(sale=sale)
+        finalize_sale(sale=sale, acknowledge_negative=True, temporary_unit_cost="4")
         line = sale.lines.get()
         entitlement = CustomerOwnershipEntitlement.objects.get(sale_line=line)
         self.assertEqual(entitlement.quantity, 10)
@@ -161,16 +168,14 @@ class ResolvedContractTests(TestCase):
             sale_line=line, warehouse=self.warehouse, quantity=6, number="WC-CT-3B")
         self.assertEqual(CustomerCustodyEvent.objects.count(), 0)
 
-        finalize_warehouse_check(
-            check=first, acknowledge_negative=True, temporary_unit_cost="4")
+        finalize_warehouse_check(check=first)
         self.assertEqual(custody_balance(entitlement=entitlement, warehouse=self.warehouse), 0)
         self.assertEqual(
             CustomerCustodyEvent.objects.filter(event_type=CustodyEventType.PLACED).count(), 1)
         self.assertEqual(
             CustomerCustodyEvent.objects.filter(event_type=CustodyEventType.RELEASED).count(), 1)
 
-        finalize_warehouse_check(
-            check=second, acknowledge_negative=True, temporary_unit_cost="4")
+        finalize_warehouse_check(check=second)
         self.assertEqual(CustomerCustodyEvent.objects.count(), 4)
         self.assertEqual(
             CustomerCustodyEvent.objects.filter(event_type=CustodyEventType.RELEASED).count(), 2)
@@ -178,7 +183,7 @@ class ResolvedContractTests(TestCase):
 
     def test_payment_is_separate_from_sale_and_release_does_not_settle(self):
         sale = self.sale(quantity=10, unit_price="10")
-        finalize_sale(sale=sale)
+        finalize_sale(sale=sale, acknowledge_negative=True, temporary_unit_cost="4")
         self.assertEqual(self.balance("1310"), Decimal("100.00"))
 
         check = prepare_warehouse_check(
@@ -195,7 +200,7 @@ class ResolvedContractTests(TestCase):
 
     def test_cash_sale_debits_cash_not_receivable(self):
         sale = self.sale(payment_mode=PaymentMode.CASH, document_number="SI-CT-CASH")
-        finalize_sale(sale=sale)
+        finalize_sale(sale=sale, acknowledge_negative=True, temporary_unit_cost="4")
         entry = JournalEntry.objects.get(source_type="SALE", source_id="SI-CT-CASH")
         self.assertEqual(entry.lines.get(account__code="1110").debit, Decimal("100.00"))
         self.assertEqual(self.balance("1310"), Decimal("0.00"))
@@ -204,7 +209,7 @@ class ResolvedContractTests(TestCase):
 
     def test_negative_stock_issue_registers_obligation_resolved_by_purchase_receipt(self):
         sale = self.sale(quantity=10, document_number="SI-CT-NEG")
-        finalize_sale(sale=sale)
+        finalize_sale(sale=sale, acknowledge_negative=True, temporary_unit_cost="4")
         check = prepare_warehouse_check(
             sale_line=sale.lines.get(), warehouse=self.warehouse, quantity=10, number="WC-CT-5",
         )
@@ -212,7 +217,8 @@ class ResolvedContractTests(TestCase):
             check=check, acknowledge_negative=True, temporary_unit_cost="4")
 
         obligation = NegativeCOGSObligation.objects.get()
-        self.assertEqual(obligation.warehouse_check, check)
+        self.assertIsNone(obligation.warehouse_check)
+        self.assertEqual(obligation.sale_allocation.sale_line, sale.lines.get())
         self.assertEqual(obligation.product, self.product)
         self.assertEqual(obligation.warehouse, self.warehouse)
         self.assertEqual(obligation.original_quantity, 10)
@@ -256,10 +262,10 @@ class ResolvedContractTests(TestCase):
             prepare_warehouse_check(
                 sale_line=sale.lines.get(), warehouse=self.warehouse, quantity=1, number="WC-CT-6")
 
-        finalize_sale(sale=sale)
-        self.assertEqual(finalize_sale(sale=sale).status, SaleStatus.FINALIZED)
+        finalize_sale(sale=sale, acknowledge_negative=True, temporary_unit_cost="4")
+        self.assertEqual(finalize_sale(sale=sale, acknowledge_negative=True, temporary_unit_cost="4").status, SaleStatus.FINALIZED)
         self.assertEqual(JournalEntry.objects.filter(source_type="SALE").count(), 1)
-        self.assertEqual(JournalEntry.objects.filter(source_type="SALES_COGS").count(), 0)
+        self.assertEqual(JournalEntry.objects.filter(source_type="SALES_COGS").count(), 1)
 
 
 @pytest.mark.django_db
@@ -284,15 +290,20 @@ def test_foreign_credit_sale_does_not_require_invoice_rate():
     category = Category.objects.create(name="Oil")
     unit = UnitOfMeasure.objects.create(name="Piece")
     product = Product.objects.create(code="OIL-CCS", name="Oil", name_fa="روغن", category=category, primary_uom=unit)
+    from warehouses.models import Warehouse
+    from inventory.services import assign_warehouse_account
+    warehouse = Warehouse.objects.create(name="FX Warehouse")
+    assign_warehouse_account(warehouse=warehouse, account="1410")
     sale = create_sale(
         customer=customer, sale_date=date(2026, 9, 28), currency=usd,
         channel=SalesChannel.WHOLESALE, payment_mode=PaymentMode.CREDIT,
-        lines=[{"product": product, "unit": unit, "quantity": 1, "unit_price": Decimal("5000")}],
+        lines=[{"product": product, "unit": unit, "quantity": 1, "unit_price": Decimal("5000"),
+                "allocations": [{"warehouse": warehouse, "quantity": 1}]}],
         rate=None, rate_date=None, user=user, document_number="SI-CCS-RATE-1",
     )
     assert sale.exchange_rate is None
     assert sale.rate_date is None
-    finalized = finalize_sale(sale=sale, user=user)
+    finalized = finalize_sale(sale=sale, user=user, acknowledge_negative=True, temporary_unit_cost="4")
     assert finalized.journal_entry.currency_id == usd.id
     assert finalized.journal_entry.rate is None
     assert finalized.journal_entry.afn_total is None

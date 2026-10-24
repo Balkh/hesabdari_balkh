@@ -24,8 +24,8 @@ from security.services import record_audit_event
 from .models import (
     COGSAdjustment, CheckStatus, NegativeCOGSObligation,
     NegativeCOGSReceiptAllocation,
-    PaymentMode, Sale, SaleLine, SaleStatus, SalesChannel, SaleType,
-    WarehouseCheck, WarehouseCheckReversal,
+    PaymentMode, Sale, SaleLine, SaleLineWarehouseAllocation, SaleStatus,
+    SalesChannel, SaleType, WarehouseCheck, WarehouseCheckReversal,
 )
 
 
@@ -97,8 +97,30 @@ def _line_rows(lines):
                 )
         except (KeyError, UnitOfMeasure.DoesNotExist, GoodsInTransitLot.DoesNotExist) as exc:
             raise SalesValidationError("Product and UOM are required") from exc
-        if warehouse is not None:
-            raise SalesValidationError("Warehouse belongs to Warehouse Check, not SaleLine")
+        allocations = []
+        raw_allocations = row.get("allocations")
+        if raw_allocations is None and warehouse is not None:
+            raw_allocations = [{"warehouse": warehouse, "quantity": row.get("quantity")}]
+        if raw_allocations is not None:
+            if transit_lot_ref is not None:
+                raise SalesValidationError("Transit SaleLines use a Transit lot, not warehouse allocations")
+            if not isinstance(raw_allocations, (list, tuple)) or not raw_allocations:
+                raise SalesValidationError("Warehouse allocations must be a non-empty list")
+            seen_warehouses = set()
+            for alloc in raw_allocations:
+                try:
+                    alloc_warehouse = resolve_warehouse(alloc["warehouse"])
+                    alloc_qty = alloc["quantity"]
+                except (KeyError, TypeError, AttributeError) as exc:
+                    raise SalesValidationError("Each allocation requires a warehouse and quantity") from exc
+                if not alloc_warehouse.is_active:
+                    raise SalesValidationError("Warehouse is inactive")
+                if isinstance(alloc_qty, bool) or not isinstance(alloc_qty, int) or alloc_qty <= 0:
+                    raise SalesValidationError("Allocation quantity must be a positive integer")
+                if alloc_warehouse.pk in seen_warehouses:
+                    raise SalesValidationError("Duplicate warehouse in SaleLine allocations")
+                seen_warehouses.add(alloc_warehouse.pk)
+                allocations.append({"warehouse": alloc_warehouse, "quantity": alloc_qty})
         if transit_lot is not None and transit_lot.product_id != product.pk:
             raise SalesValidationError("Transit lot product must match SaleLine product")
         quantity = row.get("quantity")
@@ -109,10 +131,12 @@ def _line_rows(lines):
         gross = line_total(quantity, price)
         if discount < 0 or discount > gross:
             raise SalesValidationError("Invalid discount")
+        if allocations and sum(a["quantity"] for a in allocations) != quantity:
+            raise SalesValidationError("Warehouse allocations must sum to the SaleLine quantity")
         rows.append({"product": product, "unit": unit, "quantity": quantity,
                      "unit_price": price, "discount": discount,
                      "gross": gross, "net": gross - discount,
-                     "transit_lot": transit_lot})
+                     "transit_lot": transit_lot, "allocations": allocations})
     if not rows:
         raise SalesValidationError("At least one Sales Line is required")
     return rows
@@ -149,14 +173,33 @@ def create_sale(*, customer, sale_date, currency, channel, payment_mode,
             total=sum((r["net"] for r in rows), Decimal("0.00")), created_by=actor,
         )
         for row in rows:
-            SaleLine.objects.create(sale=sale, product=row["product"], unit=row["unit"],
+            line = SaleLine.objects.create(sale=sale, product=row["product"], unit=row["unit"],
                                     quantity=row["quantity"], unit_price=row["unit_price"],
                                     discount=row["discount"], line_total=row["gross"], net_total=row["net"],
                                     transit_lot=row["transit_lot"])
+            for alloc in row["allocations"]:
+                SaleLineWarehouseAllocation.objects.create(
+                    sale_line=line, warehouse=alloc["warehouse"],
+                    quantity=alloc["quantity"],
+                    idempotency_key=f"sale-line-intent:{line.pk}:{alloc['warehouse'].pk}",
+                )
     return sale
 
 
-def finalize_sale(*, sale, user=None, idempotency_key=None):
+def finalize_sale(*, sale, user=None, idempotency_key=None, allocations=None,
+                  acknowledge_negative=False, temporary_unit_cost=None,
+                  temporary_currency=None, temporary_rate=None,
+                  temporary_rate_date=None):
+    """Finalize a Sale: revenue, invoice-time COGS for ordinary stock, ownership.
+
+    Ordinary AVAILABLE (non-Transit) lines require explicit warehouse
+    allocations (recorded at create_sale, or supplied here keyed by SaleLine
+    pk). Each allocation issues stock at that warehouse's AVCO (existing
+    negative-stock acknowledgement/temporary-cost policy applies) and posts
+    Dr 5100 / Cr <warehouse inventory account> exactly once. Transit lines
+    keep their lot-specific COGS against 1430. Warehouse Check later only
+    releases customer custody.
+    """
     actor = _actor(user)
     with transaction.atomic():
         sale = Sale.objects.select_for_update().select_related("customer", "currency").get(pk=getattr(sale, "pk", sale))
@@ -240,13 +283,90 @@ def finalize_sale(*, sale, user=None, idempotency_key=None):
                 lot=lot, sale_allocation=transit_allocation,
                 posting_date=sale.sale_date, user=actor,
             )
+        # Ordinary warehouse-stock lines: issue + COGS now, at invoice time.
+        ordinary_allocations = []  # (line, allocation)
+        if sale.sale_type == SaleType.AVAILABLE:
+            supplied = allocations or {}
+            for line in SaleLine.objects.select_for_update().filter(
+                sale_id=sale.pk, transit_lot__isnull=True
+            ).order_by("id"):
+                intents = list(
+                    SaleLineWarehouseAllocation.objects.select_for_update()
+                    .filter(sale_line=line).order_by("warehouse_id")
+                )
+                if not intents:
+                    rows = supplied.get(line.pk) or supplied.get(str(line.pk)) or []
+                    for alloc in rows:
+                        alloc_warehouse = resolve_warehouse(alloc["warehouse"])
+                        if not alloc_warehouse.is_active:
+                            raise SalesValidationError("Warehouse is inactive")
+                        alloc_qty = alloc["quantity"]
+                        if isinstance(alloc_qty, bool) or not isinstance(alloc_qty, int) or alloc_qty <= 0:
+                            raise SalesValidationError("Allocation quantity must be a positive integer")
+                        intents.append(SaleLineWarehouseAllocation.objects.create(
+                            sale_line=line, warehouse=alloc_warehouse, quantity=alloc_qty,
+                            idempotency_key=f"sale-line-intent:{line.pk}:{alloc_warehouse.pk}",
+                        ))
+                if not intents:
+                    raise SalesValidationError(
+                        "Every ordinary SaleLine requires an explicit warehouse allocation before finalization"
+                    )
+                if sum(a.quantity for a in intents) != line.quantity:
+                    raise SalesValidationError("Warehouse allocations must sum to the SaleLine quantity")
+                for alloc in intents:
+                    if alloc.stock_movement_id is not None:
+                        raise SalesValidationError("SaleLine allocation was already issued")
+                    inv_account = resolve_warehouse_account(alloc.warehouse)
+                    movement = issue_stock(
+                        product=line.product, warehouse=alloc.warehouse,
+                        quantity=alloc.quantity, movement_date=sale.sale_date,
+                        reference=sale.document_number,
+                        description=f"Sales invoice {sale.document_number} line {line.pk}",
+                        user=actor,
+                        idempotency_key=f"sale:{sale.pk}:line:{line.pk}:alloc:{alloc.warehouse_id}:issue",
+                        acknowledge_negative=acknowledge_negative,
+                        temporary_unit_cost=temporary_unit_cost,
+                        temporary_currency=temporary_currency,
+                        temporary_rate=temporary_rate,
+                        temporary_rate_date=temporary_rate_date,
+                        party=sale.customer,
+                    )
+                    cogs_value = cogs_amount(alloc.quantity, movement.unit_cost_afn)
+                    base = movement.currency if movement.currency.is_base else __import__("currencies.models", fromlist=["Currency"]).Currency.objects.get(is_base=True)
+                    cogs_entry = post_journal(
+                        number=f"JE-COGS-{hashlib.sha256(f'{sale.pk}:{line.pk}:{alloc.warehouse_id}'.encode()).hexdigest()[:20]}",
+                        posting_date=sale.sale_date,
+                        description=f"COGS for Sales invoice {sale.document_number} line {line.pk}",
+                        lines=[{"account": Account.objects.get(code=COGS_ACCOUNT), "debit": cogs_value, "reference": sale.document_number},
+                               {"account": inv_account, "credit": cogs_value, "reference": sale.document_number}],
+                        source_type="SALES_COGS",
+                        source_id=f"{sale.document_number}:LINE:{line.pk}:WH:{alloc.warehouse_id}",
+                        currency=base, rate=Decimal("1.0000"), rate_date=sale.sale_date,
+                        created_by=actor,
+                        idempotency_key=f"sale:{sale.pk}:line:{line.pk}:alloc:{alloc.warehouse_id}:cogs",
+                    )
+                    SaleLineWarehouseAllocation.objects.filter(pk=alloc.pk).update(
+                        unit_cost_afn=movement.unit_cost_afn,
+                        inventory_account=inv_account,
+                        stock_movement=movement, cogs_journal=cogs_entry,
+                    )
+                    alloc.unit_cost_afn = movement.unit_cost_afn
+                    if movement.is_temporary_cost:
+                        NegativeCOGSObligation.objects.create(
+                            movement=movement, sale_allocation=alloc,
+                            product=line.product, warehouse=alloc.warehouse,
+                            original_quantity=alloc.quantity,
+                            temporary_unit_cost_afn=movement.unit_cost_afn,
+                            movement_date=sale.sale_date,
+                        )
+                    ordinary_allocations.append((line, alloc))
         sale.status = SaleStatus.FINALIZED
         sale.finalized_at = timezone.now()
         sale.journal_entry = journal
         sale.save(update_fields=["status", "finalized_at", "journal_entry"])
         if sale.sale_type == SaleType.AVAILABLE:
             for line in SaleLine.objects.filter(sale=sale).order_by("id"):
-                create_ownership_entitlement(
+                entitlement = create_ownership_entitlement(
                     sale_line=line,
                     user=actor,
                     idempotency_key=f"sale:{sale.pk}:line:{line.pk}:ownership",
@@ -327,6 +447,46 @@ def finalize_warehouse_check(*, check, user=None, acknowledge_negative=False,
             if custody_balance(entitlement=entitlement, warehouse=check.warehouse) < check.quantity:
                 raise SalesValidationError(
                     "Warehouse Check exceeds customer-owned Transit quantity physically received into this warehouse"
+                )
+            release_customer_custody(
+                entitlement=entitlement, warehouse=check.warehouse,
+                quantity=check.quantity, event_date=check.sale.sale_date,
+                reference=check.number, user=actor,
+                idempotency_key=idempotency_key or f"warehouse-check:{check.pk}:custody-release",
+            )
+            check.status = CheckStatus.FINALIZED
+            check.finalized_at = timezone.now()
+            check.save(update_fields=["status", "finalized_at"])
+            return check
+
+        if SaleLineWarehouseAllocation.objects.filter(sale_line=line).exists():
+            # Invoice-time COGS already issued this stock and credited the
+            # warehouse inventory account. Physical check only releases the
+            # customer custody placed at finalization; no stock/COGS again.
+            entitlement = CustomerOwnershipEntitlement.objects.get(sale_line=line)
+            allocated_here = SaleLineWarehouseAllocation.objects.filter(
+                sale_line=line, warehouse=check.warehouse
+            ).aggregate(total=models.Sum("quantity"))["total"] or 0
+            released_here = WarehouseCheck.objects.filter(
+                sale_line=line, warehouse=check.warehouse,
+                status=CheckStatus.FINALIZED, reversal__isnull=True,
+            ).aggregate(total=models.Sum("quantity"))["total"] or 0
+            if check.quantity > allocated_here - released_here:
+                raise SalesValidationError(
+                    "Warehouse Check exceeds the quantity allocated to this warehouse at invoice finalization"
+                )
+            available_here = custody_balance(entitlement=entitlement, warehouse=check.warehouse)
+            if available_here < check.quantity:
+                needed = check.quantity - available_here
+                if needed > unallocated_custody_balance(entitlement=entitlement):
+                    raise SalesValidationError(
+                        "Warehouse Check exceeds customer-owned custody allocated to this warehouse"
+                    )
+                place_customer_custody(
+                    entitlement=entitlement, warehouse=check.warehouse,
+                    quantity=needed, event_date=check.sale.sale_date,
+                    reference=check.number, user=actor,
+                    idempotency_key=idempotency_key or f"warehouse-check:{check.pk}:custody-place",
                 )
             release_customer_custody(
                 entitlement=entitlement, warehouse=check.warehouse,
@@ -442,8 +602,15 @@ def cancel_warehouse_check(*, check, reversal_date, reason, user=None,
         SaleLine.objects.select_for_update().get(pk=locked.sale_line_id)
 
         from sales.models import TransitSaleAllocation
-        if locked.stock_movement_id and InventoryReturn.objects.filter(
-            source_movement_id=locked.stock_movement_id
+        _source_movement_ids = list(
+            SaleLineWarehouseAllocation.objects.filter(
+                sale_line_id=locked.sale_line_id, stock_movement__isnull=False
+            ).values_list("stock_movement_id", flat=True)
+        )
+        if locked.stock_movement_id:
+            _source_movement_ids.append(locked.stock_movement_id)
+        if _source_movement_ids and InventoryReturn.objects.filter(
+            source_movement_id__in=_source_movement_ids
         ).exists():
             raise SalesValidationError(
                 "This issue has Sales Return history; use the Sales Return workflow, not pre-delivery cancellation"
@@ -469,9 +636,10 @@ def cancel_warehouse_check(*, check, reversal_date, reason, user=None,
         ).exists()
 
         def _coordinate_approved_cancellation(*, original, actor, reversal_date, reason, idempotency_key):
-            if is_transit:
-                # Transit-sale COGS was posted at Sale finalization. Cancelling
-                # the check restores customer custody without touching stock.
+            if is_transit or SaleLineWarehouseAllocation.objects.filter(sale_line_id=locked.sale_line_id).exists():
+                # COGS was posted at Sale finalization (Transit 1430 or the
+                # allocated warehouse account). Cancelling the check restores
+                # customer custody without touching stock or COGS.
                 return
             if locked.stock_movement_id is None or locked.cogs_journal_id is None:
                 raise SalesValidationError("A normal Warehouse Check lacks its stock/COGS source records")
@@ -535,20 +703,24 @@ def resolve_negative_obligations(*, receipt_movement):
                 inv = resolve_warehouse_account(receipt_movement.warehouse)
                 base = receipt_movement.currency if receipt_movement.currency.is_base else __import__("currencies.models", fromlist=["Currency"]).Currency.objects.get(is_base=True)
                 cogs_account = Account.objects.get(code=COGS_ACCOUNT)
+                obligation_ref = (
+                    obligation.warehouse_check.number if obligation.warehouse_check_id
+                    else obligation.movement.reference
+                )
                 if difference > 0:
                     adjustment_lines = [
-                        {"account": cogs_account, "debit": difference, "reference": obligation.warehouse_check.number},
+                        {"account": cogs_account, "debit": difference, "reference": obligation_ref},
                         {"account": inv, "credit": difference, "reference": receipt_movement.reference},
                     ]
                 else:
                     adjustment_lines = [
                         {"account": inv, "debit": abs(difference), "reference": receipt_movement.reference},
-                        {"account": cogs_account, "credit": abs(difference), "reference": obligation.warehouse_check.number},
+                        {"account": cogs_account, "credit": abs(difference), "reference": obligation_ref},
                     ]
                 entry = post_journal(
                     number=f"JE-COGS-ADJ-{obligation.pk}-{receipt_movement.pk}",
                     posting_date=receipt_movement.movement_date,
-                    description=f"Negative COGS adjustment for {obligation.warehouse_check.number}",
+                    description=f"Negative COGS adjustment for {obligation_ref}",
                     lines=adjustment_lines,
                     source_type="SALES_COGS_ADJUSTMENT", source_id=f"{obligation.pk}:{receipt_movement.pk}",
                     currency=base, rate=Decimal("1.0000"), rate_date=receipt_movement.movement_date,

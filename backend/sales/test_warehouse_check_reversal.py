@@ -54,15 +54,16 @@ class WarehouseCheckReversalTests(TestCase):
             lines=[{
                 "product": self.product, "unit": self.unit,
                 "quantity": 5, "unit_price": "10",
+                "allocations": [{"warehouse": self.warehouse, "quantity": 5}],
             }],
             document_number=f"SI-{number}",
         )
-        finalize_sale(sale=sale)
         receive_stock(
             product=self.product, warehouse=self.warehouse, quantity=5,
             unit_cost="4", currency=self.afn, movement_date=date(2026, 1, 10),
             reference=f"RCPT-{number}",
         )
+        finalize_sale(sale=sale)
         check = prepare_warehouse_check(
             sale_line=sale.lines.get(), warehouse=self.warehouse,
             quantity=5, number=number,
@@ -73,7 +74,8 @@ class WarehouseCheckReversalTests(TestCase):
     def test_pre_delivery_cancel_restores_custody_preserves_stock_and_cogs_idempotently(self):
         sale, check = self._finalized_check("WC-REV-CANCEL")
         self.assertEqual(stock_for(self.product, self.warehouse), 0)
-        original_cogs = check.cogs_journal
+        # COGS posted at invoice finalization against the allocation.
+        original_cogs = sale.lines.get().warehouse_allocations.get().cogs_journal
 
         reversal = cancel_warehouse_check(
             check=check, reversal_date=date(2026, 1, 11),

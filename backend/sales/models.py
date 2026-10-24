@@ -155,7 +155,11 @@ class OwnershipEvent(models.Model):
 
 class NegativeCOGSObligation(models.Model):
     movement = models.OneToOneField("inventory.StockMovement", on_delete=models.PROTECT, related_name="negative_cogs_obligation")
-    warehouse_check = models.OneToOneField(WarehouseCheck, on_delete=models.PROTECT, related_name="negative_cogs_obligation")
+    # Legacy obligations were created by a Warehouse Check; invoice-time
+    # obligations link to the SaleLine warehouse allocation instead. Exactly
+    # one source is set for new records; legacy rows keep their check link.
+    warehouse_check = models.OneToOneField(WarehouseCheck, null=True, blank=True, on_delete=models.PROTECT, related_name="negative_cogs_obligation")
+    sale_allocation = models.OneToOneField("SaleLineWarehouseAllocation", null=True, blank=True, on_delete=models.PROTECT, related_name="negative_cogs_obligation")
     product = models.ForeignKey("products.Product", on_delete=models.PROTECT, related_name="negative_cogs_obligations")
     warehouse = models.ForeignKey("warehouses.Warehouse", on_delete=models.PROTECT, related_name="negative_cogs_obligations")
     original_quantity = models.PositiveIntegerField()
@@ -239,6 +243,44 @@ class NegativeCOGSReceiptAllocation(models.Model):
 # Phase 11 models live in a separate module to keep the existing Sales models readable.
 from .returns_models import CrossCurrencyRefund, CrossCurrencyRefundStatus, Refund, RefundStatus, SalesReturn, SalesReturnReversal, SalesReturnStatus
 
+
+
+class SaleLineWarehouseAllocation(models.Model):
+    """Immutable warehouse allocation of a finalized ordinary SaleLine.
+
+    Created only by ``finalize_sale``: one row per (line, warehouse) slice,
+    linking the stock issue movement and the COGS journal posted at invoice
+    finalization. Warehouse Check later releases custody only.
+    """
+
+    sale_line = models.ForeignKey(SaleLine, on_delete=models.PROTECT, related_name="warehouse_allocations")
+    warehouse = models.ForeignKey("warehouses.Warehouse", on_delete=models.PROTECT, related_name="sale_line_allocations")
+    quantity = models.PositiveIntegerField()
+    # Allocation intent is recorded at Sale creation; cost/account/movement/
+    # journal are completed exactly once by finalize_sale (queryset update,
+    # never through save(), so rows stay immutable to normal writes).
+    unit_cost_afn = models.DecimalField(max_digits=20, decimal_places=4, default=Decimal("0.0000"))
+    inventory_account = models.ForeignKey("accounting.Account", null=True, blank=True, on_delete=models.PROTECT, related_name="sale_line_allocations")
+    stock_movement = models.OneToOneField("inventory.StockMovement", null=True, blank=True, on_delete=models.PROTECT, related_name="sale_line_allocation")
+    cogs_journal = models.OneToOneField("accounting.JournalEntry", null=True, blank=True, on_delete=models.PROTECT, related_name="sale_line_allocation")
+    idempotency_key = models.CharField(max_length=128, unique=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["id"]
+        constraints = [
+            models.CheckConstraint(condition=models.Q(quantity__gt=0), name="sale_line_alloc_qty_gt0"),
+            models.CheckConstraint(condition=models.Q(unit_cost_afn__gte=0), name="sale_line_alloc_cost_gte0"),
+            models.UniqueConstraint(fields=["sale_line", "warehouse"], name="uniq_sale_line_warehouse_alloc"),
+        ]
+
+    def save(self, *args, **kwargs):
+        if self.pk is not None:
+            raise PostedImmutabilityError("SaleLine warehouse allocations are immutable")
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise PostedImmutabilityError("SaleLine warehouse allocations cannot be deleted")
 
 
 class TransitSaleAllocation(models.Model):
