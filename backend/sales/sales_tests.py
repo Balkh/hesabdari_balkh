@@ -39,29 +39,36 @@ class SalesImplementationTests(TestCase):
         assign_warehouse_account(warehouse=self.warehouse_a, account="1410")
         assign_warehouse_account(warehouse=self.warehouse_b, account="1420")
 
-    def sale(self, quantity=100):
+    def sale(self, quantity=100, allocations=None):
         return create_sale(
             customer=self.customer, sale_date=date(2026, 1, 10), currency=self.afn,
             channel=SalesChannel.WHOLESALE, payment_mode=PaymentMode.CREDIT,
-            lines=[{"product": self.product, "unit": self.unit, "quantity": quantity, "unit_price": "10"}],
+            lines=[{"product": self.product, "unit": self.unit, "quantity": quantity, "unit_price": "10",
+                    "allocations": allocations or [{"warehouse": self.warehouse_a, "quantity": quantity}]}],
             document_number="SI-IMPL-1",
         )
 
     def test_sale_line_has_no_authoritative_warehouse_and_credit_posts_receivable(self):
         sale = self.sale()
         self.assertFalse(hasattr(sale.lines.get(), "warehouse_id"))
-        finalize_sale(sale=sale)
+        finalize_sale(sale=sale, acknowledge_negative=True, temporary_unit_cost="4")
         self.assertEqual(sale.__class__.objects.get(pk=sale.pk).status, SaleStatus.FINALIZED)
         self.assertEqual(JournalEntry.objects.filter(source_type="SALE").count(), 1)
+        # Invoice-time COGS: stock issued once at finalization, Dr 5100/Cr 1410.
+        self.assertEqual(JournalEntry.objects.filter(source_type="SALES_COGS").count(), 1)
+        self.assertEqual(stock_for(self.product, self.warehouse_a), -100)
 
     def test_multiple_partial_checks_are_limited_to_line_quantity(self):
-        sale = self.sale()
-        finalize_sale(sale=sale)
+        sale = self.sale(allocations=[{"warehouse": self.warehouse_a, "quantity": 30},
+                                      {"warehouse": self.warehouse_b, "quantity": 70}])
+        finalize_sale(sale=sale, acknowledge_negative=True, temporary_unit_cost="4")
         line = sale.lines.get()
         first = prepare_warehouse_check(sale_line=line, warehouse=self.warehouse_a, quantity=30, number="WC-1")
         second = prepare_warehouse_check(sale_line=line, warehouse=self.warehouse_b, quantity=70, number="WC-2")
-        finalize_warehouse_check(check=first, acknowledge_negative=True, temporary_unit_cost="4")
-        finalize_warehouse_check(check=second, acknowledge_negative=True, temporary_unit_cost="4")
+        finalize_warehouse_check(check=first)
+        finalize_warehouse_check(check=second)
+        # Both issues happened at invoice finalization (allocations A30/B70);
+        # the checks themselves create no further stock movements.
         self.assertEqual(StockMovement.objects.filter(movement_type="SALES_ISSUE").count(), 2)
         self.assertEqual(stock_for(self.product, self.warehouse_a), -30)
         self.assertEqual(stock_for(self.product, self.warehouse_b), -70)
@@ -69,11 +76,15 @@ class SalesImplementationTests(TestCase):
             prepare_warehouse_check(sale_line=line, warehouse=self.warehouse_a, quantity=1, number="WC-3")
 
     def test_check_requires_negative_acknowledgement(self):
-        sale = self.sale()
-        finalize_sale(sale=sale)
-        check = prepare_warehouse_check(sale_line=sale.lines.get(), warehouse=self.warehouse_a, quantity=5, number="WC-NEG")
+        # Negative-stock acknowledgement/cost is now required at invoice
+        # finalization (where the issue + COGS post), not at Warehouse Check.
+        sale = self.sale(quantity=5)
         with self.assertRaises(Exception):
-            finalize_warehouse_check(check=check)
-        finalized = finalize_warehouse_check(check=check, acknowledge_negative=True, temporary_unit_cost="4")
+            finalize_sale(sale=sale)
+        finalized_sale = finalize_sale(sale=sale, acknowledge_negative=True, temporary_unit_cost="4")
+        self.assertEqual(finalized_sale.status, SaleStatus.FINALIZED)
+        self.assertEqual(stock_for(self.product, self.warehouse_a), -5)
+        check = prepare_warehouse_check(sale_line=sale.lines.get(), warehouse=self.warehouse_a, quantity=5, number="WC-NEG")
+        finalized = finalize_warehouse_check(check=check)
         self.assertEqual(finalized.status, CheckStatus.FINALIZED)
         self.assertEqual(stock_for(self.product, self.warehouse_a), -5)

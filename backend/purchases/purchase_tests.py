@@ -1201,6 +1201,7 @@ class PurchaseFoundationTests(TestCase):
             lines=[{
                 "product": self.product, "unit": self.product.primary_uom,
                 "quantity": 4, "unit_price": "20.00",
+                "allocations": [{"warehouse": self.warehouse, "quantity": 4}],
             }],
             user=self.user, document_number="SI-LC-SALES-RETURN-001",
         )
@@ -1218,7 +1219,7 @@ class PurchaseFoundationTests(TestCase):
             user=self.user, document_number="SR-LC-SALES-RETURN-001",
             idempotency_key="sr-lc-sales-return-001",
         )
-        source_issue = StockMovement.objects.get(reference="WC-LC-SALES-RETURN-001", movement_type=MovementType.SALES_ISSUE)
+        source_issue = StockMovement.objects.get(reference="SI-LC-SALES-RETURN-001", movement_type=MovementType.SALES_ISSUE)
         original_return_cogs = returned.cogs_journal.lines.get(account__code="5100").credit
 
         cost = create_landed_cost_draft(
@@ -1471,19 +1472,17 @@ class PurchaseFoundationTests(TestCase):
             lines=[{
                 "product": self.product, "unit": self.product.primary_uom,
                 "quantity": 10, "unit_price": "20.00",
+                "allocations": [{"warehouse": self.warehouse, "quantity": 10}],
             }],
             user=self.user, document_number="SI-LC-NEGATIVE-001",
         )
-        finalize_sale(sale=sale, user=self.user)
+        finalize_sale(sale=sale, user=self.user, acknowledge_negative=True, temporary_unit_cost="10.00")
         check = prepare_warehouse_check(
             sale_line=sale.lines.get(), warehouse=self.warehouse, quantity=10,
             number="WC-LC-NEGATIVE-001",
         )
-        finalize_warehouse_check(
-            check=check, user=self.user, acknowledge_negative=True,
-            temporary_unit_cost="10.00",
-        )
-        obligation = NegativeCOGSObligation.objects.get(movement__reference=check.number)
+        finalize_warehouse_check(check=check, user=self.user)
+        obligation = NegativeCOGSObligation.objects.get(movement__reference=sale.document_number)
         self.assertEqual(obligation.resolved_quantity, 0)
 
         purchase = self._purchase(
@@ -1535,19 +1534,17 @@ class PurchaseFoundationTests(TestCase):
             lines=[{
                 "product": self.product, "unit": self.product.primary_uom,
                 "quantity": 10, "unit_price": "20.00",
+                "allocations": [{"warehouse": self.warehouse, "quantity": 10}],
             }],
             user=self.user, document_number="SI-LC-NEGATIVE-EXACT-001",
         )
-        finalize_sale(sale=sale, user=self.user)
+        finalize_sale(sale=sale, user=self.user, acknowledge_negative=True, temporary_unit_cost="12.00")
         check = prepare_warehouse_check(
             sale_line=sale.lines.get(), warehouse=self.warehouse, quantity=10,
             number="WC-NEG-EXACT",
         )
-        finalize_warehouse_check(
-            check=check, user=self.user, acknowledge_negative=True,
-            temporary_unit_cost="12.00",
-        )
-        obligation = NegativeCOGSObligation.objects.get(movement__reference=check.number)
+        finalize_warehouse_check(check=check, user=self.user)
+        obligation = NegativeCOGSObligation.objects.get(movement__reference=sale.document_number)
         purchase = self._purchase(
             document_number="PI-LC-NEGATIVE-EXACT-001",
             lines=[{"product": self.product, "quantity": 10, "unit_price": "12.00"}],
@@ -1597,19 +1594,17 @@ class PurchaseFoundationTests(TestCase):
             lines=[{
                 "product": self.product, "unit": self.product.primary_uom,
                 "quantity": 10, "unit_price": "20.00",
+                "allocations": [{"warehouse": self.warehouse, "quantity": 10}],
             }],
             user=self.user, document_number="SI-LC-TRANSIT-NEGATIVE-001",
         )
-        finalize_sale(sale=sale, user=self.user)
+        finalize_sale(sale=sale, user=self.user, acknowledge_negative=True, temporary_unit_cost="10.00")
         check = prepare_warehouse_check(
             sale_line=sale.lines.get(), warehouse=self.warehouse, quantity=10,
             number="WC-TR-NEG",
         )
-        finalize_warehouse_check(
-            check=check, user=self.user, acknowledge_negative=True,
-            temporary_unit_cost="10.00",
-        )
-        obligation = NegativeCOGSObligation.objects.get(movement__reference=check.number)
+        finalize_warehouse_check(check=check, user=self.user)
+        obligation = NegativeCOGSObligation.objects.get(movement__reference=sale.document_number)
 
         purchase = self._purchase(
             document_number="PI-LC-TRANSIT-NEGATIVE-001",

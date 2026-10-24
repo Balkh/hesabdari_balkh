@@ -120,6 +120,7 @@ class Phase11WorkflowTests(TestCase):
             lines=[{
                 "product": self.product, "unit": self.unit,
                 "quantity": 10, "unit_price": "100",
+                "allocations": [{"warehouse": self.warehouse, "quantity": 10}],
             }],
         )
         finalize_sale(sale=sale)
@@ -361,7 +362,8 @@ class Phase11RefundConcurrencyTests(TransactionTestCase):
             customer=customer, sale_date=self.day, currency=self.afn,
             channel=SalesChannel.WHOLESALE, payment_mode=PaymentMode.CASH,
             document_number="P11-CONCURRENT-SALE",
-            lines=[{"product": product, "unit": unit, "quantity": 10, "unit_price": "100"}],
+            lines=[{"product": product, "unit": unit, "quantity": 10, "unit_price": "100",
+                    "allocations": [{"warehouse": warehouse, "quantity": 10}]}],
         )
         finalize_sale(sale=sale)
         line = sale.lines.get()

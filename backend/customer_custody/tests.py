@@ -1,6 +1,7 @@
 from datetime import date
 
 from django.test import TestCase
+from inventory.services import assign_warehouse_account
 
 from accounting.coa import seed_chart_of_accounts
 from accounting.models import PostedImmutabilityError
@@ -34,16 +35,18 @@ class CustomerCustodyTests(TestCase):
         self.product = create_product(code="CUST-1", name="Custody Product", name_fa="محصول امانت", category=category, primary_uom=unit)
         self.customer = create_party(name="Custody Customer", is_customer=True)
         self.warehouse = create_warehouse(name="Custody Warehouse")
+        assign_warehouse_account(warehouse=self.warehouse, account="1410")
         self.day = date(2026, 10, 1)
         self.sale = create_sale(
             customer=self.customer, sale_date=self.day, currency=self.afn,
             channel=SalesChannel.WHOLESALE, payment_mode=PaymentMode.CREDIT,
             document_number="SI-CUST-1",
-            lines=[{"product": self.product, "unit": unit, "quantity": 100, "unit_price": "10"}],
+            lines=[{"product": self.product, "unit": unit, "quantity": 100, "unit_price": "10",
+                    "allocations": [{"warehouse": self.warehouse, "quantity": 100}]}],
         )
 
     def test_finalized_sale_creates_one_immutable_ownership_entitlement(self):
-        finalize_sale(sale=self.sale)
+        finalize_sale(sale=self.sale, acknowledge_negative=True, temporary_unit_cost="4")
         entitlement = CustomerOwnershipEntitlement.objects.get()
         self.assertEqual(entitlement.quantity, 100)
         self.assertEqual(entitlement.customer, self.customer)
@@ -62,7 +65,7 @@ class CustomerCustodyTests(TestCase):
         self.assertEqual(CustomerOwnershipEntitlement.objects.count(), 0)
 
     def test_partial_multi_warehouse_custody_and_release(self):
-        finalize_sale(sale=self.sale)
+        finalize_sale(sale=self.sale, acknowledge_negative=True, temporary_unit_cost="4")
         entitlement = CustomerOwnershipEntitlement.objects.get()
         second = create_warehouse(name="Custody Warehouse 2")
         place_customer_custody(
@@ -83,7 +86,7 @@ class CustomerCustodyTests(TestCase):
         self.assertEqual(custody_balance(entitlement=entitlement, warehouse=second), 40)
 
     def test_custody_cannot_exceed_owned_quantity(self):
-        finalize_sale(sale=self.sale)
+        finalize_sale(sale=self.sale, acknowledge_negative=True, temporary_unit_cost="4")
         entitlement = CustomerOwnershipEntitlement.objects.get()
         place_customer_custody(
             entitlement=entitlement, warehouse=self.warehouse, quantity=100,
@@ -96,7 +99,7 @@ class CustomerCustodyTests(TestCase):
             )
 
     def test_release_cannot_exceed_warehouse_custody(self):
-        finalize_sale(sale=self.sale)
+        finalize_sale(sale=self.sale, acknowledge_negative=True, temporary_unit_cost="4")
         entitlement = CustomerOwnershipEntitlement.objects.get()
         place_customer_custody(
             entitlement=entitlement, warehouse=self.warehouse, quantity=40,
@@ -109,7 +112,7 @@ class CustomerCustodyTests(TestCase):
             )
 
     def test_release_is_immutable_and_idempotent(self):
-        finalize_sale(sale=self.sale)
+        finalize_sale(sale=self.sale, acknowledge_negative=True, temporary_unit_cost="4")
         entitlement = CustomerOwnershipEntitlement.objects.get()
         place_customer_custody(
             entitlement=entitlement, warehouse=self.warehouse, quantity=20,

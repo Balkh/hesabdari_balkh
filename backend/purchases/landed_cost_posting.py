@@ -774,11 +774,18 @@ def post_landed_cost(*, cost_document, user=None):
             continue
         for resolved in NegativeCOGSReceiptAllocation.objects.filter(
             receipt_movement=source
-        ).select_related("obligation", "obligation__movement", "obligation__warehouse").order_by("id"):
+        ).select_related("obligation", "obligation__movement", "obligation__warehouse", "obligation__sale_allocation").order_by("id"):
             obligation = resolved.obligation
-            if not JournalEntry.objects.filter(
+            _has_original_cogs = JournalEntry.objects.filter(
                 source_type="SALES_COGS", source_id=obligation.movement.reference
-            ).exists():
+            ).exists() or (
+                obligation.sale_allocation_id is not None
+                and obligation.sale_allocation.cogs_journal_id is not None
+            ) or JournalEntry.objects.filter(
+                source_type="SALES_COGS",
+                source_id__startswith=f"{obligation.movement.reference}:LINE:",
+            ).exists()
+            if not _has_original_cogs:
                 raise LandedCostPostingError(
                     f"Negative-COGS obligation {obligation.pk} has no original posted COGS journal."
                 )
@@ -814,9 +821,16 @@ def post_landed_cost(*, cost_document, user=None):
             if movement.movement_type == MovementType.SALES_ISSUE:
                 if not Account.objects.filter(code=COGS_ACCOUNT, is_active=True, is_posting=True).exists():
                     raise LandedCostPostingError("COGS account 5100 is unavailable.")
-                if not JournalEntry.objects.filter(
-                    source_type="SALES_COGS", source_id=movement.reference
-                ).exists():
+                if not (
+                    JournalEntry.objects.filter(
+                        source_type="SALES_COGS", source_id=movement.reference
+                    ).exists()
+                    or JournalEntry.objects.filter(
+                        source_type="SALES_COGS",
+                        source_id__startswith=f"{movement.reference}:LINE:",
+                    ).exists()
+                    or getattr(movement, "sale_line_allocation", None) is not None
+                ):
                     raise LandedCostPostingError(
                         f"Sales issue {movement.reference} has no matching posted COGS journal."
                     )

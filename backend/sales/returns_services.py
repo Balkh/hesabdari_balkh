@@ -33,7 +33,7 @@ from security.models import AuditAction
 from security.services import record_audit_event
 
 from .models import (
-    CrossCurrencyRefund, CrossCurrencyRefundStatus, SalesReturnReversal,
+    CrossCurrencyRefund, CrossCurrencyRefundStatus, SaleLineWarehouseAllocation, SalesReturnReversal,
     PaymentMode, Refund, RefundStatus, TransitSaleAllocation, WarehouseCheck,
     SaleStatus, SalesReturn, SalesReturnStatus,
 )
@@ -324,15 +324,27 @@ def create_sales_return(*, sale_line, warehouse, quantity, return_date,
         else:
             # Ordinary stock sales remain tied to the original SALES_ISSUE
             # movement; never manufacture a source movement for Transit.
+            # Resolve candidate source-issue ids without locking joins:
+            # PostgreSQL rejects SELECT ... FOR UPDATE with DISTINCT.
+            alloc_ids = SaleLineWarehouseAllocation.objects.filter(
+                sale_line=line, warehouse=warehouse,
+                stock_movement__isnull=False,
+            ).values_list("stock_movement_id", flat=True)
+            legacy_ids = StockMovement.objects.filter(
+                movement_type=MovementType.SALES_ISSUE,
+                warehouse_checks__sale_line=line,
+                warehouse_checks__status="FINALIZED",
+                warehouse_checks__reversal__isnull=True,
+            ).values_list("pk", flat=True)
+            source_ids = sorted(set(alloc_ids) | set(legacy_ids))
             source_rows = list(
                 StockMovement.objects.select_for_update().filter(
+                    pk__in=source_ids,
                     movement_type=MovementType.SALES_ISSUE,
                     product=line.product,
                     source_party=sale.customer,
                     warehouse=warehouse,
-                    warehouse_checks__sale_line=line,
-                    warehouse_checks__status="FINALIZED",
-                ).exclude(warehouse_checks__reversal__isnull=False).order_by("id")
+                ).order_by("id")
             )
             source = None
             for candidate in source_rows:
