@@ -9,7 +9,7 @@
 PR #38 records immutable transit-loss evidence but downstream flows need a purchase-wide replay to revalue surviving units, so a confirmed loss can be finalized without leaving the lost units' cost in account 1430.
 
 ## Accounting / quantity invariants
-- `G = N − L` per purchase line/lot; never blended across purchases.
+- `G = N − R − L` per purchase line/lot: original quantity minus posted supplier returns (R) and confirmed final loss (L); never blended across purchases.
 - Final unit (AFN) = (invoice base AFN pool + posted landed AFN pool) / G, 4dp HALF_UP; journals at 2dp — existing money contract.
 - Lost units' AFN cost leaves 1430 and is allocated to surviving units' destinations: warehouse stock (AVCO replay), COGS 5100, transfers, and supported returns; visible `ROUNDING_RESIDUAL` is bounded by a precision-derived tolerance and reconciled against actual journal lines.
 - No new accounts or fabricated landed-cost document: journals anchor to immutable `TransitLossValuationAdjustment` rows linked to the loss event.
@@ -32,14 +32,14 @@ PR #38 records immutable transit-loss evidence but downstream flows need a purch
 - The integration commit above was created after that run. CI must be checked again on the final head after this documentation refresh; do not infer success from the earlier run.
 
 ## Known limitations (fail closed)
-- Direct transit purchase returns on the lot block loss valuation pending a separate supplier-claim contract.
+- Direct transit supplier returns reduce the base purchase pool at original invoice unit cost; incurred direct costs remain capitalized and are allocated over surviving good quantity. Regression coverage combines return + freight + final loss.
 - Loss of already transit-sold (customer-owned) units is outside the current rule `L == remaining company-owned quantity`.
 - No reversal flow for a posted loss valuation yet.
 
 ## Owner / accountant review checklist
 - [ ] Confirm loss cost is capitalized over good units (no separate loss-expense account).
 - [ ] Confirm bounded residual treatment and destination accounting at 4dp/2dp rounding.
-- [ ] Confirm fail-closed stance on transit purchase returns and the no-reversal limitation.
+- [x] Owner clarified transit-return + final-loss treatment on 2026-10-24; regression added. No-reversal limitation remains.
 - [ ] Review exact-head CI (Backend, PostgreSQL, Frontend, Tauri) on the final commit.
 - [ ] Decide disposition of PR #38, PR #19 (possibly superseded), and PR #36 (Draft Sales API).
 
