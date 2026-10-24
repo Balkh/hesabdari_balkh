@@ -105,3 +105,40 @@ class TransitLossConcurrentPostingTests(TransactionTestCase):
             thread.join(timeout=60)
         self.assertEqual(sorted(kind for kind, _ in results), ["error", "ok"])
         self.assertEqual(TransitLossEvent.objects.count(), 1)
+
+    def test_concurrent_duplicate_reversal_posts_once(self):
+        from purchases.landed_cost_posting import reverse_transit_loss_valuation
+        from .models import TransitLossValuationReversal
+
+        results = []
+        loss_results = []
+        loss_thread = threading.Thread(
+            target=self._attempt("lvconc-rev-loss", loss_results))
+        loss_thread.start()
+        loss_thread.join(timeout=60)
+        self.assertEqual(loss_results[0][0], "ok", loss_results)
+        event_id = loss_results[0][1]
+
+        def attempt(key):
+            def run():
+                close_old_connections()
+                try:
+                    reversal = reverse_transit_loss_valuation(
+                        loss_event=event_id, reversal_date=date(2026, 2, 5),
+                        reason="Concurrent correction", user=self.user,
+                        idempotency_key=key,
+                    )
+                    results.append(("ok", reversal.pk))
+                except Exception as exc:  # noqa: BLE001
+                    results.append(("error", type(exc).__name__))
+                finally:
+                    close_old_connections()
+            return run
+
+        threads = [threading.Thread(target=attempt("lvconc-reversal"))
+                   for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=60)
+        self.assertEqual(sorted(kind for kind, _ in results), ["ok", "ok"])

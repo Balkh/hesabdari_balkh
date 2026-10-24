@@ -180,6 +180,7 @@ class TransitPurchaseCompletion(models.Model):
 class TransitLossValuationStatus(models.TextChoices):
     PENDING = "PENDING", "Pending purchase-wide valuation replay"
     POSTED = "POSTED", "Valuation replay posted"
+    REVERSED = "REVERSED", "Valuation reversed by governed correction"
 
 
 class TransitLossEventQuerySet(models.QuerySet):
@@ -239,6 +240,7 @@ class TransitLossEvent(models.Model):
         max_digits=20, decimal_places=2, default=Decimal("0.00")
     )
     valuation_posted_at = models.DateTimeField(null=True, blank=True)
+    valuation_reversed_at = models.DateTimeField(null=True, blank=True)
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL, null=True, blank=True,
         on_delete=models.SET_NULL, related_name="transit_loss_events_created",
@@ -262,7 +264,7 @@ class TransitLossEvent(models.Model):
                 condition=(
                     models.Q(valuation_status="PENDING")
                     | (
-                        models.Q(valuation_status="POSTED")
+                        models.Q(valuation_status__in=["POSTED", "REVERSED"])
                         & models.Q(good_quantity__isnull=False)
                         & models.Q(final_unit_cost_afn__isnull=False)
                         & models.Q(valuation_posted_at__isnull=False)
@@ -272,7 +274,7 @@ class TransitLossEvent(models.Model):
             ),
             models.CheckConstraint(
                 condition=(
-                    models.Q(valuation_status="POSTED")
+                    models.Q(valuation_status__in=["POSTED", "REVERSED"])
                     | models.Q(valuation_posted_at__isnull=True)
                 ),
                 name="transit_loss_pending_not_timestamped",
@@ -299,9 +301,36 @@ class TransitLossEvent(models.Model):
         "landed_pool_afn_at_valuation", "valuation_posted_at",
     })
 
+    # Fields of the governed correction transition (POSTED -> REVERSED).
+    REVERSAL_UPDATE_FIELDS = frozenset({
+        "valuation_status", "valuation_reversed_at",
+    })
+
     def save(self, *args, **kwargs):
         if self.pk is not None:
             update_fields = set(kwargs.get("update_fields") or ())
+            if update_fields and update_fields == self.REVERSAL_UPDATE_FIELDS:
+                if not getattr(self, "_valuation_reversal_authorized", False):
+                    raise PostedImmutabilityError(
+                        "Transit loss valuation may only be reversed by the "
+                        "authorized correction service"
+                    )
+                if self.valuation_status != TransitLossValuationStatus.REVERSED:
+                    raise PostedImmutabilityError(
+                        "Transit loss reversal transition must target REVERSED"
+                    )
+                if self.valuation_reversed_at is None:
+                    raise ValidationError(
+                        "Transit loss reversal requires a reversal timestamp."
+                    )
+                current = type(self).objects.filter(pk=self.pk).values_list(
+                    "valuation_status", flat=True
+                ).first()
+                if current != TransitLossValuationStatus.POSTED:
+                    raise PostedImmutabilityError(
+                        "Only a posted transit loss valuation can be reversed"
+                    )
+                return super().save(*args, **kwargs)
             if update_fields and update_fields <= self.VALUATION_UPDATE_FIELDS:
                 # The ONLY legal post-creation write is the complete,
                 # service-authorized PENDING -> POSTED valuation transition.
@@ -373,7 +402,9 @@ class TransitLossEvent(models.Model):
             if self.loss_date < lot.ownership_date:
                 raise ValidationError("Transit loss date cannot precede company ownership.")
             already_reported = sum(
-                type(self).objects.filter(lot_id=lot.pk).values_list("quantity", flat=True)
+                type(self).objects.filter(lot_id=lot.pk).exclude(
+                    valuation_status=TransitLossValuationStatus.REVERSED
+                ).values_list("quantity", flat=True)
             )
             from purchases.models import PurchaseReturn
             returned_quantity = sum(PurchaseReturn.objects.filter(
@@ -488,7 +519,105 @@ class TransitLossValuationAdjustment(models.Model):
 def has_unvalued_transit_loss(lot_id):
     """True while a lot carries a loss whose valuation replay is not posted."""
     return TransitLossEvent.objects.filter(
-        lot_id=lot_id,
-    ).exclude(
-        valuation_status=TransitLossValuationStatus.POSTED,
+        lot_id=lot_id, valuation_status=TransitLossValuationStatus.PENDING,
     ).exists()
+
+
+class TransitLossValuationReversalQuerySet(models.QuerySet):
+    def update(self, **kwargs):
+        raise PostedImmutabilityError("Transit loss valuation reversals are immutable")
+
+    def bulk_update(self, objs, fields, batch_size=None):
+        raise PostedImmutabilityError("Transit loss valuation reversals are immutable")
+
+    def bulk_create(self, objs, **kwargs):
+        raise PostedImmutabilityError(
+            "Create transit loss valuation reversals only through the correction service"
+        )
+
+    def delete(self):
+        raise PostedImmutabilityError("Transit loss valuation reversals cannot be deleted")
+
+
+class TransitLossValuationReversal(models.Model):
+    """Governed correction of a posted transit-loss valuation.
+
+    Mirrors the approved LandedCostReversal pattern: the original loss
+    event, its snapshot and every original adjustment journal remain
+    immutable; the correction posts compensating mirror journals, restores
+    the lot's pre-loss transit state, and marks the event REVERSED so a
+    corrected loss may be recorded under the same completion evidence.
+    """
+
+    loss_event = models.OneToOneField(
+        TransitLossEvent, on_delete=models.PROTECT,
+        related_name="valuation_reversal",
+    )
+    reversal_date = models.DateField()
+    reason = models.CharField(max_length=500)
+    idempotency_key = models.CharField(max_length=128, unique=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True,
+        on_delete=models.SET_NULL,
+        related_name="transit_loss_valuation_reversals_created",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    objects = TransitLossValuationReversalQuerySet.as_manager()
+
+    class Meta:
+        ordering = ["reversal_date", "id"]
+
+    def save(self, *args, **kwargs):
+        if self.pk is not None:
+            raise PostedImmutabilityError("Transit loss valuation reversals are immutable")
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise PostedImmutabilityError("Transit loss valuation reversals cannot be deleted")
+
+
+class TransitLossValuationReversalAdjustment(models.Model):
+    """Immutable link from an original loss adjustment to its compensation."""
+
+    reversal = models.ForeignKey(
+        TransitLossValuationReversal, on_delete=models.PROTECT,
+        related_name="reversal_adjustments",
+    )
+    original_adjustment = models.OneToOneField(
+        TransitLossValuationAdjustment, on_delete=models.PROTECT,
+        related_name="valuation_reversal_adjustment",
+    )
+    journal_entry = models.OneToOneField(
+        "accounting.JournalEntry", on_delete=models.PROTECT,
+        related_name="transit_loss_valuation_reversal_adjustment",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    objects = TransitLossValuationReversalQuerySet.as_manager()
+
+    class Meta:
+        ordering = ["reversal_id", "id"]
+
+    def save(self, *args, **kwargs):
+        if self.pk is not None:
+            raise PostedImmutabilityError(
+                "Transit loss valuation reversal adjustments are immutable"
+            )
+        entry = self.journal_entry
+        if entry is None or entry.source_type != "TRANSIT_LOSS_VALUATION_REVERSAL":
+            raise ValidationError(
+                "Transit loss reversal adjustment requires its compensating journal."
+            )
+        if not entry.source_id.startswith(
+            f"TRANSIT-LOSS:{self.original_adjustment.loss_event_id}:REVERSAL:"
+        ):
+            raise ValidationError(
+                "Transit loss reversal journal is not linked to the original loss event."
+            )
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise PostedImmutabilityError(
+            "Transit loss valuation reversal adjustments cannot be deleted"
+        )

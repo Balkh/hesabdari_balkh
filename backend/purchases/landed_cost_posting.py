@@ -116,7 +116,9 @@ def _posted_prior_allocations(line_ids):
 
 def _loss_event_for_lot(lot):
     from goods_in_transit.models import TransitLossEvent
-    return TransitLossEvent.objects.filter(lot=lot).order_by("id").first()
+    return TransitLossEvent.objects.filter(lot=lot).exclude(
+        valuation_status="REVERSED"
+    ).order_by("id").first()
 
 
 def _good_quantity_for_line(line, *, lot=None):
@@ -1624,3 +1626,207 @@ def post_transit_loss_valuation(*, loss_event, user=None):
         reason=event.reason,
     )
     return event
+
+
+@transaction.atomic
+def reverse_transit_loss_valuation(*, loss_event, reversal_date, reason,
+                                   user=None, idempotency_key=None):
+    """Governed correction of a posted transit-loss valuation (Phase 11 A.4).
+
+    Mirrors the approved landed-cost reversal pattern: original event,
+    snapshot and adjustment journals stay immutable; compensating mirror
+    journals are posted on the reversal date, the lot's pre-loss transit
+    quantity/status is restored, and the event becomes REVERSED so a
+    corrected loss can be recorded under the same completion evidence.
+
+    Fail-closed: any later stock movement or landed-cost posting that
+    may have consumed the loss layer blocks the correction, because
+    revaluing those later events needs a separate chronology replay.
+    """
+    from datetime import date as _date
+
+    from django.utils import timezone as _tz
+
+    from goods_in_transit.models import (
+        GoodsInTransitLot, TransitLossEvent, TransitLossValuationReversal,
+        TransitLossValuationReversalAdjustment, TransitLotStatus,
+        TransitLossValuationStatus, TransitReceipt,
+    )
+    from sales.models import TransitSaleAllocation
+
+    event_id = getattr(loss_event, "pk", loss_event)
+    if user is not None and not getattr(user, "is_authenticated", False):
+        raise LandedCostPostingError("Authenticated user required.")
+    if not isinstance(reversal_date, _date):
+        raise LandedCostPostingError("A valid reversal date is required.")
+    if not isinstance(reason, str) or not reason.strip():
+        raise LandedCostPostingError("A reversal reason is required.")
+    reason = reason.strip()
+    if len(reason) > 500:
+        raise LandedCostPostingError("Reversal reason must be at most 500 characters.")
+    if not isinstance(idempotency_key, str) or not idempotency_key.strip():
+        raise LandedCostPostingError("A valid idempotency key is required.")
+    idempotency_key = idempotency_key.strip()
+    if len(idempotency_key) > 128:
+        raise LandedCostPostingError("Idempotency key must be at most 128 characters.")
+
+    existing_key = TransitLossValuationReversal.objects.filter(
+        idempotency_key=idempotency_key
+    ).first()
+    if existing_key is not None:
+        if (
+            existing_key.loss_event_id == event_id
+            and existing_key.reversal_date == reversal_date
+            and existing_key.reason == reason
+        ):
+            return existing_key
+        raise LandedCostPostingError(
+            "Idempotency key was already used for a different reversal."
+        )
+
+    event = TransitLossEvent.objects.select_for_update().get(pk=event_id)
+    actor = user or event.created_by
+    # Re-check under the row lock: a concurrent duplicate may have
+    # committed its reversal while this call waited for the lock.
+    existing_key = TransitLossValuationReversal.objects.filter(
+        idempotency_key=idempotency_key
+    ).first()
+    if existing_key is not None:
+        if (
+            existing_key.loss_event_id == event.pk
+            and existing_key.reversal_date == reversal_date
+            and existing_key.reason == reason
+        ):
+            return existing_key
+        raise LandedCostPostingError(
+            "Idempotency key was already used for a different reversal."
+        )
+    if TransitLossValuationReversal.objects.filter(loss_event=event).exists():
+        raise LandedCostPostingError(
+            "This transit loss valuation has already been reversed."
+        )
+    if event.valuation_status == TransitLossValuationStatus.REVERSED:
+        raise LandedCostPostingError(
+            "This transit loss valuation has already been reversed."
+        )
+    if event.valuation_status != TransitLossValuationStatus.POSTED:
+        raise LandedCostPostingError(
+            "Only a posted transit loss valuation can be reversed."
+        )
+    if reversal_date < event.loss_date:
+        raise LandedCostPostingError(
+            "Reversal date cannot precede the transit loss date."
+        )
+    assert_posting_date_open(reversal_date)
+
+    lot = GoodsInTransitLot.objects.select_for_update().get(pk=event.lot_id)
+    line = lot.purchase_line
+    # Serialize against landed-cost posting / AVCO consumers of this layer.
+    product_model = type(line.product)
+    list(product_model.objects.select_for_update().filter(
+        pk=line.product_id
+    ).order_by("pk").values_list("pk", flat=True))
+
+    if event.valuation_posted_at is None:
+        raise LandedCostPostingError(
+            "Posted transit loss valuation has no posting timestamp."
+        )
+    if StockMovement.objects.filter(
+        product_id=line.product_id, created_at__gt=event.valuation_posted_at,
+    ).exists():
+        raise LandedCostPostingError(
+            "Cannot reverse this transit loss valuation after a later stock "
+            "movement; that movement may have consumed its AVCO layer."
+        )
+    if TransitReceipt.objects.filter(
+        lot=lot, created_at__gt=event.valuation_posted_at,
+    ).exists():
+        raise LandedCostPostingError(
+            "Cannot reverse this transit loss valuation after a later Transit receipt."
+        )
+    if TransitSaleAllocation.objects.filter(
+        transit_lot=lot, created_at__gt=event.valuation_posted_at,
+    ).exists():
+        raise LandedCostPostingError(
+            "Cannot reverse this transit loss valuation after a later Transit sale."
+        )
+    if LandedCostDocument.objects.filter(
+        status=LandedCostStatus.POSTED,
+        posted_at__gt=event.valuation_posted_at,
+        allocations__purchase_line_id=line.pk,
+        reversal__isnull=True,
+    ).exists():
+        raise LandedCostPostingError(
+            "Cannot reverse this transit loss valuation after a later "
+            "landed-cost posting used its good-quantity denominator."
+        )
+
+    adjustments = list(
+        event.valuation_adjustments.select_related("journal_entry").order_by("id")
+    )
+    reversal = TransitLossValuationReversal.objects.create(
+        loss_event=event, reversal_date=reversal_date, reason=reason,
+        idempotency_key=idempotency_key, created_by=actor,
+    )
+    base = _base_currency()
+    for adjustment in adjustments:
+        original = adjustment.journal_entry
+        mirror_lines = []
+        for original_line in original.lines.all().order_by("id"):
+            swapped = {
+                "account": original_line.account,
+                "reference": original_line.reference,
+                "description": f"Reversal of transit loss valuation: {reason}",
+            }
+            if original_line.debit:
+                swapped["credit"] = original_line.debit
+            else:
+                swapped["debit"] = original_line.credit
+            mirror_lines.append(swapped)
+        entry = post_journal(
+            number=next_document_number("JE", _jalali_year(reversal_date)),
+            posting_date=reversal_date,
+            description=(
+                f"Reversal of transit loss valuation lot {lot.pk}: {reason}"
+            ),
+            lines=mirror_lines,
+            source_type="TRANSIT_LOSS_VALUATION_REVERSAL",
+            source_id=f"TRANSIT-LOSS:{event.pk}:REVERSAL:{adjustment.pk}",
+            currency=base, rate=Decimal("1.0000"), rate_date=reversal_date,
+            created_by=actor,
+            idempotency_key=(
+                f"transit-loss-reversal:{reversal.pk}:adjustment:{adjustment.pk}"
+            ),
+        )
+        TransitLossValuationReversalAdjustment.objects.create(
+            reversal=reversal, original_adjustment=adjustment,
+            journal_entry=entry,
+        )
+
+    # Restore the pre-loss transit state: the loss had consumed exactly
+    # the lot's remaining quantity and closed it.
+    lot.remaining_quantity = lot.remaining_quantity + event.quantity
+    lot.status = TransitLotStatus.OPEN
+    lot.save(
+        allow_state_transition=True,
+        update_fields={"remaining_quantity", "status"},
+    )
+
+    event.valuation_status = TransitLossValuationStatus.REVERSED
+    event.valuation_reversed_at = _tz.now()
+    event._valuation_reversal_authorized = True
+    event.save(update_fields=["valuation_status", "valuation_reversed_at"])
+
+    record_audit_event(
+        user=actor, action=AuditAction.REVERSE, entity="TransitLossEvent",
+        entity_id=event.pk, reference=lot.purchase.document_number,
+        previous_state={"valuation_status": TransitLossValuationStatus.POSTED},
+        new_state={
+            "valuation_status": TransitLossValuationStatus.REVERSED,
+            "reversal_id": reversal.pk,
+            "reversal_date": reversal_date.isoformat(),
+            "restored_remaining_quantity": lot.remaining_quantity,
+        },
+        reason=reason,
+    )
+    return reversal

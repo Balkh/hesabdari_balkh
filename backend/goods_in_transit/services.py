@@ -452,7 +452,7 @@ def record_transit_loss(*, lot, quantity, loss_date, reason, idempotency_key, us
     # A genuine retry of an already-recorded event is safe even if the fiscal
     # period has since closed; only a new posting must pass the open-period gate.
     assert_posting_date_open(loss_date)
-    reported = sum(TransitLossEvent.objects.filter(lot=locked_lot).values_list("quantity", flat=True))
+    reported = sum(TransitLossEvent.objects.filter(lot=locked_lot).exclude(valuation_status="REVERSED").values_list("quantity", flat=True))
     from purchases.models import PurchaseReturn
     returned_quantity = sum(PurchaseReturn.objects.filter(
         transit_lot=locked_lot, status="POSTED"
