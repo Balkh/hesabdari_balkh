@@ -499,13 +499,24 @@ class TransitLossMasterScenarioTests(TransitLossValuationTests):
         self.assertEqual(self._balance("1410"), Decimal("10000.00"))
 
     def test_direct_transit_purchase_return_and_loss_reconcile_purchase_wide(self):
-        # 100 purchased; 10 returned to supplier; 88 received; 2 lost.
-        # Returned purchase value is removed first, then the remaining
-        # $9,000 base pool is allocated across 88 good units.
+        # 100 purchased; $980 freight; 10 returned; 88 received; 2 lost.
+        # Net base pool $9,000 + freight $980 is allocated across 88 units.
         from purchases.services import post_transit_purchase_return
 
         purchase = self._purchase("PI-LV-TPR")
         lot = self._lot(purchase)
+        line = purchase.lines.get()
+        # Direct freight is posted before the final return/shortage settlement.
+        # It remains capitalized and is reallocated over the 88 surviving units.
+        cost = create_landed_cost_draft(
+            document_number="LC-LV-TPR", payee=self.supplier,
+            cost_date=date(2026, 2, 2), currency=self.afn, amount="980",
+            exchange_rate="1", rate_date=date(2026, 2, 2), category="FREIGHT",
+            purchase_line_ids=[line.pk],
+            allocation_method=LandedCostAllocationMethod.DIRECT,
+            user=self.user, idempotency_key="lvtpr-lc",
+        )
+        post_landed_cost(cost_document=cost, user=self.user)
         post_transit_purchase_return(
             purchase=purchase, transit_lot=lot, quantity=10,
             return_date=date(2026, 2, 2), reason="Defective in transit",
@@ -521,9 +532,9 @@ class TransitLossMasterScenarioTests(TransitLossValuationTests):
         )
         self.assertEqual(event.valuation_status, "POSTED")
         self.assertEqual(event.good_quantity, 88)
-        self.assertEqual(event.final_unit_cost_afn, Decimal("102.2727"))
+        self.assertEqual(event.final_unit_cost_afn, Decimal("113.4091"))
         self.assertEqual(_good_quantity_for_line(purchase.lines.get(), lot=lot), 88)
         self.assertEqual(self._balance("1430"), Decimal("0.00"))
-        self.assertEqual(self._balance("1410"), Decimal("9000.00"))
+        self.assertEqual(self._balance("1410"), Decimal("9980.00"))
         self.assertEqual(stock_for(self.product, self.warehouse), 88)
         self._assert_journals_balanced()
