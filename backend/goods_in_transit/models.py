@@ -336,10 +336,14 @@ class TransitLossEvent(models.Model):
                 lot = GoodsInTransitLot.objects.filter(pk=self.lot_id).values_list(
                     "original_quantity", flat=True
                 ).first()
-                if lot is None or self.good_quantity != lot - self.quantity:
+                from purchases.models import PurchaseReturn
+                returned_quantity = sum(PurchaseReturn.objects.filter(
+                    transit_lot_id=self.lot_id, status="POSTED"
+                ).values_list("quantity", flat=True))
+                if lot is None or self.good_quantity != lot - returned_quantity - self.quantity:
                     raise ValidationError(
                         "Posted transit loss good quantity must equal the lot's "
-                        "original quantity minus the confirmed loss quantity."
+                        "original quantity minus posted supplier returns and confirmed loss."
                     )
                 if self.final_unit_cost_afn is None or self.final_unit_cost_afn < 0:
                     raise ValidationError(
@@ -371,9 +375,13 @@ class TransitLossEvent(models.Model):
             already_reported = sum(
                 type(self).objects.filter(lot_id=lot.pk).values_list("quantity", flat=True)
             )
-            if self.quantity <= 0 or already_reported + self.quantity >= lot.original_quantity:
+            from purchases.models import PurchaseReturn
+            returned_quantity = sum(PurchaseReturn.objects.filter(
+                transit_lot_id=lot.pk, status="POSTED"
+            ).values_list("quantity", flat=True))
+            if self.quantity <= 0 or already_reported + self.quantity + returned_quantity >= lot.original_quantity:
                 raise ValidationError(
-                    "Cumulative transit loss must leave at least one good unit in the purchase line."
+                    "Cumulative transit loss and supplier returns must leave at least one good unit in the purchase line."
                 )
             if already_reported:
                 raise ValidationError(
