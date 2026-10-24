@@ -168,6 +168,11 @@ class AllocationAuditRegressionTests(TestCase):
         with self.assertRaises(PostedImmutabilityError):
             SaleLineWarehouseAllocation.objects.filter(pk=alloc.pk).update(unit_cost_afn="9")
         with self.assertRaises(PostedImmutabilityError):
+            # Partial completion (movement without COGS journal) is not the
+            # approved one-time transition and must be rejected too.
+            SaleLineWarehouseAllocation.objects.filter(pk=alloc.pk).update(
+                stock_movement=alloc.stock_movement)
+        with self.assertRaises(PostedImmutabilityError):
             SaleLineWarehouseAllocation.objects.filter(pk=alloc.pk).delete()
         with self.assertRaises(PostedImmutabilityError):
             alloc.save()
@@ -202,6 +207,19 @@ class AllocationAuditRegressionTests(TestCase):
                 NegativeCOGSObligation.objects.create(
                     movement=obligation.movement, product=self.product,
                     warehouse=self.wh_a, original_quantity=1,
+                    temporary_unit_cost_afn="3", movement_date=self.day,
+                )
+        # Both sources set is equally invalid.
+        sale.refresh_from_db()
+        check = prepare_warehouse_check(sale_line=sale.lines.get(), warehouse=self.wh_a, quantity=1, number="WC-AUDIT-XOR")
+        extra_movement = receive_stock(product=self.product, warehouse=self.wh_a, quantity=1, unit_cost="4",
+                                       currency=self.afn, movement_date=self.day, reference="AUDIT-XOR-MV")
+        with self.assertRaises(IntegrityError):
+            with db_transaction.atomic():
+                NegativeCOGSObligation.objects.create(
+                    movement=extra_movement, warehouse_check=check,
+                    sale_allocation=obligation.sale_allocation,
+                    product=self.product, warehouse=self.wh_a, original_quantity=1,
                     temporary_unit_cost_afn="3", movement_date=self.day,
                 )
 
@@ -297,3 +315,65 @@ class ConcurrentFinalizationTests(TransactionTestCase):
         self.assertEqual(JournalEntry.objects.filter(source_type="SALES_COGS").count(), 1)
         self.assertEqual(StockMovement.objects.filter(movement_type="SALES_ISSUE").count(), 1)
         self.assertEqual(stock_for(self.product, self.warehouse), 5)
+
+
+class ConcurrentReturnTests(TransactionTestCase):
+    """PostgreSQL: concurrent returns cannot over-return one source issue."""
+
+    def setUp(self):
+        self.afn = Currency.objects.create(code="AFN", name="Afghani", is_base=True)
+        seed_chart_of_accounts()
+        category = create_category(name="ConcRet Category")
+        self.unit = create_uom(name="ConcRet Unit")
+        self.product = create_product(code="RET-CONC", name="ConcRet Product", name_fa="برگشت همزمان", category=category, primary_uom=self.unit)
+        self.customer = create_party(name="ConcRet Customer", is_customer=True)
+        self.warehouse = create_warehouse(name="ConcRet Warehouse")
+        assign_warehouse_account(warehouse=self.warehouse, account="1410")
+        self.day = date(2026, 2, 4)
+        receive_stock(product=self.product, warehouse=self.warehouse, quantity=10, unit_cost="4",
+                      currency=self.afn, movement_date=self.day, reference="RET-CONC-RCPT")
+        sale = create_sale(
+            customer=self.customer, sale_date=self.day, currency=self.afn,
+            channel=SalesChannel.WHOLESALE, payment_mode=PaymentMode.CREDIT,
+            document_number="SI-RET-CONC",
+            lines=[{"product": self.product, "unit": self.unit, "quantity": 5, "unit_price": "10",
+                    "allocations": [{"warehouse": self.warehouse, "quantity": 5}]}],
+        )
+        finalize_sale(sale=sale)
+        self.line = sale.lines.get()
+        check = prepare_warehouse_check(sale_line=self.line, warehouse=self.warehouse, quantity=5, number="WC-RET-CONC")
+        finalize_warehouse_check(check=check)
+
+    def test_concurrent_returns_cannot_over_return(self):
+        if connection.vendor != "postgresql":
+            self.skipTest("Requires PostgreSQL row-level locking semantics")
+        from .returns_services import create_sales_return
+        from .returns_models import SalesReturn
+        outcomes = []
+        barrier = threading.Barrier(3)
+
+        def worker(index):
+            close_old_connections()
+            try:
+                barrier.wait(timeout=5)
+                create_sales_return(
+                    sale_line=self.line.pk, warehouse=self.warehouse, quantity=4,
+                    return_date=self.day, reason=f"Concurrent return {index}",
+                    document_number=f"SR-CONC-{index}", idempotency_key=f"ret-conc-{index}",
+                )
+                outcomes.append((index, "ok"))
+            except Exception as exc:  # noqa: BLE001
+                outcomes.append((index, "error", type(exc).__name__))
+            finally:
+                close_old_connections()
+
+        workers = [threading.Thread(target=worker, args=(i,)) for i in (1, 2)]
+        for w in workers:
+            w.start()
+        barrier.wait(timeout=5)
+        for w in workers:
+            w.join(timeout=20)
+            self.assertFalse(w.is_alive())
+        self.assertEqual(len([o for o in outcomes if o[1] == "ok"]), 1, outcomes)
+        self.assertEqual(SalesReturn.objects.filter(status="POSTED").count(), 1)
+        self.assertEqual(stock_for(self.product, self.warehouse), 9)

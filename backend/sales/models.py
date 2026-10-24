@@ -268,8 +268,15 @@ class SaleLineWarehouseAllocationQuerySet(models.QuerySet):
     """
 
     def update(self, **kwargs):
-        if not set(kwargs) <= _ALLOCATION_COMPLETION_FIELDS:
-            raise PostedImmutabilityError("SaleLine warehouse allocations are immutable")
+        # The sole legitimate queryset write is finalize_sale's atomic
+        # completion: all four completion fields together, exactly once.
+        # A partial update (e.g. attaching a movement without its COGS
+        # journal) could corrupt the stock/journal linkage and is rejected.
+        if set(kwargs) != _ALLOCATION_COMPLETION_FIELDS:
+            raise PostedImmutabilityError(
+                "SaleLine warehouse allocations are immutable; only the "
+                "one-time finalized completion may write allocation results"
+            )
         if self.filter(stock_movement__isnull=False).exists():
             raise PostedImmutabilityError("A completed SaleLine warehouse allocation cannot be changed")
         return super().update(**kwargs)
