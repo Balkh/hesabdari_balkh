@@ -139,20 +139,25 @@ def _good_quantity_for_line(line, *, lot=None):
         raise LandedCostPostingError(
             f"Transit lot {lot.pk} original quantity does not match purchase line {line.pk}."
         )
+    from .models import PurchaseReturn
+    returned_quantity = sum(PurchaseReturn.objects.filter(
+        transit_lot=lot, status="POSTED"
+    ).values_list("quantity", flat=True))
     loss_event = _loss_event_for_lot(lot)
     if loss_event is None:
-        return line.quantity
+        return line.quantity - returned_quantity
     if loss_event.valuation_status != TransitLossValuationStatus.POSTED:
         raise LandedCostPostingError(
             f"Transit purchase line {line.pk} has confirmed loss events without "
             "a posted purchase-wide loss valuation replay; landed-cost posting is blocked."
         )
     good_quantity = loss_event.good_quantity
+    expected_good_quantity = lot.original_quantity - returned_quantity - loss_event.quantity
     if good_quantity is None:
-        good_quantity = lot.original_quantity - loss_event.quantity
-    if good_quantity <= 0 or good_quantity != lot.original_quantity - loss_event.quantity:
+        good_quantity = expected_good_quantity
+    if good_quantity <= 0 or good_quantity != expected_good_quantity:
         raise LandedCostPostingError(
-            f"Transit lot {lot.pk} has an inconsistent posted loss valuation snapshot."
+            f"Transit lot {lot.pk} has an inconsistent posted loss/return valuation snapshot."
         )
     return good_quantity
 
@@ -1293,21 +1298,19 @@ def post_transit_loss_valuation(*, loss_event, user=None):
         raise LandedCostPostingError(
             f"Transit lot {lot.pk} original quantity does not match purchase line {line.pk}."
         )
-    # A direct transit purchase return removes units from company ownership
-    # through 1430/payable at the old unit; its claim revaluation is a
-    # separate contract. Fail closed rather than misstate the denominator.
-    if PurchaseReturn.objects.filter(
+    # Posted transit supplier returns have already reduced account 1430 and
+    # supplier payable at the purchase-invoice unit price. They are excluded
+    # from the remaining base-cost pool and from the good-quantity denominator;
+    # direct costs already incurred remain capitalized and are spread over
+    # the surviving good units.
+    returned_quantity = sum(PurchaseReturn.objects.filter(
         transit_lot=lot, status="POSTED",
-    ).exists():
-        raise LandedCostPostingError(
-            "Transit purchase returns must be resolved before transit loss "
-            "valuation; loss posting is blocked for this lot."
-        )
-
+    ).values_list("quantity", flat=True))
     original_quantity = lot.original_quantity
-    good_quantity = original_quantity - event.quantity
-    if good_quantity <= 0:
-        raise LandedCostPostingError("Transit loss must leave a positive good quantity.")
+    owned_quantity = original_quantity - returned_quantity
+    good_quantity = owned_quantity - event.quantity
+    if owned_quantity <= 0 or good_quantity <= 0:
+        raise LandedCostPostingError("Transit returns and loss must leave a positive good quantity.")
 
     # Lock the product row to serialize against landed-cost posting (same
     # product-level discipline as post_landed_cost).
@@ -1335,14 +1338,14 @@ def post_transit_loss_valuation(*, loss_event, user=None):
     )
 
     old_base_afn = _q4(Decimal(lot.unit_cost) * Decimal(lot.rate))
-    pool_afn = old_base_afn * Decimal(original_quantity) + landed_pool_afn
+    pool_afn = old_base_afn * Decimal(owned_quantity) + landed_pool_afn
     final_unit_afn = _q4(pool_afn / Decimal(good_quantity))
     old_unit_afn = old_base_afn + (
-        _q4(landed_pool_afn / Decimal(original_quantity)) if landed_pool_afn else Decimal("0")
+        _q4(landed_pool_afn / Decimal(owned_quantity)) if landed_pool_afn else Decimal("0")
     )
     delta_per_unit = _q4(final_unit_afn - old_unit_afn)
 
-    denominator = {line.pk: original_quantity}
+    denominator = {line.pk: owned_quantity}
     baseline_extra = _extra_cost_map(
         valuation_lines, prior, denominator_by_line_id=denominator,
     )
