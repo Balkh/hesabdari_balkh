@@ -18,7 +18,7 @@ from security.services import record_audit_event
 from customer_custody.models import CustomerCustodyEvent, CustomerOwnershipEntitlement, CustodyEventType
 from customer_custody.services import place_customer_custody
 
-from .models import GoodsInTransitLot, TransitCustomerCustody, TransitDestinationTransfer, TransitLotStatus, TransitReceipt
+from .models import GoodsInTransitLot, TransitCustomerCustody, TransitDestinationTransfer, TransitLotStatus, TransitReceipt, TransitLossEvent
 
 
 class TransitValidationError(ValueError):
@@ -109,6 +109,11 @@ def _receive_transit_legacy(*, lot, quantity, receipt_date, user=None,
                 ).get(pk=lot_id)
                 if lot.status != TransitLotStatus.OPEN:
                     raise TransitValidationError("Transit lot is not open.")
+                if TransitLossEvent.objects.filter(lot=lot).exists():
+                    raise TransitValidationError(
+                        "Transit receipt is blocked because this lot has confirmed loss without "
+                        "a posted purchase-wide loss valuation replay."
+                    )
                 assert_posting_date_open(receipt_date)
                 if quantity > lot.remaining_quantity:
                     raise TransitValidationError("Receipt exceeds remaining Transit quantity.")
@@ -190,6 +195,11 @@ def transfer_transit_destination(*, lot, warehouse, quantity, transfer_date, use
             lot = GoodsInTransitLot.objects.select_for_update().select_related("destination_warehouse").get(pk=lot_id)
             if lot.status != TransitLotStatus.OPEN:
                 raise TransitValidationError("Transit lot is not open.")
+            if TransitLossEvent.objects.filter(lot=lot).exists():
+                raise TransitValidationError(
+                    "Transit transfer is blocked because this lot has confirmed loss without "
+                    "a posted purchase-wide loss valuation replay."
+                )
             if quantity > lot.remaining_quantity:
                 raise TransitValidationError("Transfer exceeds remaining Transit quantity.")
             # A lot has exactly one destination warehouse. Recording a partial
@@ -229,6 +239,11 @@ def _receive_transit_core(*, lot, quantity, receipt_date, user=None, idempotency
             lot = GoodsInTransitLot.objects.select_for_update().select_related("purchase", "product", "currency", "destination_warehouse").get(pk=lot_id)
             if lot.status != TransitLotStatus.OPEN:
                 raise TransitValidationError("Transit lot is not open.")
+            if TransitLossEvent.objects.filter(lot=lot).exists():
+                raise TransitValidationError(
+                    "Transit receipt is blocked because this lot has confirmed loss without "
+                    "a posted purchase-wide loss valuation replay."
+                )
             assert_posting_date_open(receipt_date)
             allocations = list(TransitSaleAllocation.objects.select_related("sale_line__sale__customer").filter(transit_lot=lot).order_by("id"))
             sale_line_ids = [a.sale_line_id for a in allocations]
@@ -330,3 +345,79 @@ def receive_transit(*, lot, quantity, receipt_date, user=None, idempotency_key=N
         if record is not None and (record.response_body or {}).get("receipt_id"):
             return TransitReceipt.objects.get(pk=record.response_body["receipt_id"])
         raise
+
+
+@transaction.atomic
+def record_transit_loss(*, lot, quantity, loss_date, reason, idempotency_key, user=None):
+    """Record validated, immutable evidence for a confirmed transit loss.
+
+    This does not post valuation. Downstream value-changing operations remain
+    blocked until purchase-wide replay and its compensating journals exist.
+    """
+    from .models import TransitLossEvent
+
+    actor = _actor(user)
+    lot_id = getattr(lot, "pk", lot)
+    locked_lot = GoodsInTransitLot.objects.select_for_update().get(pk=lot_id)
+    if not isinstance(idempotency_key, str) or not idempotency_key.strip():
+        raise TransitValidationError("A non-empty idempotency key is required.")
+    idempotency_key = idempotency_key.strip()
+    if not isinstance(reason, str) or not reason.strip():
+        raise TransitValidationError("A reason is required for a confirmed transit loss.")
+    reason = reason.strip()
+    if loss_date is None or loss_date < locked_lot.ownership_date:
+        raise TransitValidationError("Transit loss date cannot precede company ownership.")
+    try:
+        parsed_quantity = int(quantity)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise TransitValidationError("Transit loss quantity must be a positive whole number.") from exc
+    if isinstance(quantity, bool) or str(parsed_quantity) != str(quantity).strip():
+        raise TransitValidationError("Transit loss quantity must be a positive whole number.")
+    quantity = parsed_quantity
+    if quantity <= 0:
+        raise TransitValidationError("Transit loss quantity must be a positive whole number.")
+
+    existing = TransitLossEvent.objects.filter(idempotency_key=idempotency_key).first()
+    if existing is not None:
+        if (existing.lot_id != locked_lot.pk or existing.quantity != quantity
+                or existing.loss_date != loss_date or existing.reason != reason):
+            raise TransitValidationError("Idempotency key was already used for different loss evidence.")
+        return existing
+
+    # A genuine retry of an already-recorded event is safe even if the fiscal
+    # period has since closed; only a new posting must pass the open-period gate.
+    assert_posting_date_open(loss_date)
+    reported = sum(TransitLossEvent.objects.filter(lot=locked_lot).values_list("quantity", flat=True))
+    if reported + quantity >= locked_lot.original_quantity:
+        raise TransitValidationError("Cumulative transit loss must leave at least one good unit in the purchase line.")
+    if reported:
+        raise TransitValidationError("A transit lot can have only one final reconciled loss event.")
+    if quantity != locked_lot.remaining_quantity:
+        raise TransitValidationError(
+            "Transit loss can be recorded only after all other owned goods are accounted for; "
+            "loss quantity must equal the lot's remaining transit quantity."
+        )
+    event = TransitLossEvent.objects.create(
+        lot=locked_lot, quantity=quantity, loss_date=loss_date, reason=reason,
+        idempotency_key=idempotency_key, created_by=actor,
+    )
+    # The confirmed loss consumes the only remaining company-owned Transit
+    # quantity. Historical journals and stock movements remain immutable.
+    locked_lot.remaining_quantity = 0
+    locked_lot.status = TransitLotStatus.CLOSED
+    locked_lot.save(allow_state_transition=True, update_fields={"remaining_quantity", "status"})
+    record_audit_event(
+        user=actor, action=AuditAction.CREATE, entity="TransitLossEvent",
+        entity_id=event.pk, reference=locked_lot.purchase.document_number,
+        previous_state=None,
+        new_state={
+            "lot_id": locked_lot.pk,
+            "purchase_line_id": locked_lot.purchase_line_id,
+            "quantity": quantity,
+            "loss_date": loss_date.isoformat(),
+            "reason": reason,
+            "valuation_status": "PENDING_PURCHASE_WIDE_REPLAY",
+        },
+        reason=reason,
+    )
+    return event

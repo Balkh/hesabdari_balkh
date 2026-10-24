@@ -4,8 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
-    # Phase 11 follow-up PRs may target the approved integration branch.
-    branches: [main, phase/11-landed-cost-weight-allocation]
+    # Include the Phase 11 dependency branch so stacked follow-up PRs receive exact-head CI.
+    branches: [main, phase/11-landed-cost-weight-allocation, phase/11-transit-final-unit-cost]
 
 jobs:
   backend:
