@@ -5,12 +5,16 @@ Pins the security contract introduced alongside main @ 12d78fb:
 1. DRF defaults require an authenticated ERP user.
 2. A view that forgets explicit permission classes is NOT public.
 3. The three core infrastructure endpoints stay intentionally public.
-4. Throttling defaults are configured.
+4. The anonymous throttle rate is enforced at runtime (behavioral), and
+   permission-rejected requests never consume the throttle budget.
 5. Production settings carry transport hardening; non-production
-   profiles do not inherit it (local runs stay untouched).
+   profiles do not inherit it (local runs stay untouched). HSTS
+   includeSubDomains/preload stay disabled until a documented domain
+   architecture exists (see config/settings/production.py).
 """
 import os
 import sys
+from unittest import mock
 
 from django.conf import settings
 from django.contrib.auth import get_user_model
@@ -75,6 +79,56 @@ class ThrottleDefaultTests(SimpleTestCase):
         rates = settings.REST_FRAMEWORK["DEFAULT_THROTTLE_RATES"]
         self.assertEqual(rates["anon"], "60/min")
         self.assertEqual(rates["user"], "600/min")
+
+
+class AnonymousThrottleBehaviorTests(TestCase):
+    """Behavioral proof that the anon throttle is enforced at runtime:
+    with a 2/min anon rate the third anonymous request to a public
+    endpoint is rejected with 429, while permission-rejected requests on
+    protected endpoints never reach the throttle (DRF checks permissions
+    before throttles), so they never consume the anonymous budget.
+
+    The rate is injected on AnonRateThrottle.THROTTLE_RATES because DRF
+    freezes that class attribute at import time (override_settings on
+    REST_FRAMEWORK does not affect it in-process); identification, cache
+    counting and the 429 response are exercised for real. An isolated
+    locmem cache keeps the test deterministic and prevents budget leaks
+    between tests. TestCase (not SimpleTestCase) because the real health
+    probe touches the DB through connection.cursor()."""
+
+    _ISOLATED_CACHE = {
+        "default": {
+            "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+            "LOCATION": "security-throttle-behavior-tests",
+        }
+    }
+
+    _REDUCED_RATES = {"anon": "2/min", "user": "600/min"}
+
+    @override_settings(CACHES=_ISOLATED_CACHE)
+    def test_anonymous_throttle_rate_is_enforced_on_public_endpoint(self):
+        from django.core.cache import cache
+        from rest_framework.throttling import AnonRateThrottle
+
+        cache.clear()
+        client = APIClient()
+        with mock.patch.object(AnonRateThrottle, "THROTTLE_RATES", self._REDUCED_RATES):
+            codes = [client.get("/api/v1/health/").status_code for _ in range(4)]
+        self.assertEqual(codes, [200, 200, 429, 429])
+
+    @override_settings(CACHES=_ISOLATED_CACHE)
+    def test_permission_rejected_requests_do_not_consume_throttle_budget(self):
+        from django.core.cache import cache
+        from rest_framework.throttling import AnonRateThrottle
+
+        cache.clear()
+        client = APIClient()
+        with mock.patch.object(AnonRateThrottle, "THROTTLE_RATES", self._REDUCED_RATES):
+            # Six permission rejections (403) must not consume the anon budget...
+            for _ in range(6):
+                self.assertEqual(client.get("/api/v1/fiscal-periods/").status_code, 403)
+            # ...so the next public request is only the FIRST counted hit (not 429).
+            self.assertEqual(client.get("/api/v1/health/").status_code, 200)
 
 
 class PublicInfrastructureEndpointsTests(TestCase):
@@ -146,8 +200,10 @@ class ProductionSettingsHardeningTests(SimpleTestCase):
         self.assertTrue(flags["SESSION_COOKIE_SECURE"])
         self.assertTrue(flags["CSRF_COOKIE_SECURE"])
         self.assertEqual(flags["SECURE_HSTS_SECONDS"], 31536000)
-        self.assertTrue(flags["SECURE_HSTS_INCLUDE_SUBDOMAINS"])
-        self.assertTrue(flags["SECURE_HSTS_PRELOAD"])
+        # includeSubDomains/preload stay disabled: no documented public
+        # domain or subdomain architecture exists yet (see production.py).
+        self.assertFalse(flags["SECURE_HSTS_INCLUDE_SUBDOMAINS"])
+        self.assertFalse(flags["SECURE_HSTS_PRELOAD"])
         # Fail-fast guards from the pre-existing production contract hold.
         self.assertFalse(flags["DEBUG"])
         self.assertEqual(flags["DB_ENGINE"], "django.db.backends.postgresql")

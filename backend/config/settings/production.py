@@ -36,5 +36,8 @@ SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 SESSION_COOKIE_SECURE = True
 CSRF_COOKIE_SECURE = True
 SECURE_HSTS_SECONDS = 31536000
-SECURE_HSTS_INCLUDE_SUBDOMAINS = True
-SECURE_HSTS_PRELOAD = True
+# HSTS includeSubDomains/preload stay DISABLED: the project has no
+# documented public domain or subdomain architecture yet (ADR-0002 defers
+# networked deployment). Preload is effectively irreversible once a
+# domain is submitted, and includeSubDomains would hard-pin undocumented
+# subdomains. Re-enable only with a documented deployment contract.
