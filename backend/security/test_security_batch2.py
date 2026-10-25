@@ -47,7 +47,11 @@ class RealBasicAuthenticationTests(TestCase):
         response = self._basic_client("incorrect-password").get(
             "/api/v1/security/me/"
         )
-        self.assertIn(response.status_code, (401, 403))
+        # Deterministic 403 (not 401): DEFAULT_AUTHENTICATION_CLASSES lists
+        # SessionAuthentication first and it exposes no authenticate_header,
+        # so DRF cannot emit a WWW-Authenticate challenge and maps the failed
+        # Basic authentication to 403 (rest_framework/views.py:461-464).
+        self.assertEqual(response.status_code, 403)
 
 
 class SessionAuthenticationCsrfTests(TestCase):
@@ -66,6 +70,11 @@ class SessionAuthenticationCsrfTests(TestCase):
         with override_settings(ROOT_URLCONF="security.test_security_batch2"):
             response = client.post("/csrf-probe/", {}, format="json")
         self.assertEqual(response.status_code, 403)
+        # Pin the mechanism: SessionAuthentication's CSRF enforcement (not an
+        # unrelated permission/URL/authentication failure) must produce the
+        # rejection. An anonymous request to the same URL is also 403 but with
+        # a not_authenticated detail, so the status alone is ambiguous.
+        self.assertIn("CSRF Failed", response.content.decode())
 
 
 class ProductionFailFastTests(SimpleTestCase):
