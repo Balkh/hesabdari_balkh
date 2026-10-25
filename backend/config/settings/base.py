@@ -31,11 +31,31 @@ USE_I18N = True
 USE_TZ = True
 STATIC_URL = "static/"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
-REST_FRAMEWORK = {"EXCEPTION_HANDLER": "core.exceptions.api_exception_handler", "DEFAULT_RENDERER_CLASSES": ["rest_framework.renderers.JSONRenderer"]}
+REST_FRAMEWORK = {
+    "EXCEPTION_HANDLER": "core.exceptions.api_exception_handler",
+    "DEFAULT_RENDERER_CLASSES": ["rest_framework.renderers.JSONRenderer"],
+    # Secure by default: every endpoint requires an authenticated ERP user
+    # unless the view explicitly opts out with @permission_classes([AllowAny]).
+    # The only intentional opt-outs are the core infrastructure probes
+    # (health/api-root/missing-resource), see core/views.py.
+    "DEFAULT_PERMISSION_CLASSES": ["security.permissions.IsAuthenticatedForERP"],
+    "DEFAULT_AUTHENTICATION_CLASSES": [
+        "rest_framework.authentication.SessionAuthentication",
+        "rest_framework.authentication.BasicAuthentication",
+    ],
+    # Brute-force / runaway-client guard. DRF checks throttles AFTER
+    # permissions, so rejected anonymous requests never consume the budget.
+    "DEFAULT_THROTTLE_CLASSES": [
+        "rest_framework.throttling.AnonRateThrottle",
+        "rest_framework.throttling.UserRateThrottle",
+    ],
+    "DEFAULT_THROTTLE_RATES": {"anon": "60/min", "user": "600/min"},
+}
 AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},
     {"NAME": "django.contrib.auth.password_validation.MinimumLengthValidator"},
     {"NAME": "django.contrib.auth.password_validation.CommonPasswordValidator"},
+    {"NAME": "django.contrib.auth.password_validation.NumericPasswordValidator"},
 ]
 LOGGING = {"version": 1, "disable_existing_loggers": False, "handlers": {"console": {"class": "logging.StreamHandler"}},
     "loggers": {"core.requests": {"handlers": ["console"], "level": "INFO", "propagate": False}}}
