@@ -4,6 +4,8 @@ from .base import *
 
 if SECRET_KEY == "development-only-insecure-key":
     raise RuntimeError("DJANGO_SECRET_KEY must be set in production")
+if len(SECRET_KEY) < 50:
+    raise RuntimeError("DJANGO_SECRET_KEY must be at least 50 characters in production")
 if DEBUG:
     raise RuntimeError("DJANGO_DEBUG must be false in production")
 if not ALLOWED_HOSTS:
@@ -22,6 +24,10 @@ DATABASES = {
         "PORT": os.environ["POSTGRES_PORT"],
     }
 }
+
+# collectstatic writes into this directory; a production web server or
+# dedicated static-file service must serve its contents.
+STATIC_ROOT = BASE_DIR / "staticfiles"
 
 SECURE_CONTENT_TYPE_NOSNIFF = True
 X_FRAME_OPTIONS = "DENY"
