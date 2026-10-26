@@ -132,8 +132,8 @@ class ProductionNegativePathTests(SimpleTestCase):
     never echoing configured values. Each case runs the real production
     settings module in a subprocess with a fully isolated environment."""
 
-    def _boot_fails_with(self, env, expected_fragment):
-        result = _run_python("import django; django.setup()", env)
+    def _boot_fails_with(self, env, expected_fragment, code="import django; django.setup()"):
+        result = _run_python(code, env)
         self.assertNotEqual(
             result.returncode, 0, f"production settings booted unexpectedly:\n{result.stdout}"
         )
@@ -238,13 +238,23 @@ class ProductionNegativePathTests(SimpleTestCase):
     def test_wsgi_and_asgi_fail_before_serving_on_wildcard_hosts(self):
         # Interaction case: the guard must fire through the real server
         # entrypoints — before `application` exists, i.e. before the
-        # process can serve any request.
+        # process can serve any request. Each subprocess imports the
+        # actual entrypoint module (config.wsgi / config.asgi) via the
+        # same _BOOT_ENTRYPOINT script the positive boot tests use. A
+        # pass here therefore cannot come from a settings-only boot or
+        # an unrelated startup failure: the pinned fragment is produced
+        # only by the production wildcard guard, and the traceback must
+        # show the entrypoint file itself.
         for module in ("config.wsgi", "config.asgi"):
             with self.subTest(module=module):
-                self._boot_fails_with(
+                result = self._boot_fails_with(
                     {**VALID_PRODUCTION_ENV, "DJANGO_ALLOWED_HOSTS": "*"},
                     "DJANGO_ALLOWED_HOSTS must not contain the wildcard",
+                    code=_BOOT_ENTRYPOINT.format(module=module),
                 )
+                # The failure surfaced through the real entrypoint import
+                # chain (config/wsgi.py, config/asgi.py), not before it.
+                self.assertIn(f"{module.replace('.', '/')}.py", result.stderr)
 
 
 class ProductionPositiveBootTests(SimpleTestCase):
