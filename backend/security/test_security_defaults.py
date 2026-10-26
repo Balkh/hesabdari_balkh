@@ -140,7 +140,10 @@ class PublicInfrastructureEndpointsTests(TestCase):
 
 
 PRODUCTION_ENV = {
-    "DJANGO_SECRET_KEY": "production-settings-test-key",
+    # Deterministic, test-only value. The Batch 2 guard requires >= 50
+    # characters for production secrets, so this positive-path fixture
+    # must stay above that minimum (never a real credential).
+    "DJANGO_SECRET_KEY": "unittest-only-production-settings-secret-key-0123456789",
     "DJANGO_DEBUG": "false",
     "DJANGO_ALLOWED_HOSTS": "hesabdari.example",
     "POSTGRES_DB": "erp_afghanistan",
@@ -170,6 +173,16 @@ print(json.dumps(payload))
 
 
 class ProductionSettingsHardeningTests(SimpleTestCase):
+    def test_production_env_fixture_meets_secret_minimum(self):
+        # The Batch 2 guard rejects production secrets shorter than 50
+        # characters, so the positive-path fixture itself must stay a
+        # valid >= 50 char, deterministic, test-only value (this pins the
+        # coupling that regressed CI when the guard was introduced).
+        self.assertGreaterEqual(len(PRODUCTION_ENV["DJANGO_SECRET_KEY"]), 50)
+        self.assertNotEqual(
+            PRODUCTION_ENV["DJANGO_SECRET_KEY"], "development-only-insecure-key"
+        )
+
     def _boot_production_settings(self):
         """Boot the real production settings module in a clean subprocess
         (the same way a production process would) and return its flags.
