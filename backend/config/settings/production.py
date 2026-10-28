@@ -10,6 +10,14 @@ if DEBUG:
     raise RuntimeError("DJANGO_DEBUG must be false in production")
 if not ALLOWED_HOSTS:
     raise RuntimeError("DJANGO_ALLOWED_HOSTS must be set in production")
+if "*" in ALLOWED_HOSTS:
+    # A wildcard host entry accepts any spoofed Host header. Production
+    # must pin explicit hostnames. base.py strips whitespace and drops
+    # empty entries before this check, so a `*` is rejected wherever it
+    # appears as a parsed entry, not merely when the whole input is `*`.
+    raise RuntimeError(
+        "DJANGO_ALLOWED_HOSTS must not contain the wildcard '*' in production"
+    )
 
 # Production never runs on SQLite (ADR-0002: PostgreSQL integration is
 # required before any networked/production deployment). Every connection
