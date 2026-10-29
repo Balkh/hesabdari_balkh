@@ -1203,8 +1203,8 @@ This graph is an implementation dependency proposal, not an implementation actio
 Financial Sales implementation is blocked until the following are approved:
 
 1. `4110` versus `4120` selection rule;
-2. revenue timing for Type A and Type B;
-3. COGS timing;
+2. revenue timing for Type A and Type B — RESOLVED 2026-10-29 by owner decision: revenue is recognized at successful invoice finalization for all supported sale types including FUTURE (full record: `docs/phase-8-invoice-time-cogs-allocation-contract.md`); implementation alignment remains subject to owner review of the resulting diff and test evidence;
+3. COGS timing — RESOLVED (owner-approved at invoice finalization; Decisions A1/B1, 2026-10-24; full record: `docs/phase-8-invoice-time-cogs-allocation-contract.md`);
 4. company inventory reduction timing;
 5. custody valuation and reporting treatment;
 6. Type B authorization/allocation accounting treatment;
