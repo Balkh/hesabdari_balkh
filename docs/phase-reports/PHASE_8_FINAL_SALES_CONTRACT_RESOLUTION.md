@@ -189,7 +189,7 @@ The repository provides the canonical posting path and account masters. Relevant
 | `4200` | Sales Returns | Existing COA contract |
 | `5100` | COGS | Existing COA contract |
 
-The repository demonstrates that `4110` is used by generic revenue and FX-related posting tests, and that `4120` is a valid posting account. It does not establish the Sales business rule that selects one for a particular invoice.
+Historical discovery note: at the time this paragraph was written, repository usage alone had not established the Sales selector. The owner subsequently approved PH8.2-001 on 2026-09-23 and explicitly reaffirmed it on 2026-09-24: `WHOLESALE → 4110`; `RETAIL → 4120`. This later owner decision supersedes the discovery conclusion.
 
 ### 5.4 Inventory
 
@@ -546,22 +546,7 @@ No journal entry is authorized by this table where the repository contract is si
 
 ### 18.1 Revenue accounts
 
-`4110 Wholesale Sales` and `4120 Retail Sales` are both existing posting accounts. Existing tests prove that both can be posted to; they do not prove a Sales document selection rule.
-
-Minimum required decision before financial Sales implementation:
-
-```text
-Which business attribute selects 4110 versus 4120?
-```
-
-A possible proposal is:
-
-```text
-WHOLESALE → 4110
-RETAIL    → 4120
-```
-
-but this remains a proposal until the business approves that the Sale Type is authoritative.
+Historical discovery note (superseded): the approved revenue-account selector is Sales Channel, with `WHOLESALE → 4110` and `RETAIL → 4120` under PH8.2-001, owner-approved 2026-09-23 and explicitly reaffirmed 2026-09-24. This is a resolved contract decision, not a proposal or current blocker.
 
 ### 18.2 Timing
 
@@ -899,7 +884,7 @@ Scope:
 
 Prerequisites:
 
-- PH8-005;
+- PH8-005 — RESOLVED by owner: `WHOLESALE → 4110`; `RETAIL → 4120` (PH8.2-001);
 - PH8-025;
 - PH8-026.
 
