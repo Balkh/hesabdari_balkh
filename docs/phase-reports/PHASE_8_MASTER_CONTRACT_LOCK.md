@@ -532,15 +532,7 @@ No journal is invented by this table.
 
 ### 14.1 Revenue account selection
 
-The repository contains both `4110 Wholesale Sales` and `4120 Retail Sales`. Tests prove valid posting usage, not a Sales selector.
-
-Required unresolved question:
-
-```text
-What approved business attribute selects 4110 versus 4120?
-```
-
-`WHOLESALE → 4110` / `RETAIL → 4120` is only a proposal, not a selected rule.
+Historical discovery note (superseded by the owner's decision on 2026-09-23, explicitly reaffirmed 2026-09-24): the approved Sales Channel selector is `WHOLESALE → 4110` and `RETAIL → 4120` (PH8.2-001). The older unresolved wording in this section records the earlier discovery state and is not the current contract. Do not infer the revenue account from customer identity, quantity, price, or convenience.
 
 ### 14.2 Revenue timing
 
@@ -795,7 +787,7 @@ This is not approval to implement. It is the smallest architecture consistent wi
 | PH8-002 | Custody | Customer-owned actual goods may remain indefinitely | No custody domain | USER DIRECTIVE | RESOLVED business / accounting open | Custody history layer | Accounting treatment |
 | PH8-003 | Sale vs Release | Separate concepts | `issue_stock()` exists; no Release domain | USER DIRECTIVE + REPOSITORY FACT | RESOLVED | Separate authorization and issue | None for separation |
 | PH8-004 | Payment | Separate domain; never ownership trigger | Payments placeholder; Party Ledger exists | USER DIRECTIVE | RESOLVED | No Payment Engine in Sales | Later Payment approval |
-| PH8-005 | 4110 vs 4120 | Approved business selector required | Both accounts exist; no Sales selector | UNRESOLVED DECISION | BLOCKED | Financial posting blocked | Accounting/business owner |
+| PH8-005 | 4110 vs 4120 | Owner-approved selector: WHOLESALE → 4110; RETAIL → 4120 (PH8.2-001, 2026-09-23; explicitly reaffirmed 2026-09-24) | Existing COA and Sales implementation | RESOLVED — OWNER-APPROVED | Select by Sales Channel only | No new decision required |
 | PH8-006 | Partial Release | Event history and cumulative quantity | `SALES_ISSUE` primitive exists | USER DIRECTIVE | RESOLVED | Release events required | None for rule |
 | PH8-007 | Sales Return | Separate future contract | Inventory return primitives only | UNRESOLVED DECISION | OUT OF SCOPE | Defer Return | Later approval |
 | PH8-008 | Phase 7 baseline | Must be reproducible | Working tree has `purchases`; HEAD does not | REPOSITORY FACT | BLOCKED | No clean implementation baseline | Owner/maintainer |
@@ -997,7 +989,7 @@ If financial posting is included in Stage 8.1, the unresolved accounting blocker
 
 ### Accounting blockers
 
-1. `4110` versus `4120` selector;
+1. `4110` versus `4120` selector — RESOLVED by owner: WHOLESALE → 4110; RETAIL → 4120 (PH8.2-001);
 2. Type A revenue timing;
 3. Type B revenue timing;
 4. Type A COGS/inventory-reduction timing;
@@ -1048,7 +1040,7 @@ If financial posting is included in Stage 8.1, the unresolved accounting blocker
 | Fulfillment allocation | PROPOSED | No existing allocation domain | User approval |
 | Sale Type representation | PROPOSED | Required by two distinct user modes | User approval |
 | Commercial lifecycle | PROPOSED | Existing immutability precedent; no Sales lifecycle | User approval |
-| `4110` versus `4120` | UNRESOLVED | Both accounts exist; no selector | Accounting decision |
+| `4110` versus `4120` | RESOLVED — OWNER-APPROVED | WHOLESALE → 4110; RETAIL → 4120 (PH8.2-001) |
 | Revenue timing | UNRESOLVED | No Sales timing contract | Accounting decision |
 | COGS/inventory timing | UNRESOLVED | No Sales timing contract | Accounting decision |
 | Custody accounting | UNRESOLVED | No custody accounting contract | Accounting decision |
