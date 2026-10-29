@@ -696,8 +696,8 @@ Their existence does not by itself define Sales posting rules.
 
 | Event | Inventory | Ownership | Receivable | Revenue | COGS |
 |---|---|---|---|---|---|
-| Type A finalization | Must not fabricate stock; exact valuation event unresolved | Buyer owns actual goods | May create receivable if financial contract approves | Unresolved timing | Unresolved timing |
-| Type B finalization | No StockMovement; no physical stock claimed | Commercial entitlement only; no physical-goods ownership | May create commercial receivable if approved | Unresolved timing | Unresolved |
+| Type A finalization | Existing physical goods; use approved warehouse allocation/cost path | Buyer owns actual goods | Dr 1310 when credit sale is finalized | Revenue recognized at successful invoice finalization | Existing approved invoice-time COGS/allocation contract applies |
+| Type B finalization | No StockMovement; no physical stock claimed | Commercial entitlement only; no physical-goods ownership | Dr 1310 when credit sale is finalized | Revenue recognized at successful invoice finalization | No COGS before actual goods exist; future fulfillment COGS trigger remains unresolved |
 | Purchase/receipt for Type B | Actual inventory enters through Purchase and `receive_stock()` | Company holds physical goods before Type B authorization | Purchase payable per Purchase contract | None from Sale | Purchase/AVCO cost established |
 | Fulfillment allocation | Uses actual inventory; no new fake stock | No Type B ownership transfer yet | None directly | None directly | Allocation treatment unresolved |
 | Type B Release Authorization | No physical issue merely from authorization | Physical-goods ownership transfers for actual allocated quantity | None directly | None directly | Unresolved |
@@ -707,7 +707,7 @@ Their existence does not by itself define Sales posting rules.
 | Customer → Company | Purchase receipt path | Company ownership under Purchase | Payable as applicable | None | Purchase/AVCO |
 | Sales Return | Existing return primitive may reverse physical issue | Separate future ownership/reversal rule | Payment-state dependent | `4200` possible but not approved here | Original-cost treatment unresolved |
 
-No journal entry is selected by this table.
+This table records the already-approved revenue timing and existing applicable COGS boundaries; it does not authorize new account mappings, future-fulfillment accounting, or custody journals.
 
 **Classification:** `REPOSITORY FACT + UNRESOLVED DECISION`
 
