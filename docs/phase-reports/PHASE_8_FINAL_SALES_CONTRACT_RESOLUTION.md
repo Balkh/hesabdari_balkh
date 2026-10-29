@@ -817,7 +817,7 @@ It is not Sales Return.
 | PH8-002 | Customer custody | Customer-owned goods may remain in company Warehouse indefinitely | No existing custody domain | RESOLVED BUSINESS / ACCOUNTING OPEN | Independent custody history | Custody accounting approval required |
 | PH8-003 | Sale vs release | Separate events | Inventory has issue primitive; no Sales release model | RESOLVED | Release layer required | Authorization and issue boundaries |
 | PH8-004 | Payment boundary | Payment separate; ownership independent | Payments placeholder; Party Ledger exists | RESOLVED | Later Payment domain | No hidden Payment Engine |
-| PH8-005 | Revenue account | Do not invent `4110`/`4120` rule | Both accounts exist; no Sales selector | UNRESOLVED | Must select by approved business attribute | Financial posting blocked |
+| PH8-005 | Revenue account | Owner-approved selector: `WHOLESALE → 4110`; `RETAIL → 4120` (PH8.2-001, 2026-09-23; explicitly reaffirmed 2026-09-24) | Existing COA and Sales implementation | RESOLVED — OWNER-APPROVED | Select by Sales Channel only | No new decision required |
 | PH8-006 | Partial release | Release history required | `SALES_ISSUE` primitive exists | RESOLVED | Event-based release quantities | Idempotency and bounds required |
 | PH8-007 | Sales Return | Must distinguish true return from Purchase | Inventory return primitives exist; Sales absent | UNRESOLVED | Later integrated Return contract | Defer implementation |
 | PH8-008 | Phase 7 baseline | Freeze must be reproducible | Working tree registers purchases; HEAD does not | BLOCKED | Baseline qualification required | Do not implement on ambiguous baseline |
@@ -976,7 +976,7 @@ Future fulfillment may be staged with Phase 8 only after the allocation and acco
 
 The following prevent an implementation-ready financial contract:
 
-1. select the authoritative `4110` versus `4120` rule;
+1. `4110` versus `4120` rule — RESOLVED by owner: `WHOLESALE → 4110`; `RETAIL → 4120` (PH8.2-001);
 2. define revenue recognition timing;
 3. define COGS and inventory reduction timing when ownership and physical release differ;
 4. define financial inventory valuation/reporting for customer-owned custody;
