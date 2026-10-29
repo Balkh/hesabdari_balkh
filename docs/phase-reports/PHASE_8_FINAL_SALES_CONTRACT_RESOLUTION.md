@@ -960,10 +960,10 @@ Future fulfillment may be staged with Phase 8 only after the allocation and acco
 
 ## 28. Remaining Blocking Decisions
 
-The following prevent an implementation-ready financial contract:
+Remaining blockers to an implementation-ready financial contract:
 
 1. `4110` versus `4120` rule — RESOLVED by owner: `WHOLESALE → 4110`; `RETAIL → 4120` (PH8.2-001);
-2. define revenue recognition timing;
+2. revenue timing — RESOLVED by owner at successful invoice finalization for supported sale types including FUTURE (PH8-026, 2026-10-29); implementation alignment remains pending review of exact-head test evidence;
 3. define COGS and inventory reduction timing when ownership and physical release differ;
 4. define financial inventory valuation/reporting for customer-owned custody;
 5. approve the custody/entitlement representation and reconciliation authority;
