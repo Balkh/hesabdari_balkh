@@ -57,7 +57,7 @@ Remaining accounting matters must not be invented:
 2. Type B fulfillment/authorization/allocation accounting and future-sale COGS trigger;
 3. cancellation/reversal and Sales Return accounting.
 
-The revenue-account selector is already owner-approved (`WHOLESALE → 4110`; `RETAIL → 4120`, PH8.2-001). Revenue timing is also owner-approved at successful invoice finalization for all supported sale types including FUTURE (PH8-026, 2026-10-29), pending review of implementation and exact-head evidence.
+The revenue-account selector is already owner-approved (`WHOLESALE → 4110`; `RETAIL → 4120`, PH8.2-001). Revenue timing is also owner-approved at successful invoice finalization for all supported sale types including FUTURE (PH8-026, 2026-10-29), pending review of implementation and exact-head evidence. The separate invoice-time COGS contract applies to existing AVAILABLE and transit paths only; FUTURE-sale COGS timing remains unresolved.
 
 ---
 
