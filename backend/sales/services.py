@@ -419,9 +419,22 @@ def finalize_warehouse_check(*, check, user=None, acknowledge_negative=False,
         if check.quantity > line.quantity - used:
             raise SalesValidationError("Warehouse Check exceeds remaining Invoice Line quantity")
         assert_posting_date_open(check.sale.sale_date)
+        # A Warehouse Check releases customer-owned goods from custody, so it
+        # is valid only when this SaleLine's customer ownership entitlement
+        # exists: created at AVAILABLE sale finalization, or only after
+        # actual fulfillment for FUTURE sales (approved Type B ownership
+        # trigger). Without ownership there is nothing customer-owned to
+        # receive into custody or release, and the check must not proceed.
+        entitlement = CustomerOwnershipEntitlement.objects.filter(sale_line=line).first()
+        if entitlement is None:
+            raise SalesValidationError(
+                "Warehouse Check finalization requires a customer ownership entitlement "
+                "for the invoice line; none exists. Customer ownership is established "
+                "at AVAILABLE sale finalization, or after actual fulfillment for "
+                "FUTURE sales."
+            )
         from sales.models import TransitSaleAllocation
         if TransitSaleAllocation.objects.filter(sale_line=line).exists():
-            entitlement = CustomerOwnershipEntitlement.objects.get(sale_line=line)
             # Transit-sale COGS was posted against 1430 at Sale finalization.
             # A Warehouse Check only releases physical customer custody.
             from goods_in_transit.models import TransitCustomerCustody
@@ -463,7 +476,6 @@ def finalize_warehouse_check(*, check, user=None, acknowledge_negative=False,
             # Invoice-time COGS already issued this stock and credited the
             # warehouse inventory account. Physical check only releases the
             # customer custody placed at finalization; no stock/COGS again.
-            entitlement = CustomerOwnershipEntitlement.objects.get(sale_line=line)
             allocated_here = SaleLineWarehouseAllocation.objects.filter(
                 sale_line=line, warehouse=check.warehouse
             ).aggregate(total=models.Sum("quantity"))["total"] or 0
@@ -510,7 +522,6 @@ def finalize_warehouse_check(*, check, user=None, acknowledge_negative=False,
                 temporary_currency=temporary_currency, temporary_rate=temporary_rate,
                 temporary_rate_date=temporary_rate_date, party=check.sale.customer,
             )
-        entitlement = CustomerOwnershipEntitlement.objects.get(sale_line=line)
         available_here = custody_balance(entitlement=entitlement, warehouse=check.warehouse)
         if available_here < check.quantity:
             unallocated = unallocated_custody_balance(entitlement=entitlement)
