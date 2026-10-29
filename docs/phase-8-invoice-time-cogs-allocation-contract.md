@@ -1,9 +1,6 @@
 # Phase 8 — Invoice-Time COGS and Warehouse Allocation Contract
 
-Status: owner-approved contract; implemented on PR #40 branch
-`phase/8-invoice-time-cogs-allocation`, stacked on PR #38. The PR remains
-Draft and unmerged; implementation evidence and owner decisions do not
-constitute merge authorization or phase freeze.
+Status: owner-approved contract; the implementation from PR #40 was merged on 2026-10-24. This document is being updated on PR #46 to record the owner-approved revenue-timing rule and correct stale decision status. This documentation update does not authorize merging PR #46 or freezing Phase 8.
 
 ## Owner-approved accounting contract
 
@@ -48,10 +45,7 @@ Recorded rule:
      payment receipt, and revenue must not be equated with cash receipt).
    - Physical receipt / warehouse custody.
    - Customer delivery / handover (Warehouse Check).
-3. This decision is compatible with the invoice-time COGS contract above:
-   COGS remains determined at invoice finalization under the existing
-   allocation/transit contracts. COGS, costing, inventory, and transit
-   logic are not redesigned by this decision.
+3. This decision does not redesign COGS, costing, inventory, or transit logic. Existing invoice-time COGS rules continue to apply to the already-contracted AVAILABLE and transit paths. This revenue-timing decision does not authorize COGS for a FUTURE sale before actual goods exist; FUTURE fulfillment and its COGS trigger remain a separate unresolved contract.
 4. This decision applies to sales only. It does not define, and must not
    be read as inferring, any purchase-side recognition policy.
 5. Account mapping, revenue channels, and other accounting policies are
@@ -91,11 +85,7 @@ the entitlement.
 
 ### Remaining unresolved decisions (unchanged by this decision)
 
-- `4110` versus `4120` revenue account selection (PH8-005). The current
-  implementation maps channel `WHOLESALE` to `4110` and `RETAIL` to
-  `4120`; Phase 8 discovery documents record this selection as unresolved.
-  This owner decision approves revenue timing only. It does not approve or
-  change that mapping, which remains a separate owner/accountant decision.
+- Revenue account selection (PH8-005) is **already owner-approved**: `WHOLESALE → 4110` and `RETAIL → 4120`. The user explicitly approved both mappings on 2026-09-24 (also recorded as decision PH8.2-001 on 2026-09-23). Older Phase 8 discovery documents still label this decision unresolved; those labels are stale and must be reconciled. This PR does not change the approved mapping.
 - `FUTURE`-sale fulfillment, authorization, and allocation remain
   unapproved and unimplemented; until then a `FUTURE` Warehouse Check
   cannot finalize because the entitlement prerequisite cannot be met.
