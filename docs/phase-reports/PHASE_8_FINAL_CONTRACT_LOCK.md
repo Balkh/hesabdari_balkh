@@ -1223,7 +1223,7 @@ The following are proposed rather than silently approved:
 | Sales lifecycle implementation mapping | PROPOSED — USER APPROVAL REQUIRED |
 | Idempotency key format | PROPOSED — USER APPROVAL REQUIRED |
 | `4110` versus `4120` | RESOLVED — OWNER-APPROVED: WHOLESALE → 4110; RETAIL → 4120 (PH8.2-001) |
-| Revenue timing | UNRESOLVED — ACCOUNTING DECISION REQUIRED |
+| Revenue timing | RESOLVED — OWNER-APPROVED at successful invoice finalization for supported sale types including FUTURE (PH8-026, 2026-10-29); implementation review pending |
 | COGS/inventory timing | UNRESOLVED — ACCOUNTING DECISION REQUIRED |
 | Custody accounting/valuation | UNRESOLVED — ACCOUNTING DECISION REQUIRED |
 | Cancellation/reversal | UNRESOLVED — USER/ACCOUNTING DECISION REQUIRED |
@@ -1279,7 +1279,7 @@ The business distinction between Type A and Type B is now explicit and reconcile
 ```text
 BUSINESS CONTRACT: RESOLVED
 ARCHITECTURAL DIRECTION: PROPOSED — USER APPROVAL REQUIRED
-FINANCIAL SALES CONTRACT: BLOCKED — ACCOUNTING DECISIONS REQUIRED
+FINANCIAL SALES CONTRACT: PARTIALLY RESOLVED — revenue-account selector and revenue timing approved; remaining COGS/custody/cancellation decisions and baseline evidence still block full financial readiness
 IMPLEMENTATION BASELINE: BLOCKED — BASELINE EVIDENCE REQUIRED
 ```
 
