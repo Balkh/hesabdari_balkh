@@ -536,16 +536,9 @@ Historical discovery note (superseded by the owner's decision on 2026-09-23, exp
 
 ### 14.2 Revenue timing
 
-Unresolved for both Sale Types:
+Owner-approved decision recorded 2026-10-29 (PH8-026): revenue is recognized at successful invoice finalization for all currently supported sale types, including FUTURE. Payment, physical receipt/custody, and customer delivery are separate events and do not delay or repeat revenue recognition.
 
-```text
-Finalization?
-Authorization?
-Physical Release?
-Other?
-```
-
-Ownership alone does not determine revenue timing.
+This does not resolve FUTURE fulfillment/authorization/allocation accounting, the future-sale COGS trigger, custody valuation, or cancellation/reversal.
 
 ### 14.3 COGS and inventory reduction
 
