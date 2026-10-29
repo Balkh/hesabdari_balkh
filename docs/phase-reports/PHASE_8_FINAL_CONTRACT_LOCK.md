@@ -715,56 +715,26 @@ No journal entry is selected by this table.
 
 ## O. Revenue Account Selection
 
-The repository contains both:
-
-```text
-4110 Wholesale Sales
-4120 Retail Sales
-```
-
-Tests and accounting helpers demonstrate valid usage of both accounts, but no authoritative Sales business selector was found.
-
-The minimum unresolved question is:
-
-```text
-What business attribute selects 4110 versus 4120?
-```
-
-A possible proposal is:
+Owner-approved revenue-account mapping (PH8.2-001, 2026-09-23; explicitly reaffirmed 2026-09-24):
 
 ```text
 WHOLESALE → 4110
 RETAIL    → 4120
 ```
 
-This is not selected by this report. It must not be chosen from quantity, customer name, price, code convenience, or personal judgment.
+Sales Channel is the selector. Do not infer the account from customer identity, quantity, price, or convenience. Older discovery statements that called this unresolved are historical and superseded by this owner decision.
 
-```text
-FINANCIAL SALES IMPLEMENTATION = BLOCKED
-```
-
-**Classification:** `UNRESOLVED — ACCOUNTING DECISION REQUIRED`
+**Classification:** `RESOLVED — OWNER-APPROVED`
 
 ---
 
 ## P. Revenue Timing
 
-The repository does not establish whether revenue occurs at:
+Owner-approved revenue timing (2026-10-29): revenue is recognized when a sales invoice is successfully finalized for all currently supported sale types, including FUTURE. Payment receipt, physical receipt/custody, and customer delivery are separate events and do not delay or repeat revenue recognition. This resolves revenue timing (PH8-026); implementation alignment remains subject to review of the current PR's diff and exact-head tests.
 
-- Type A Sale finalization;
-- Type B Sale finalization;
-- Type B Release Authorization;
-- physical issue;
-- fulfillment;
-- another approved event.
+This decision does not resolve custody valuation, Type B fulfillment/authorization/allocation, cancellation/reversal, or future-sale COGS timing.
 
-Ownership alone does not decide revenue timing. `issue_stock()` alone does not decide revenue timing.
-
-```text
-FINANCIAL SALES IMPLEMENTATION = BLOCKED
-```
-
-**Classification:** `UNRESOLVED — ACCOUNTING DECISION REQUIRED`
+**Classification:** `RESOLVED — OWNER-APPROVED; IMPLEMENTATION REVIEW PENDING`
 
 ---
 
@@ -1200,16 +1170,12 @@ This graph is an implementation dependency proposal, not an implementation actio
 
 ### AD.1 Accounting blockers
 
-Financial Sales implementation is blocked until the following are approved:
+Remaining financial/release blockers (the revenue-account selector and revenue timing are resolved owner decisions; see PH8-005 and PH8-026 above):
 
-1. `4110` versus `4120` selection rule — RESOLVED by owner: WHOLESALE → 4110; RETAIL → 4120 (PH8.2-001);
-2. revenue timing for Type A and Type B — RESOLVED 2026-10-29 by owner decision: revenue is recognized at successful invoice finalization for all supported sale types including FUTURE (full record: `docs/phase-8-invoice-time-cogs-allocation-contract.md`); implementation alignment remains subject to owner review of the resulting diff and test evidence;
-3. COGS timing — RESOLVED (owner-approved at invoice finalization; Decisions A1/B1, 2026-10-24; full record: `docs/phase-8-invoice-time-cogs-allocation-contract.md`);
-4. company inventory reduction timing;
-5. custody valuation and reporting treatment;
-6. Type B authorization/allocation accounting treatment;
-7. cancellation/reversal financial treatment;
-8. Sales Return accounting treatment.
+1. company inventory reduction and custody valuation/reporting treatment;
+2. Type B fulfillment, authorization/allocation accounting and COGS trigger;
+3. cancellation/reversal financial treatment;
+4. Sales Return accounting treatment.
 
 ### AD.2 Baseline blockers
 
