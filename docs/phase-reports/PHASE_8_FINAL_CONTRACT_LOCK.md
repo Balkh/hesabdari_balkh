@@ -1124,7 +1124,7 @@ Any implementation that fails one of these is not contract-conforming.
 | PH8-002 | Custody | Customer-owned actual goods may remain in company Warehouse indefinitely | No custody domain exists | RESOLVED BUSINESS / ACCOUNTING OPEN | Independent custody history required | Custody accounting approval |
 | PH8-003 | Sale vs Release | Separate concepts | `issue_stock()` is physical primitive; no release model | RESOLVED | Release authorization and physical release separate | Required boundary |
 | PH8-004 | Payment boundary | Payment separate from Sale and ownership | Payments placeholder; Party Ledger exists | RESOLVED | No Payment Engine in Sales | Later Payment contract |
-| PH8-005 | 4110 vs 4120 | Business selector not supplied | Both accounts exist; tests use both | UNRESOLVED — ACCOUNTING DECISION REQUIRED | Revenue posting cannot be finalized | Financial Sales blocked |
+| PH8-005 | 4110 vs 4120 | Owner-approved selector: WHOLESALE → 4110; RETAIL → 4120 (PH8.2-001, 2026-09-23; explicitly reaffirmed 2026-09-24) | Existing COA and Sales implementation | RESOLVED — OWNER-APPROVED | Use Sales Channel only; do not infer from customer, quantity, or price | No new decision required |
 | PH8-006 | Partial Release | Multiple release events and cumulative quantity | `SALES_ISSUE` primitive exists | RESOLVED | Event-based ReleaseLines | Bounds/idempotency required |
 | PH8-007 | Sales Return | Separate future contract; customer-to-company is Purchase | Inventory return primitives only | OUT OF SCOPE / UNRESOLVED FUTURE CONTRACT | Defer integrated Return | No Return implementation |
 | PH8-008 | Phase 7 baseline | Registration discrepancy must be qualified | Working tree has `purchases`; HEAD does not | BLOCKED — BASELINE EVIDENCE | Baseline not unambiguously reproducible | Resolve before implementation |
@@ -1256,7 +1256,7 @@ The following are proposed rather than silently approved:
 | Sale Type representation | PROPOSED — USER APPROVAL REQUIRED |
 | Sales lifecycle implementation mapping | PROPOSED — USER APPROVAL REQUIRED |
 | Idempotency key format | PROPOSED — USER APPROVAL REQUIRED |
-| `4110` versus `4120` | UNRESOLVED — ACCOUNTING DECISION REQUIRED |
+| `4110` versus `4120` | RESOLVED — OWNER-APPROVED: WHOLESALE → 4110; RETAIL → 4120 (PH8.2-001) |
 | Revenue timing | UNRESOLVED — ACCOUNTING DECISION REQUIRED |
 | COGS/inventory timing | UNRESOLVED — ACCOUNTING DECISION REQUIRED |
 | Custody accounting/valuation | UNRESOLVED — ACCOUNTING DECISION REQUIRED |
