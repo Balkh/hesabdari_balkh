@@ -51,12 +51,13 @@ Fulfillment Allocation for future Sales
 
 The existing Phase 6 `StockMovement` identity must not be changed to `Product + Warehouse + Owner` during Phase 8 discovery or implementation planning.
 
-Two accounting matters are not evidenced by the repository and must not be invented:
+Remaining accounting matters must not be invented:
 
 1. how customer-owned goods physically held in company warehouses are treated in company inventory valuation and financial reporting;
-2. the exact revenue/COGS timing and the `4110` versus `4120` Sales selection rule.
+2. Type B fulfillment/authorization/allocation accounting and future-sale COGS trigger;
+3. cancellation/reversal and Sales Return accounting.
 
-Those are explicit implementation gates, not silent assumptions.
+The revenue-account selector is already owner-approved (`WHOLESALE → 4110`; `RETAIL → 4120`, PH8.2-001). Revenue timing is also owner-approved at successful invoice finalization for all supported sale types including FUTURE (PH8-026, 2026-10-29), pending review of implementation and exact-head evidence.
 
 ---
 
