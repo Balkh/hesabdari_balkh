@@ -26,15 +26,14 @@ Release Authorization → physical-goods ownership
 Physical Release → handover / issue
 ```
 
-The contract is **not financially implementation-ready** because the repository does not establish:
+The contract remains **not financially implementation-ready** because these matters remain unresolved or require independent evidence:
 
-- the `4110` versus `4120` selector;
-- revenue timing;
-- COGS and inventory-reduction timing;
+- revenue-account selector is resolved by owner: `WHOLESALE → 4110`, `RETAIL → 4120` (PH8.2-001; 2026-09-23, reaffirmed 2026-09-24);
+- revenue timing is owner-approved at successful invoice finalization for supported sale types including FUTURE (PH8-026; 2026-10-29); review implementation alignment and exact-head test evidence;
+- COGS and inventory-reduction timing for future fulfillment;
 - customer-custody valuation/accounting;
 - cancellation/reversal accounting;
-- a clean/reproducible Phase 7 baseline;
-- an independently verified GitHub baseline.
+- a clean/reproducible Phase 7 baseline and independent baseline evidence.
 
 **Classification:** `USER DIRECTIVE + REPOSITORY FACT + BLOCKER`
 
@@ -532,28 +531,13 @@ No journal is invented by this table.
 
 ### 14.1 Revenue account selection
 
-The repository contains both `4110 Wholesale Sales` and `4120 Retail Sales`. Tests prove valid posting usage, not a Sales selector.
-
-Required unresolved question:
-
-```text
-What approved business attribute selects 4110 versus 4120?
-```
-
-`WHOLESALE → 4110` / `RETAIL → 4120` is only a proposal, not a selected rule.
+Historical discovery note (superseded by the owner's decision on 2026-09-23, explicitly reaffirmed 2026-09-24): the approved Sales Channel selector is `WHOLESALE → 4110` and `RETAIL → 4120` (PH8.2-001). The older unresolved wording in this section records the earlier discovery state and is not the current contract. Do not infer the revenue account from customer identity, quantity, price, or convenience.
 
 ### 14.2 Revenue timing
 
-Unresolved for both Sale Types:
+Owner-approved decision recorded 2026-10-29 (PH8-026): revenue is recognized at successful invoice finalization for all currently supported sale types, including FUTURE. Payment, physical receipt/custody, and customer delivery are separate events and do not delay or repeat revenue recognition.
 
-```text
-Finalization?
-Authorization?
-Physical Release?
-Other?
-```
-
-Ownership alone does not determine revenue timing.
+This does not resolve FUTURE fulfillment/authorization/allocation accounting, the future-sale COGS trigger, custody valuation, or cancellation/reversal.
 
 ### 14.3 COGS and inventory reduction
 
@@ -795,7 +779,7 @@ This is not approval to implement. It is the smallest architecture consistent wi
 | PH8-002 | Custody | Customer-owned actual goods may remain indefinitely | No custody domain | USER DIRECTIVE | RESOLVED business / accounting open | Custody history layer | Accounting treatment |
 | PH8-003 | Sale vs Release | Separate concepts | `issue_stock()` exists; no Release domain | USER DIRECTIVE + REPOSITORY FACT | RESOLVED | Separate authorization and issue | None for separation |
 | PH8-004 | Payment | Separate domain; never ownership trigger | Payments placeholder; Party Ledger exists | USER DIRECTIVE | RESOLVED | No Payment Engine in Sales | Later Payment approval |
-| PH8-005 | 4110 vs 4120 | Approved business selector required | Both accounts exist; no Sales selector | UNRESOLVED DECISION | BLOCKED | Financial posting blocked | Accounting/business owner |
+| PH8-005 | 4110 vs 4120 | Owner-approved selector: WHOLESALE → 4110; RETAIL → 4120 (PH8.2-001, 2026-09-23; explicitly reaffirmed 2026-09-24) | Existing COA and Sales implementation | RESOLVED — OWNER-APPROVED | Select by Sales Channel only | No new decision required |
 | PH8-006 | Partial Release | Event history and cumulative quantity | `SALES_ISSUE` primitive exists | USER DIRECTIVE | RESOLVED | Release events required | None for rule |
 | PH8-007 | Sales Return | Separate future contract | Inventory return primitives only | UNRESOLVED DECISION | OUT OF SCOPE | Defer Return | Later approval |
 | PH8-008 | Phase 7 baseline | Must be reproducible | Working tree has `purchases`; HEAD does not | REPOSITORY FACT | BLOCKED | No clean implementation baseline | Owner/maintainer |
@@ -816,7 +800,7 @@ This is not approval to implement. It is the smallest architecture consistent wi
 | PH8-023 | Immutability | Finalized facts immutable | Protected posted-history convention | USER DIRECTIVE + REPOSITORY FACT | RESOLVED principle | Controlled correction only | Reversal policy later |
 | PH8-024 | Idempotency | Separate event boundaries | Existing accounting/inventory patterns | ARCHITECTURAL PROPOSAL | PROPOSED | Reuse conventions | Implementation review |
 | PH8-025 | Custody accounting | No silent financial treatment | No evidence | UNRESOLVED DECISION | BLOCKED | Financial Sales blocked | Accounting owner |
-| PH8-026 | Revenue/COGS timing | Must be explicitly selected | Accounts/primitives do not select | UNRESOLVED DECISION | BLOCKED | Financial Sales blocked | Accounting owner |
+| PH8-026 | Revenue/COGS timing | Owner-approved 2026-10-29 in the working conversation: sales revenue is recognized at successful invoice finalization for all supported sale types including FUTURE; payment, custody, and delivery remain separate events. COGS timing at invoice finalization was already owner-approved for the existing AVAILABLE and transit-sale paths only (Decisions A1/B1, 2026-10-24); FUTURE-sale COGS remains unresolved until actual goods are fulfilled and the cost trigger is approved. Full record: `docs/phase-8-invoice-time-cogs-allocation-contract.md`. This row update aligns this document with `PHASE_8_FINAL_CONTRACT_LOCK.md` | Implementation alignment remains subject to owner review of the resulting diff and test evidence | USER DIRECTIVE — RECORDED 2026-10-29 | RESOLVED — OWNER-APPROVED, PENDING OWNER REVIEW OF RESULTING CHANGES | Revenue timing no longer blocks financial Sales | Owner review of the resulting diff and tests; not a merge or freeze authorization |
 | PH8-027 | Money/FX | Reuse existing conventions | Currency/accounting/FX services exist | REPOSITORY FACT + PROPOSAL | PROPOSED | No duplicate engine | Exact field review |
 | PH8-028 | Cancellation/reversal | No edit rollback; policy required | Immutability/reversal conventions | UNRESOLVED DECISION | BLOCKED | Release/financial work gated | User/accounting owner |
 | PH8-029 | Type B trigger | Authorization after actual fulfillment | Explicit user rule | USER DIRECTIVE | RESOLVED | Physical ownership event explicit | None |
@@ -995,17 +979,16 @@ If financial posting is included in Stage 8.1, the unresolved accounting blocker
 
 ## 26. Implementation Blockers
 
-### Accounting blockers
+### Remaining accounting blockers
 
-1. `4110` versus `4120` selector;
-2. Type A revenue timing;
-3. Type B revenue timing;
-4. Type A COGS/inventory-reduction timing;
-5. Type B COGS/inventory-reduction timing;
-6. custody valuation and financial treatment;
-7. Type B authorization/allocation accounting;
-8. cancellation/reversal accounting;
-9. Sales Return accounting.
+The revenue-account selector is resolved: WHOLESALE → 4110; RETAIL → 4120 (PH8.2-001). Revenue timing is also owner-approved for all supported sale types at successful invoice finalization (PH8-026; recorded 2026-10-29), pending review of the current implementation and evidence.
+
+Remaining blockers:
+
+1. Type A company inventory reduction and custody valuation/reporting treatment;
+2. Type B fulfillment, authorization/allocation accounting and COGS trigger;
+3. cancellation/reversal accounting;
+4. Sales Return accounting.
 
 ### Baseline blockers
 
@@ -1048,9 +1031,9 @@ If financial posting is included in Stage 8.1, the unresolved accounting blocker
 | Fulfillment allocation | PROPOSED | No existing allocation domain | User approval |
 | Sale Type representation | PROPOSED | Required by two distinct user modes | User approval |
 | Commercial lifecycle | PROPOSED | Existing immutability precedent; no Sales lifecycle | User approval |
-| `4110` versus `4120` | UNRESOLVED | Both accounts exist; no selector | Accounting decision |
-| Revenue timing | UNRESOLVED | No Sales timing contract | Accounting decision |
-| COGS/inventory timing | UNRESOLVED | No Sales timing contract | Accounting decision |
+| `4110` versus `4120` | RESOLVED — OWNER-APPROVED | WHOLESALE → 4110; RETAIL → 4120 (PH8.2-001) | No new decision required |
+| Revenue timing | RESOLVED — OWNER-APPROVED at successful invoice finalization for supported sale types including FUTURE (PH8-026, 2026-10-29); implementation evidence pending | Owner decision recorded in `docs/phase-8-invoice-time-cogs-allocation-contract.md` | Review exact-head tests; not a merge/freeze authorization |
+| COGS/inventory timing | UNRESOLVED | Sales revenue recognition timing owner-approved at successful invoice finalization for supported sale types including FUTURE (PH8-026); FUTURE-sale COGS trigger and related future-fulfillment inventory accounting remain unresolved and gated | Accounting decision |
 | Custody accounting | UNRESOLVED | No custody accounting contract | Accounting decision |
 | Cancellation/reversal | UNRESOLVED | No Sales policy | User/accounting decision |
 | Phase 7 baseline | BLOCKED | Working tree differs from HEAD | Qualify baseline |
