@@ -987,17 +987,16 @@ If financial posting is included in Stage 8.1, the unresolved accounting blocker
 
 ## 26. Implementation Blockers
 
-### Accounting blockers
+### Remaining accounting blockers
 
-1. `4110` versus `4120` selector — RESOLVED by owner: WHOLESALE → 4110; RETAIL → 4120 (PH8.2-001);
-2. Type A revenue timing;
-3. Type B revenue timing;
-4. Type A COGS/inventory-reduction timing;
-5. Type B COGS/inventory-reduction timing;
-6. custody valuation and financial treatment;
-7. Type B authorization/allocation accounting;
-8. cancellation/reversal accounting;
-9. Sales Return accounting.
+The revenue-account selector is resolved: WHOLESALE → 4110; RETAIL → 4120 (PH8.2-001). Revenue timing is also owner-approved for all supported sale types at successful invoice finalization (PH8-026; recorded 2026-10-29), pending review of the current implementation and evidence.
+
+Remaining blockers:
+
+1. Type A company inventory reduction and custody valuation/reporting treatment;
+2. Type B fulfillment, authorization/allocation accounting and COGS trigger;
+3. cancellation/reversal accounting;
+4. Sales Return accounting.
 
 ### Baseline blockers
 
