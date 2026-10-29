@@ -1032,7 +1032,7 @@ Remaining blockers:
 | Sale Type representation | PROPOSED | Required by two distinct user modes | User approval |
 | Commercial lifecycle | PROPOSED | Existing immutability precedent; no Sales lifecycle | User approval |
 | `4110` versus `4120` | RESOLVED — OWNER-APPROVED | WHOLESALE → 4110; RETAIL → 4120 (PH8.2-001) |
-| Revenue timing | UNRESOLVED | No Sales timing contract | Accounting decision |
+| Revenue timing | RESOLVED — OWNER-APPROVED at successful invoice finalization for supported sale types including FUTURE (PH8-026, 2026-10-29); implementation evidence pending | Owner decision recorded in `docs/phase-8-invoice-time-cogs-allocation-contract.md` | Review exact-head tests; not a merge/freeze authorization |
 | COGS/inventory timing | UNRESOLVED | No Sales timing contract | Accounting decision |
 | Custody accounting | UNRESOLVED | No custody accounting contract | Accounting decision |
 | Cancellation/reversal | UNRESOLVED | No Sales policy | User/accounting decision |
