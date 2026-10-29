@@ -740,14 +740,14 @@ This decision does not resolve custody valuation, Type B fulfillment/authorizati
 
 ## Q. COGS / Inventory Timing
 
-The following remain unresolved:
+Remaining unresolved questions are:
 
-- when company inventory is reduced for Type A;
-- whether delayed Type A custody requires valuation reclassification;
-- when COGS is recognized;
-- whether Type B COGS is tied to fulfillment, authorization, physical issue, or another event;
-- how AVCO cost is preserved through allocation;
+- Type A company inventory reduction and any valuation reclassification required for customer-owned custody;
+- Type B COGS trigger: fulfillment, authorization, physical issue, or another explicitly approved event;
+- how the existing AVCO cost basis is preserved through future-sale fulfillment allocation;
 - how delayed release affects financial inventory reporting.
+
+For AVAILABLE and transit sales, the existing owner-approved invoice-time COGS/allocation contract remains in force (Decisions A1/B1, 2026-10-24). This does not authorize future-sale COGS before actual goods exist.
 
 No AVCO modification, journal, new account, or cost engine is proposed.
 
