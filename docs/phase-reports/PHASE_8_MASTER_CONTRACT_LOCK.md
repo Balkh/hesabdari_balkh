@@ -28,7 +28,7 @@ Physical Release → handover / issue
 
 The contract is **not financially implementation-ready** because the repository does not establish:
 
-- the `4110` versus `4120` selector;
+- the `4110` versus `4120` selector — **resolved by owner**: `WHOLESALE → 4110`, `RETAIL → 4120` (PH8.2-001, 2026-09-23; explicitly reaffirmed 2026-09-24; older wording below is a historical discovery snapshot);
 - revenue timing;
 - COGS and inventory-reduction timing;
 - customer-custody valuation/accounting;
