@@ -26,15 +26,14 @@ Release Authorization → physical-goods ownership
 Physical Release → handover / issue
 ```
 
-The contract is **not financially implementation-ready** because the repository does not establish:
+The contract remains **not financially implementation-ready** because these matters remain unresolved or require independent evidence:
 
-- the `4110` versus `4120` selector — **resolved by owner**: `WHOLESALE → 4110`, `RETAIL → 4120` (PH8.2-001, 2026-09-23; explicitly reaffirmed 2026-09-24; older wording below is a historical discovery snapshot);
-- revenue timing;
-- COGS and inventory-reduction timing;
+- revenue-account selector is resolved by owner: `WHOLESALE → 4110`, `RETAIL → 4120` (PH8.2-001; 2026-09-23, reaffirmed 2026-09-24);
+- revenue timing is owner-approved at successful invoice finalization for supported sale types including FUTURE (PH8-026; 2026-10-29); review implementation alignment and exact-head test evidence;
+- COGS and inventory-reduction timing for future fulfillment;
 - customer-custody valuation/accounting;
 - cancellation/reversal accounting;
-- a clean/reproducible Phase 7 baseline;
-- an independently verified GitHub baseline.
+- a clean/reproducible Phase 7 baseline and independent baseline evidence.
 
 **Classification:** `USER DIRECTIVE + REPOSITORY FACT + BLOCKER`
 
