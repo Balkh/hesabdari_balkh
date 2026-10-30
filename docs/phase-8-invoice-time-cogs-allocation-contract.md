@@ -1,6 +1,6 @@
 # Phase 8 — Invoice-Time COGS and Warehouse Allocation Contract
 
-Status: owner-approved contract; the implementation from PR #40 was merged on 2026-10-24. This document is being updated on PR #46 to record the owner-approved revenue-timing rule and correct stale decision status. This documentation update does not authorize merging PR #46 or freezing Phase 8.
+Status: owner-approved contract; the implementation from PR #40 was merged on 2026-10-24. The revenue-timing rule and related decision-status reconciliation were recorded in PR #46, which is now merged. This document does not declare Phase 8 complete or frozen; remaining fulfillment, future-sale COGS, custody-accounting, cancellation/reversal, and return gates remain subject to their approved contracts.
 
 ## Owner-approved accounting contract
 
