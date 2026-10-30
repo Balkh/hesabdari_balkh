@@ -1,6 +1,6 @@
 # Phase 8 — Invoice-Time COGS and Warehouse Allocation Contract
 
-Status: owner-approved contract; the implementation from PR #40 was merged on 2026-10-24. This document is being updated on PR #46 to record the owner-approved revenue-timing rule and correct stale decision status. This documentation update does not authorize merging PR #46 or freezing Phase 8.
+Status: owner-approved contract; the implementation from PR #40 was merged on 2026-10-24. The revenue-timing rule and related decision-status reconciliation were recorded in PR #46, which is now merged. This document does not declare Phase 8 complete or frozen; remaining fulfillment, future-sale COGS, custody-accounting, cancellation/reversal, and return gates remain subject to their approved contracts.
 
 ## Owner-approved accounting contract
 
@@ -51,10 +51,10 @@ Recorded rule:
 5. Account mapping, revenue channels, and other accounting policies are
    not changed by this decision.
 
-Decision status: owner-approved in the working conversation on 2026-10-29
-and recorded here as a new repository change. It remains pending owner
-review of the resulting diff and test evidence. This record is not a merge
-authorization and not a Phase 8 freeze.
+Decision status: owner-approved on 2026-10-29 and recorded in PR #46,
+which has since been merged. The merged PR includes the implementation,
+regression tests, and exact-head CI evidence for the entitlement guard and
+revenue-timing alignment. This does not declare Phase 8 complete or frozen.
 
 ### Required tests and evidence for this decision
 
@@ -85,14 +85,15 @@ the entitlement.
 
 ### Remaining unresolved decisions (unchanged by this decision)
 
-- Revenue account selection (PH8-005) is **already owner-approved**: `WHOLESALE → 4110` and `RETAIL → 4120`. The user explicitly approved both mappings on 2026-09-24 (also recorded as decision PH8.2-001 on 2026-09-23). Older Phase 8 discovery documents still label this decision unresolved; those labels are stale and must be reconciled. This PR does not change the approved mapping.
+- Revenue account selection (PH8-005) is **resolved and owner-approved**: `WHOLESALE → 4110` and `RETAIL → 4120` (PH8.2-001, approved 2026-09-23 and reaffirmed 2026-09-24). Older discovery documents retain historical unresolved wording; that wording is not the current decision. PR #46 did not change this mapping.
 - `FUTURE`-sale fulfillment, authorization, and allocation remain
   unapproved and unimplemented; until then a `FUTURE` Warehouse Check
   cannot finalize because the entitlement prerequisite cannot be met.
-- `docs/phase-reports/PHASE_8_RESOLVED_CONTRACT.md` and
-  `docs/phase-reports/PHASE_8_FROZEN_REFERENCE.md`, cited by
-  `backend/sales/sales_contract_tests.py`, are not present in the
-  repository history.
+- The historical paths `docs/phase-reports/PHASE_8_RESOLVED_CONTRACT.md`
+  and `docs/phase-reports/PHASE_8_FROZEN_REFERENCE.md` do not exist in the
+  repository history. They were referenced by older test-file metadata;
+  those references were corrected in PR #47. They are not active contract
+  documents or a current test-manifest dependency.
 
 ## Required implementation constraints
 
@@ -155,8 +156,10 @@ approval.
 
 - Decision A: **RESOLVED — A1 selected by owner on 2026-10-24.**
 - Decision B: **RESOLVED — B1 selected by owner on 2026-10-24.**
-- Neither decision authorizes merging. PR #38 must be integrated before
-  dependent PRs #39/#40, only with explicit owner authorization.
-- Do not mark the code released or the phase frozen until authorized
-  integration, required post-merge verification on `main`, and review
-  of remaining technical risks are complete.
+- The PR #38 → #39/#40 implementation stack has since been integrated into
+  `main`; PR #46 is also merged. Those integrations do not by themselves
+  freeze Phase 8.
+- Phase 8 remains open until its separately gated fulfillment, FUTURE-sale
+  COGS, custody-accounting, cancellation/reversal, return, and release
+  authorization/printing work is resolved, implemented, tested, and
+  reviewed under the applicable contracts.
