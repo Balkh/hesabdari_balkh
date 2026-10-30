@@ -1,9 +1,9 @@
 name: W0 PostgreSQL 17.11 Exact-SHA Verification
 
 on:
-  push:
+  pull_request:
     branches:
-      - ci/w0-postgresql-17-11
+      - main
 
 jobs:
   postgresql-17-11:
