@@ -29,7 +29,11 @@ The approved domain contract identifies AFN as the base currency and USD as the 
 ## Safety behavior
 
 - This is an explicit management command. It is not run by migrations, app startup, WSGI, or ASGI.
-- On a fresh database where both Account and Currency tables are empty, creation of the canonical COA, AFN/USD, and the audit event occurs in one database transaction.
+- Before first-time writes, the command inspects every installed, managed, concrete Django model table in the configured database.
+- The only exempt rows are Django-generated `contenttypes.ContentType` and `auth.Permission` reference metadata created by migrations/post_migrate. They are framework metadata, not operator-entered ERP setup.
+- Existing rows in all other models block bootstrap. This includes users, groups, admin history, sessions, audit events, idempotency records, accounts, currencies, exchange rates, fiscal periods, categories, products, parties, warehouses, inventory, purchases, sales, payments, allocations, and other installed ERP-domain records.
+- Missing model tables also block bootstrap; apply all migrations before retrying. The command does not create schema.
+- On a genuinely fresh migrated database, creation of the canonical COA, AFN/USD, and the audit event occurs in one database transaction.
 - A sequential rerun verifies every canonical account and required currency, confirms exactly one matching CREATE audit event, and exits without changing rows.
 - If the database contains partial or divergent accounting master data, or the bootstrap audit event is missing, duplicated, orphaned while the master tables are empty, or has an unexpected action, the command refuses to proceed. It does not attempt repair, merge, reset, or overwrite.
 - If audit persistence fails during first-time initialization, the database transaction rolls back the COA and currency rows as well.
@@ -43,6 +47,6 @@ The command does not create users, roles, fiscal periods, warehouses, products, 
 
 ## Evidence and review
 
-The automated tests in `accounting/test_bootstrap.py` cover fresh initialization, AFN/USD configuration, audit recording, sequential idempotency, missing/duplicate/orphaned audit refusal, transaction rollback on audit failure, refusal on partial setup, and preservation of accountant edits.
+The automated tests in `accounting/test_bootstrap.py` cover fresh initialization, AFN/USD configuration, audit recording, sequential idempotency, missing/duplicate/orphaned audit refusal, transaction rollback on audit failure, refusal on partial setup, preservation of accountant edits, refusal when non-accounting ERP records already exist, and refusal when a user already exists.
 
 A successful command is evidence that this bootstrap operation completed for the selected database; it is not a claim that the ERP is production-ready or that other operational setup is complete.
