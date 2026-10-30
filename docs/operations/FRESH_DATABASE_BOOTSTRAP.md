@@ -32,7 +32,7 @@ The approved domain contract identifies AFN as the base currency and USD as the 
 - Before first-time writes, the command inspects every installed, managed, concrete Django model table in the configured database.
 - The only exempt rows are Django-generated `contenttypes.ContentType` and `auth.Permission` reference metadata created by migrations/post_migrate. They are framework metadata, not operator-entered ERP setup.
 - Existing rows in all other models block bootstrap. This includes users, groups, admin history, sessions, audit events, idempotency records, accounts, currencies, exchange rates, fiscal periods, categories, products, parties, warehouses, inventory, purchases, sales, payments, allocations, and other installed ERP-domain records.
-- Missing model tables also block bootstrap; apply all migrations before retrying. The command does not create schema.
+- Before its first ORM query against Account, Currency, or AuditEvent, the command performs a schema-only preflight across all installed, managed, concrete application models. Missing model tables block bootstrap with a clear error; apply all migrations before retrying. The command does not create schema.
 - On a genuinely fresh migrated database, creation of the canonical COA, AFN/USD, and the audit event occurs in one database transaction.
 - A sequential rerun verifies every canonical account and required currency, confirms exactly one matching CREATE audit event, and exits without changing rows.
 - If the database contains partial or divergent accounting master data, or the bootstrap audit event is missing, duplicated, orphaned while the master tables are empty, or has an unexpected action, the command refuses to proceed. It does not attempt repair, merge, reset, or overwrite.
