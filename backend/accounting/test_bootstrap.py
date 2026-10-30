@@ -1,4 +1,5 @@
 from io import StringIO
+from unittest.mock import patch
 
 from django.core.management import call_command, CommandError
 from django.test import TestCase
@@ -6,7 +7,7 @@ from django.test import TestCase
 from accounting.coa import CANONICAL_COA
 from accounting.models import Account
 from currencies.models import Currency
-from security.models import AuditEvent
+from security.models import AuditAction, AuditEvent
 
 
 class FreshDatabaseBootstrapTests(TestCase):
@@ -23,7 +24,13 @@ class FreshDatabaseBootstrapTests(TestCase):
         self.assertEqual(afn.decimal_places, 2)
         self.assertFalse(usd.is_base)
         self.assertEqual(usd.decimal_places, 2)
-        self.assertEqual(AuditEvent.objects.filter(entity="SystemBootstrap").count(), 1)
+        self.assertEqual(
+            AuditEvent.objects.filter(
+                entity="SystemBootstrap", reference="fresh-database-v1",
+                action=AuditAction.CREATE,
+            ).count(),
+            1,
+        )
         self.assertIn("Bootstrap completed", output.getvalue())
 
     def test_repeat_run_is_noop_and_does_not_duplicate_audit(self):
@@ -39,6 +46,50 @@ class FreshDatabaseBootstrapTests(TestCase):
         self.assertEqual(Currency.objects.count(), currency_count)
         self.assertEqual(AuditEvent.objects.count(), audit_count)
         self.assertIn("no data changed", output.getvalue())
+
+    def test_rerun_refuses_when_bootstrap_audit_event_is_missing(self):
+        call_command("bootstrap_fresh_database")
+        AuditEvent.objects.filter(
+            entity="SystemBootstrap", reference="fresh-database-v1"
+        ).delete()
+
+        with self.assertRaisesMessage(CommandError, "expected exactly one bootstrap audit event"):
+            call_command("bootstrap_fresh_database")
+
+        self.assertEqual(Account.objects.count(), len(CANONICAL_COA))
+        self.assertEqual(set(Currency.objects.values_list("code", flat=True)), {"AFN", "USD"})
+        self.assertFalse(AuditEvent.objects.filter(entity="SystemBootstrap").exists())
+
+    def test_rerun_refuses_when_bootstrap_audit_event_is_duplicated(self):
+        call_command("bootstrap_fresh_database")
+        AuditEvent.objects.create(
+            action=AuditAction.CREATE,
+            entity="SystemBootstrap",
+            reference="fresh-database-v1",
+            reason="Duplicate audit fixture",
+        )
+
+        with self.assertRaisesMessage(CommandError, "expected exactly one bootstrap audit event"):
+            call_command("bootstrap_fresh_database")
+
+        self.assertEqual(
+            AuditEvent.objects.filter(
+                entity="SystemBootstrap", reference="fresh-database-v1"
+            ).count(),
+            2,
+        )
+
+    def test_audit_failure_rolls_back_all_bootstrap_rows(self):
+        with patch(
+            "accounting.management.commands.bootstrap_fresh_database.record_audit_event",
+            side_effect=RuntimeError("simulated audit storage failure"),
+        ):
+            with self.assertRaisesMessage(RuntimeError, "simulated audit storage failure"):
+                call_command("bootstrap_fresh_database")
+
+        self.assertEqual(Account.objects.count(), 0)
+        self.assertEqual(Currency.objects.count(), 0)
+        self.assertEqual(AuditEvent.objects.count(), 0)
 
     def test_partial_database_is_refused_without_mutation(self):
         Account.objects.create(
