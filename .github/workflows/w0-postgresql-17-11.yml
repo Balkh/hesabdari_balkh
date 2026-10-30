@@ -1,0 +1,42 @@
+name: W0 PostgreSQL 17.11 Exact-SHA Verification
+
+on:
+  push:
+    branches:
+      - ci/w0-postgresql-17-11
+
+jobs:
+  postgresql-17-11:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17.11
+        env:
+          POSTGRES_DB: erp_afghanistan
+          POSTGRES_USER: erp_afghanistan
+          POSTGRES_PASSWORD: erp_afghanistan
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U erp_afghanistan -d erp_afghanistan"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DJANGO_SETTINGS_MODULE: config.settings.postgres
+      POSTGRES_DB: erp_afghanistan
+      POSTGRES_USER: erp_afghanistan
+      POSTGRES_PASSWORD: erp_afghanistan
+      POSTGRES_HOST: 127.0.0.1
+      POSTGRES_PORT: "5432"
+    steps:
+      - name: Checkout exact audited main SHA
+        uses: actions/checkout@v4
+        with:
+          ref: 03fc31acdcf628a40ed13c97353759d9e505c79a
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: python -m venv backend/.venv
+      - run: backend/.venv/bin/python -m pip install -r requirements.txt
+      - run: scripts/verify_postgresql.sh
