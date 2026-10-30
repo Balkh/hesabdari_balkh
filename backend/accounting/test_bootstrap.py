@@ -1,11 +1,13 @@
 from io import StringIO
 from unittest.mock import patch
 
+from django.contrib.auth import get_user_model
 from django.core.management import call_command, CommandError
 from django.test import TestCase
 
 from accounting.coa import CANONICAL_COA
 from accounting.models import Account
+from categories.models import Category
 from currencies.models import Currency
 from security.models import AuditAction, AuditEvent
 
@@ -180,3 +182,25 @@ class FreshDatabaseBootstrapTests(TestCase):
 
         account.refresh_from_db()
         self.assertEqual(account.name, "Accountant-approved cash name")
+
+    def test_existing_non_accounting_erp_data_blocks_bootstrap(self):
+        category = Category.objects.create(name="Pre-existing category")
+
+        with self.assertRaisesMessage(CommandError, "categories.Category"):
+            call_command("bootstrap_fresh_database")
+
+        self.assertEqual(Category.objects.get(pk=category.pk).name, "Pre-existing category")
+        self.assertEqual(Account.objects.count(), 0)
+        self.assertEqual(Currency.objects.count(), 0)
+        self.assertEqual(AuditEvent.objects.count(), 0)
+
+    def test_existing_user_blocks_bootstrap(self):
+        user = get_user_model().objects.create_user(username="bootstrap-blocker")
+
+        with self.assertRaisesMessage(CommandError, "auth.User"):
+            call_command("bootstrap_fresh_database")
+
+        self.assertTrue(get_user_model().objects.filter(pk=user.pk).exists())
+        self.assertEqual(Account.objects.count(), 0)
+        self.assertEqual(Currency.objects.count(), 0)
+        self.assertEqual(AuditEvent.objects.count(), 0)
