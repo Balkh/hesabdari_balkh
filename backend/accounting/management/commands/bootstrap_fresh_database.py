@@ -3,8 +3,11 @@
 This command is intentionally manual. It is never invoked during app startup or
 as part of schema migrations.
 """
+from django.apps import apps
+from django.contrib.auth.models import Permission
+from django.contrib.contenttypes.models import ContentType
 from django.core.management.base import BaseCommand, CommandError
-from django.db import transaction
+from django.db import connections, transaction
 
 from accounting.coa import CANONICAL_COA, seed_chart_of_accounts
 from accounting.models import Account
@@ -21,6 +24,40 @@ CURRENCY_DEFINITIONS = (
 
 BOOTSTRAP_AUDIT_ENTITY = "SystemBootstrap"
 BOOTSTRAP_AUDIT_REFERENCE = "fresh-database-v1"
+
+# Django creates these reference rows automatically during migrate/post_migrate.
+# They are framework metadata, not user-created ERP setup or business data.
+FRAMEWORK_GENERATED_MODELS = {ContentType, Permission}
+
+
+def _find_existing_application_data(using="default"):
+    """Return missing model tables and app/framework rows that block bootstrap.
+
+    Every installed, managed concrete model is inspected. Only Django's
+    automatically generated ContentType and Permission rows are exempt.
+    Users, groups, admin logs, sessions, audit events, and every ERP-domain
+    model remain blockers.
+    """
+    connection = connections[using]
+    existing_tables = set(connection.introspection.table_names())
+    missing_tables = []
+    populated_models = []
+
+    for model in apps.get_models(include_auto_created=False):
+        if model._meta.proxy or not model._meta.managed:
+            continue
+        if model in FRAMEWORK_GENERATED_MODELS:
+            continue
+
+        table = model._meta.db_table
+        if table not in existing_tables:
+            missing_tables.append(model._meta.label)
+            continue
+
+        if model._default_manager.using(using).exists():
+            populated_models.append(model._meta.label)
+
+    return missing_tables, populated_models
 
 
 def _verify_existing_configuration():
@@ -119,9 +156,27 @@ class Command(BaseCommand):
                     "no rows were changed."
                 )
 
+            # Do not infer that the whole database is fresh merely because the
+            # two bootstrap target tables are empty. Inspect every installed,
+            # managed application model before writing any master data.
+            missing_tables, populated_models = _find_existing_application_data()
+            if missing_tables:
+                labels = ", ".join(sorted(missing_tables))
+                raise CommandError(
+                    "Bootstrap refused: database schema is incomplete; model "
+                    f"tables are missing ({labels}). Apply all migrations first. "
+                    "No rows were changed."
+                )
+            if populated_models:
+                labels = ", ".join(sorted(populated_models))
+                raise CommandError(
+                    "Bootstrap refused: the database is not fresh; existing "
+                    "records were found in these application models: "
+                    f"{labels}. No rows were changed."
+                )
+
             # Fresh database only. The existing seed function is called only
-            # after proving both master tables are empty, so it cannot silently
-            # overwrite accountant edits on an established database.
+            # after the full application-data guard passes.
             coa_result = seed_chart_of_accounts()
             for code, name, symbol, decimal_places, is_base, is_active in CURRENCY_DEFINITIONS:
                 Currency.objects.create(
