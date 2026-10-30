@@ -3,7 +3,7 @@
 **Decision ID:** OD-6 / Item 2  
 **Decision date:** 2026-10-30  
 **Authority:** Explicit ERP owner instruction in the project conversation  
-**Status:** OWNER-APPROVED DECISION; documentation change submitted for review  
+**Status:** OWNER-APPROVED DECISION; MERGED INTO MAIN VIA PR #53  
 **Scope:** Generic document lifecycle only. This amendment does not change the other OD-6 decisions or any accounting, inventory, Phase 8 Sales, Phase 11, OD-4, or security contract.
 
 ## 1. Superseding owner decision
