@@ -389,6 +389,13 @@ Do not:
 - Merge or push without explicit authorization.
 - Treat missing UI as proof that backend functionality is absent.
 - Treat backend models/services as proof that an operational workflow is complete.
+# 10. IMMEDIATE NEXT ACTION
+
+Execute STEP 0 only.
+
+It is a read-only audit. Its deliverable is the evidence-based current Master Baseline Audit and a proposed first bounded implementation batch.
+
+Stop after presenting the report. Wait for owner review and approval.
 
 # 11. OWNER DECISION AMENDMENT — OD-6 ITEM 2 (2026-10-30)
 
@@ -403,11 +410,3 @@ The owner has explicitly revised OD-6 Item 2 and restored persisted Draft docume
 Detailed owner amendment: `docs/decisions/OD-6_ITEM_2_DRAFT_PERSISTENCE_OWNER_AMENDMENT_2026-10-30.md`.
 
 **Implementation status:** owner decision recorded; no implementation, migration, API/UI change, test result, freeze, or merge is implied by this amendment.
-
-# 10. IMMEDIATE NEXT ACTION
-
-Execute STEP 0 only.
-
-It is a read-only audit. Its deliverable is the evidence-based current Master Baseline Audit and a proposed first bounded implementation batch.
-
-Stop after presenting the report. Wait for owner review and approval.
