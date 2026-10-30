@@ -3,6 +3,7 @@ from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
 from django.core.management import call_command, CommandError
+from django.db import connections
 from django.test import TestCase
 
 from accounting.coa import CANONICAL_COA
@@ -204,3 +205,28 @@ class FreshDatabaseBootstrapTests(TestCase):
         self.assertEqual(Account.objects.count(), 0)
         self.assertEqual(Currency.objects.count(), 0)
         self.assertEqual(AuditEvent.objects.count(), 0)
+
+    def test_missing_bootstrap_tables_are_reported_before_any_model_query(self):
+        existing_tables = set(connections["default"].introspection.table_names())
+
+        for model in (Account, Currency, AuditEvent):
+            with self.subTest(model=model._meta.label):
+                table_names = sorted(existing_tables - {model._meta.db_table})
+                with patch.object(
+                    connections["default"].introspection,
+                    "table_names",
+                    return_value=table_names,
+                ):
+                    # If the command reaches an ORM query before the schema
+                    # preflight, this assertion error escapes instead.
+                    with patch.object(
+                        Account.objects,
+                        "exists",
+                        side_effect=AssertionError("ORM query ran before schema preflight"),
+                    ):
+                        with self.assertRaisesMessage(
+                            CommandError, "database schema is incomplete"
+                        ) as raised:
+                            call_command("bootstrap_fresh_database")
+
+                self.assertIn(model._meta.label, str(raised.exception))
