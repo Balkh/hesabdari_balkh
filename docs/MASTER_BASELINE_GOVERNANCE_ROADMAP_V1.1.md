@@ -390,6 +390,20 @@ Do not:
 - Treat missing UI as proof that backend functionality is absent.
 - Treat backend models/services as proof that an operational workflow is complete.
 
+# 11. OWNER DECISION AMENDMENT — OD-6 ITEM 2 (2026-10-30)
+
+The owner has explicitly revised OD-6 Item 2 and restored persisted Draft documents in accordance with the original contract. This decision supersedes only the earlier rejection of Draft persistence.
+
+- Draft documents are saved as persistent database records and remain editable before submission.
+- Saving a Draft does not submit it for review/approval and creates no accounting posting or final business effect.
+- When complete, the document is submitted to the existing OD-6 review/approval workflow.
+- `DRAFT` (creator is still preparing the document) must be distinguished from `PENDING_EVIDENCE` (document is in the controlled workflow but required supporting evidence is outstanding).
+- OD-4 evidence rules, the authorized temporary-exception process, approval/posting separation, posted-document immutability, and all other OD-6 decisions remain unchanged.
+
+Detailed owner amendment: `docs/decisions/OD-6_ITEM_2_DRAFT_PERSISTENCE_OWNER_AMENDMENT_2026-10-30.md`.
+
+**Implementation status:** owner decision recorded; no implementation, migration, API/UI change, test result, freeze, or merge is implied by this amendment.
+
 # 10. IMMEDIATE NEXT ACTION
 
 Execute STEP 0 only.
