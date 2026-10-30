@@ -1,0 +1,47 @@
+# Fresh Database Bootstrap Runbook
+
+## Purpose and boundary
+
+A schema migration creates database tables; it does not create the ERP's canonical accounting master data. After all migrations have been applied to a genuinely fresh database, this manual command creates:
+
+- The canonical V1 chart of accounts from `accounting.coa.CANONICAL_COA`.
+- AFN (Afghani, ؋) as the sole base currency, with 2 decimal places.
+- USD (US Dollar, $) as the required active foreign currency, with 2 decimal places.
+- One immutable audit event recording the bootstrap operation.
+
+The approved domain contract identifies AFN as the base currency and USD as the primary foreign currency. This command does not create exchange rates.
+
+## Preconditions
+
+1. Point Django at the intended database and confirm the database name/host before proceeding.
+2. Take and verify a database backup when operating on a persistent environment.
+3. Apply all schema migrations first:
+   ```bash
+   python manage.py migrate --check
+   python manage.py migrate
+   ```
+4. Run the bootstrap once, from the backend directory, with the deployment's normal Django settings and database credentials:
+   ```bash
+   python manage.py bootstrap_fresh_database
+   ```
+5. Review the command output and verify the resulting Account, Currency, and AuditEvent records before allowing operational use.
+
+## Safety behavior
+
+- This is an explicit management command. It is not run by migrations, app startup, WSGI, or ASGI.
+- On a fresh database where both Account and Currency tables are empty, creation of the canonical COA, AFN/USD, and the audit event occurs in one database transaction.
+- A sequential rerun verifies the canonical configuration and exits without changing rows or adding another audit event.
+- If the database contains partial or divergent accounting master data, the command refuses to proceed. It does not attempt repair, merge, reset, or overwrite.
+- Existing canonical account edits are not silently replaced. Resolve any divergence through the approved accounting-owner process; do not delete or reset records to force the command through.
+- Additional non-canonical accounts or currencies are not deleted. The command verifies the required canonical records only.
+- Run this command operationally as a single controlled action; do not start concurrent bootstrap executions.
+
+## Explicitly out of scope
+
+The command does not create users, roles, fiscal periods, warehouses, products, parties, opening balances, exchange rates, or business transactions. Those require their own approved setup workflows.
+
+## Evidence and review
+
+The automated tests in `accounting/test_bootstrap.py` cover fresh initialization, AFN/USD configuration, audit recording, sequential idempotency, refusal on partial setup, and preservation of accountant edits.
+
+A successful command is evidence that this bootstrap operation completed for the selected database; it is not a claim that the ERP is production-ready or that other operational setup is complete.
