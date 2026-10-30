@@ -1,10 +1,11 @@
 """Evidence for the approved Phase 8 Sales contract.
 
-Authoritative contract: ``docs/phase-reports/PHASE_8_RESOLVED_CONTRACT.md``.
+Contract references: ``docs/phase-8-invoice-time-cogs-allocation-contract.md`` and ``docs/phase-reports/PHASE_8_FINAL_CONTRACT_LOCK.md``.
 
-Every assertion here maps to a clause of that resolved contract. This file is
-deliberately separate from ``sales_tests.py`` so that no file in the
-``PHASE_8_FROZEN_REFERENCE.md`` §3 SHA-256 manifest is modified.
+These tests document the currently recorded Phase 8 decisions. The two
+historical paths ``PHASE_8_RESOLVED_CONTRACT.md`` and
+``PHASE_8_FROZEN_REFERENCE.md`` are not present in the repository; do not treat
+them as active contract or manifest references.
 """
 
 from datetime import date
@@ -39,8 +40,8 @@ from .services import (
 )
 
 
-class ResolvedContractTests(TestCase):
-    """Clause-by-clause evidence for PHASE_8_RESOLVED_CONTRACT.md."""
+class ApprovedSalesContractTests(TestCase):
+    """Evidence for the recorded Phase 8 Sales contract and decisions."""
 
     @classmethod
     def setUpTestData(cls):
@@ -128,7 +129,7 @@ class ResolvedContractTests(TestCase):
     # Clause 3 — Revenue AND COGS at Sales Finalization (owner-approved
     # invoice-time COGS); Warehouse Check is custody-only afterwards.
 
-    def test_revenue_posts_at_finalization_and_cogs_posts_only_at_check_finalization(self):
+    def test_revenue_and_cogs_post_at_invoice_finalization_not_again_at_check(self):
         sale = self.sale()
         self.assertEqual(JournalEntry.objects.count(), 0)
         self.assertEqual(StockMovement.objects.count(), 0)
