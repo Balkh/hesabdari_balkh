@@ -9,7 +9,7 @@ from django.db import transaction
 from accounting.coa import CANONICAL_COA, seed_chart_of_accounts
 from accounting.models import Account
 from currencies.models import Currency
-from security.models import AuditAction
+from security.models import AuditAction, AuditEvent
 from security.services import record_audit_event
 
 
@@ -19,9 +19,12 @@ CURRENCY_DEFINITIONS = (
     ("USD", "US Dollar", "$", 2, False, True),
 )
 
+BOOTSTRAP_AUDIT_ENTITY = "SystemBootstrap"
+BOOTSTRAP_AUDIT_REFERENCE = "fresh-database-v1"
+
 
 def _verify_existing_configuration():
-    """Verify canonical rows without modifying accountant-maintained data."""
+    """Verify canonical rows and the bootstrap audit record without mutation."""
     errors = []
     accounts_by_code = {a.code: a for a in Account.objects.select_related("parent").all()}
     for code, name, name_fa, account_type, parent_code, is_posting, is_active in CANONICAL_COA:
@@ -60,6 +63,19 @@ def _verify_existing_configuration():
 
     if Currency.objects.filter(is_base=True).exclude(code="AFN").exists():
         errors.append("a currency other than AFN is marked as base")
+
+    audit_events = AuditEvent.objects.filter(
+        entity=BOOTSTRAP_AUDIT_ENTITY,
+        reference=BOOTSTRAP_AUDIT_REFERENCE,
+    )
+    if audit_events.count() != 1:
+        errors.append(
+            "expected exactly one bootstrap audit event "
+            f"for {BOOTSTRAP_AUDIT_REFERENCE}; found {audit_events.count()}"
+        )
+    elif audit_events.get().action != AuditAction.CREATE:
+        errors.append("bootstrap audit event has an unexpected action")
+
     return errors
 
 
@@ -85,8 +101,8 @@ class Command(BaseCommand):
                     )
                 self.stdout.write(
                     self.style.SUCCESS(
-                        "Bootstrap already present: canonical COA and AFN/USD "
-                        "configuration verified; no data changed."
+                        "Bootstrap already present: canonical COA, AFN/USD, and "
+                        "the single bootstrap audit event verified; no data changed."
                     )
                 )
                 return
@@ -107,8 +123,8 @@ class Command(BaseCommand):
 
             record_audit_event(
                 action=AuditAction.CREATE,
-                entity="SystemBootstrap",
-                reference="fresh-database-v1",
+                entity=BOOTSTRAP_AUDIT_ENTITY,
+                reference=BOOTSTRAP_AUDIT_REFERENCE,
                 new_state={
                     "chart_of_accounts": coa_result,
                     "currencies": [definition[0] for definition in CURRENCY_DEFINITIONS],
