@@ -30,6 +30,27 @@ BOOTSTRAP_AUDIT_REFERENCE = "fresh-database-v1"
 FRAMEWORK_GENERATED_MODELS = {ContentType, Permission}
 
 
+def _find_missing_application_tables(using="default"):
+    """Return missing installed, managed application model tables.
+
+    This schema-only preflight must run before any ORM query so an incomplete
+    migration cannot surface as an unhandled database error.
+    """
+    connection = connections[using]
+    existing_tables = set(connection.introspection.table_names())
+    missing_tables = []
+
+    for model in apps.get_models(include_auto_created=False):
+        if model._meta.proxy or not model._meta.managed:
+            continue
+        if model in FRAMEWORK_GENERATED_MODELS:
+            continue
+        if model._meta.db_table not in existing_tables:
+            missing_tables.append(model._meta.label)
+
+    return missing_tables
+
+
 def _find_existing_application_data(using="default"):
     """Return missing model tables and app/framework rows that block bootstrap.
 
@@ -124,6 +145,18 @@ class Command(BaseCommand):
 
     def handle(self, *args, **options):
         with transaction.atomic():
+            # Check schema completeness before the first ORM query. Otherwise
+            # a missing Account/Currency/AuditEvent table could raise a raw
+            # database exception before the safety guard can report it.
+            missing_tables = _find_missing_application_tables()
+            if missing_tables:
+                labels = ", ".join(sorted(missing_tables))
+                raise CommandError(
+                    "Bootstrap refused: database schema is incomplete; model "
+                    f"tables are missing ({labels}). Apply all migrations first. "
+                    "No rows were changed."
+                )
+
             has_accounts = Account.objects.exists()
             has_currencies = Currency.objects.exists()
 
@@ -159,14 +192,7 @@ class Command(BaseCommand):
             # Do not infer that the whole database is fresh merely because the
             # two bootstrap target tables are empty. Inspect every installed,
             # managed application model before writing any master data.
-            missing_tables, populated_models = _find_existing_application_data()
-            if missing_tables:
-                labels = ", ".join(sorted(missing_tables))
-                raise CommandError(
-                    "Bootstrap refused: database schema is incomplete; model "
-                    f"tables are missing ({labels}). Apply all migrations first. "
-                    "No rows were changed."
-                )
+            _, populated_models = _find_existing_application_data()
             if populated_models:
                 labels = ", ".join(sorted(populated_models))
                 raise CommandError(
