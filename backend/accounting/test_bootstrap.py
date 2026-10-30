@@ -79,6 +79,22 @@ class FreshDatabaseBootstrapTests(TestCase):
             2,
         )
 
+    def test_fresh_database_refuses_existing_orphaned_bootstrap_audit(self):
+        event = AuditEvent.objects.create(
+            action=AuditAction.CREATE,
+            entity="SystemBootstrap",
+            reference="fresh-database-v1",
+            reason="Orphaned bootstrap marker fixture",
+        )
+
+        with self.assertRaisesMessage(CommandError, "a bootstrap audit event already exists"):
+            call_command("bootstrap_fresh_database")
+
+        self.assertEqual(Account.objects.count(), 0)
+        self.assertEqual(Currency.objects.count(), 0)
+        self.assertEqual(AuditEvent.objects.count(), 1)
+        self.assertEqual(AuditEvent.objects.get(pk=event.pk).reason, "Orphaned bootstrap marker fixture")
+
     def test_audit_failure_rolls_back_all_bootstrap_rows(self):
         with patch(
             "accounting.management.commands.bootstrap_fresh_database.record_audit_event",
