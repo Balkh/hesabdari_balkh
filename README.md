@@ -1,50 +1,36 @@
-# hesabdari_balkh
+# Hesabdari Balkh
 
-Professional, offline-first, bilingual ERP foundation for an Afghan trading company.
+Bilingual (English and Persian/Dari) ERP for an Afghan trading company.
 
-## Phase 1 status
+## Repository status
 
-```text
-FOUNDATION COMPLETE AND VERIFIED — all CI jobs green
-```
+This repository has progressed beyond the original Phase 1 foundation. The current `main` branch contains accounting, purchasing, inventory/costing, security, and sales-domain work. However, the presence of backend services and tests does **not** mean every business workflow is available through an end-to-end API or frontend.
 
-Phase 1 delivered the complete technical foundation: Django backend, DRF API
-boundary, currencies + historical exchange rates, Jalali/Gregorian date
-boundary, Jalali-aware document numbering, double-entry journal foundation,
-atomicity/idempotency infrastructure, security/audit foundation, and a
-React/TypeScript frontend shell with Persian/English i18n and RTL/LTR.
+Use the phase contracts, freeze records, pull requests, and exact-head CI evidence in this repository as the authority for the status and scope of each capability. In particular:
 
-Verification (GitHub Actions run 34149040085):
+- Frozen accounting and inventory contracts must be preserved; posted financial history is corrected through the approved reversal mechanisms, not edited in place.
+- Phase 8 Sales is not wholly complete or frozen. Its remaining fulfillment, custody-accounting, FUTURE-sale COGS, cancellation/reversal, and return decisions remain gated where the authoritative contract documents say so.
+- Security batch freezes are limited to their recorded scope and do not constitute production-readiness approval.
+- No production deployment, operational recovery capability, or full end-to-end ERP readiness should be inferred from passing CI alone.
 
-```text
-✓ backend    Django check + 17 tests + 25 pytest
-✓ frontend   tsc + Vite build + 4 node tests
-✓ postgresql full foundation suite on a real PostgreSQL 16 server
-✓ tauri      cargo check PASS (Tauri v2 desktop shell compiles)
-```
+For current implementation and decision status, start with `docs/phase-reports/`, the relevant phase contract documents, and the merged PR history. Historical reports should be read as records of their stated date, not as current status unless reaffirmed by a current authoritative record.
 
-Business workflows (purchasing, sales, inventory transactions, payments,
-returns, remittance, reporting) are intentionally NOT implemented yet. They
-start only after the Foundation is approved and the Phase 0 domain contracts
-are defined.
-
-Remaining open item: desktop installer packaging (`tauri build`) and the
-Windows target are deferred until a suitable packaging environment is used.
-
-## Planned stack
+## Technology
 
 - Backend: Python, Django, Django REST Framework
-- Database: PostgreSQL for deployment; SQLite is the approved local/offline
-  development baseline (ADR-0002)
+- Database: PostgreSQL for deployment; SQLite for local/offline development where specified by the project baseline
 - Frontend: React, TypeScript
 - Desktop: Tauri
+- Languages and direction: English/Persian-Dari, RTL/LTR
+- Date handling: Gregorian storage with Jalali presentation where specified by the contracts
 
-## Development
+## Development and verification
 
-See `docs/architecture/PHASE_1_BASELINE.md`, `docs/decisions/`, and
-`.env.example`.
+See `docs/architecture/`, `docs/decisions/`, the phase contracts, and `.env.example`.
 
 ```bash
-make verify        # local backend + frontend verification
-scripts/verify_postgresql.sh   # full suite against PostgreSQL (needs a server)
+make verify
+scripts/verify_postgresql.sh   # requires a PostgreSQL server
 ```
+
+CI results are tied to specific commits and should be checked on the exact PR head or `main` SHA under review. A green CI run is necessary evidence for code changes, but it does not replace accounting-owner review or approval of business contracts.
