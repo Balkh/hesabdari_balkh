@@ -104,6 +104,11 @@ class FreshDatabaseBootstrapTests(TestCase):
 
     def test_rerun_refuses_when_another_base_currency_exists(self):
         call_command("bootstrap_fresh_database")
+        # The schema enforces at most one base currency. Move the base flag
+        # rather than attempting an impossible second is_base=True insert.
+        afn = Currency.objects.get(code="AFN")
+        afn.is_base = False
+        afn.save(update_fields=["is_base"])
         Currency.objects.create(
             code="EUR",
             name="Euro",
@@ -113,8 +118,13 @@ class FreshDatabaseBootstrapTests(TestCase):
             is_active=True,
         )
 
-        with self.assertRaisesMessage(CommandError, "a currency other than AFN is marked as base"):
+        with self.assertRaises(CommandError) as raised:
             call_command("bootstrap_fresh_database")
+
+        self.assertIn("a currency other than AFN is marked as base", str(raised.exception))
+        afn.refresh_from_db()
+        self.assertFalse(afn.is_base)
+        self.assertTrue(Currency.objects.get(code="EUR").is_base)
 
     def test_existing_currency_edit_is_never_overwritten(self):
         call_command("bootstrap_fresh_database")
