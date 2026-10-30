@@ -40,7 +40,7 @@ def _find_missing_application_tables(using="default"):
     existing_tables = set(connection.introspection.table_names())
     missing_tables = []
 
-    for model in apps.get_models(include_auto_created=False):
+    for model in apps.get_models(include_auto_created=True):
         if model._meta.proxy or not model._meta.managed:
             continue
         if model in FRAMEWORK_GENERATED_MODELS:
