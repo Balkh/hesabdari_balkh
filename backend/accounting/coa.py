@@ -69,6 +69,7 @@ CANONICAL_COA = (
     ("6100", "Operating Expenses", "مصارف عملیاتی", AccountType.EXPENSE, "6000", True, True),
     ("6200", "Freight & Transport", "کرایه و حمل‌ونقل", AccountType.EXPENSE, "6000", True, True),
     ("6300", "Salaries", "معاشات", AccountType.EXPENSE, "6000", True, True),
+    ("6400", "Exchange House Commission Expense", "هزینه کمیسیون صرافی‌ها", AccountType.EXPENSE, "6000", True, True),
     # --- Foreign Exchange (top-level, no 8000 group) -----------------------
     ("8100", "Foreign Exchange Gain", "عاید تبادله ارز", AccountType.REVENUE, None, True, True),
     ("8200", "Foreign Exchange Loss", "ضرر تبادله ارز", AccountType.EXPENSE, None, True, True),
