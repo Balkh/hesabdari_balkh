@@ -91,6 +91,43 @@ class FreshDatabaseBootstrapTests(TestCase):
         self.assertEqual(Currency.objects.count(), 0)
         self.assertEqual(AuditEvent.objects.count(), 0)
 
+    def test_rerun_refuses_when_bootstrap_audit_action_is_wrong(self):
+        call_command("bootstrap_fresh_database")
+        event = AuditEvent.objects.get(
+            entity="SystemBootstrap", reference="fresh-database-v1"
+        )
+        event.action = AuditAction.UPDATE
+        event.save(update_fields=["action"])
+
+        with self.assertRaisesMessage(CommandError, "unexpected action"):
+            call_command("bootstrap_fresh_database")
+
+    def test_rerun_refuses_when_another_base_currency_exists(self):
+        call_command("bootstrap_fresh_database")
+        Currency.objects.create(
+            code="EUR",
+            name="Euro",
+            symbol="€",
+            decimal_places=2,
+            is_base=True,
+            is_active=True,
+        )
+
+        with self.assertRaisesMessage(CommandError, "a currency other than AFN is marked as base"):
+            call_command("bootstrap_fresh_database")
+
+    def test_existing_currency_edit_is_never_overwritten(self):
+        call_command("bootstrap_fresh_database")
+        currency = Currency.objects.get(code="USD")
+        currency.name = "Accountant-approved USD label"
+        currency.save(update_fields=["name"])
+
+        with self.assertRaises(CommandError):
+            call_command("bootstrap_fresh_database")
+
+        currency.refresh_from_db()
+        self.assertEqual(currency.name, "Accountant-approved USD label")
+
     def test_partial_database_is_refused_without_mutation(self):
         Account.objects.create(
             code="1000",
