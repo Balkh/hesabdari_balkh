@@ -107,6 +107,18 @@ class Command(BaseCommand):
                 )
                 return
 
+            # A bootstrap marker without its master data is an inconsistent
+            # partial state. Refuse rather than creating a second audit record.
+            if AuditEvent.objects.filter(
+                entity=BOOTSTRAP_AUDIT_ENTITY,
+                reference=BOOTSTRAP_AUDIT_REFERENCE,
+            ).exists():
+                raise CommandError(
+                    "Bootstrap refused: a bootstrap audit event already exists "
+                    "while accounting master data is empty. Review manually; "
+                    "no rows were changed."
+                )
+
             # Fresh database only. The existing seed function is called only
             # after proving both master tables are empty, so it cannot silently
             # overwrite accountant edits on an established database.
