@@ -205,6 +205,42 @@ These are business requirements. Exact accounting entries, fee classification, c
 
 Do not assume all three methods are interchangeable in their accounting treatment.
 
+### 6.2.1 Supplier purchase settlement — explicit owner clarification
+
+For payments settling a supplier's purchase payable, the supplier must receive the
+full amount owed. Exchange-house commission is a separate company expense and MUST
+NOT reduce the supplier's payable or the principal credited as paid to the supplier.
+
+Owner-approved rules:
+
+- Commission is optional per payment; it is not mandatory.
+- A payment may have zero commission. Zero commission creates no commission
+  expense journal line or expense event.
+- When commission is charged, record it separately from the supplier principal.
+- The canonical expense account is **6400 — Exchange House Commission Expense**
+  (**هزینه کمیسیون صرافی‌ها**), a posting EXPENSE account under 6000 — Expenses.
+- If the commission is charged to the company's exchange-house balance, debit
+  the commission expense and credit that exchange-house account separately from
+  the supplier-principal settlement.
+- If commission is paid separately from company cash/bank, debit the commission
+  expense and credit the actual cash/bank account separately.
+- The supplier payable is settled for the full principal amount, regardless of
+  the separate commission.
+- Preserve separate principal and commission amounts, currencies, rates, dates,
+  exchange-house/payment references, and source-document traceability.
+- Apply atomicity, idempotency, historical FX integrity, and reversal-only
+  correction to posted accounting effects.
+
+Illustration for a USD 100,000 supplier payable and USD 50 commission:
+
+- Supplier settlement: Dr Trade Payables 100,000 / Cr Exchange House 100,000.
+- Commission from exchange-house balance: Dr 6400 50 / Cr Exchange House 50.
+- Or commission paid separately: Dr 6400 50 / Cr the actual cash/bank account 50.
+
+If commission is zero, only the supplier settlement is recorded. This supplier
+rule does not silently define commission treatment for unrelated sales or other
+business events; those must follow their own approved contracts.
+
 ## 6.3 Out of scope
 
 A standalone public/third-party remittance business is excluded unless the owner explicitly changes scope.
