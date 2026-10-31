@@ -138,7 +138,7 @@ Exact local bootstrap mechanism (installer token vs. locally authorized setup ut
 
 ### 7.3 Recovery-code/key protection
 
-- Initial proposal: generate 10 single-use recovery codes; display/print once; store only secure hashes in the database.
+- Generate 10 single-use recovery codes; display/print once; store only secure hashes in the database (owner-approved direction).
 - Used codes are invalidated; reissuing a set invalidates all previous unused codes.
 - Store the emergency owner key separately from the computer, in a protected offline location.
 - Protect TOTP secrets encrypted at rest. Encryption-key handling must be designed with OS secure storage/TPM where available and must include a documented recovery/backup strategy.
@@ -213,7 +213,7 @@ Use action-level permission keys in the form `<domain>.<resource>.<action>`. Per
 - Object-level scope (assigned warehouse, assigned documents, permitted parties) must be enforced server-side.
 - Any additional role or permission requires a documented owner-approved matrix change.
 
-### Item 2 — Resolver precedence and multiple roles (proposal)
+### Item 2 — Resolver precedence and multiple roles (owner-approved)
 
 Recommended deterministic resolver:
 
@@ -233,9 +233,9 @@ Additional rules:
 - All decisions must be explainable in a diagnostic trace (subject, action, object scope, matched rule, result), without exposing secrets to the frontend.
 - Unknown permission keys, malformed scope, and resolver errors fail closed.
 
-This proposal resolves the D3 deny-precedence requirement while preserving explicit per-user grants. Owner confirmation is required.
+This owner-approved resolution satisfies D3 deny precedence while preserving explicit per-user grants.
 
-### Item 3 — GM first-run bootstrap and recovery key custody (proposal)
+### Item 3 — GM first-run bootstrap and recovery key custody (owner-approved direction; implementation details open)
 
 **First-run bootstrap:**
 
@@ -263,11 +263,11 @@ This proposal resolves the D3 deny-precedence requirement while preserving expli
 - The emergency owner key and encryption-key recovery material must be stored separately from the computer and separately from ordinary database backups.
 - Recovery utility use must be one-time, locally authorized, logged, and must invalidate prior sessions and MFA factors.
 
-### Item 4 — Numeric security and session defaults (proposal)
+### Item 4 — Numeric security and session defaults (owner-approved)
 
 Recommended initial single-computer defaults:
 
-| Control | Proposed value | Behavior |
+| Control | Owner-approved default | Behavior |
 |---|---:|---|
 | Failed password attempts | 5 consecutive failures | Trigger temporary account lock |
 | Lock duration | 15 minutes | GM may manually unlock sooner; each attempt remains audited |
@@ -282,7 +282,7 @@ Recommended initial single-computer defaults:
 
 These defaults are owner-approved starting values. TOTP remains mandatory for GM; employee MFA remains configurable by GM. Lockout must not provide an unauthenticated denial-of-service lever: rate-limit by account and local source, use bounded lock duration, and allow GM recovery through the controlled local administration path. Exact rate-limit implementation must remain compatible with the one-computer/no-Redis architecture.
 
-### Item 5 — Database append-only audit mechanism (proposal)
+### Item 5 — Database append-only audit mechanism (owner-approved direction; implementation details open)
 
 Use a layered, cross-database design:
 
@@ -336,11 +336,11 @@ This amendment supersedes the narrower Accountant entries in the original Sectio
 
 W0-2A is architecture-first and additive:
 
-1. Finalize resolver semantics, permission taxonomy, role matrix, bootstrap/recovery details, and numeric session/security parameters.
-2. Implement additive RBAC models and migration without changing existing endpoint authorization behavior.
-3. Add deterministic unit tests for permission resolution, expiry, deny precedence, GM protected authority, and multi-role cases.
-4. Verify migrations and existing security/accounting regressions on SQLite and PostgreSQL.
-5. Present schema/API impact and evidence for owner review.
+1. Inspect the current branch, repository models, migrations, tests, and existing audit/authentication services; map the owner-approved policy to the smallest compatible additive model design.
+2. Resolve remaining technical details for first-run provisioning, TOTP encryption/key recovery, database-specific audit triggers/hash chaining, and migration behavior. Any change to an owner-approved policy requires a separate owner decision.
+3. Prepare the exact schema/model mapping and migration plan, with no endpoint authorization behavior changes; present the plan and impact for owner review before implementation.
+4. After the bounded model plan is approved, implement additive RBAC models/migration and deterministic tests for resolver precedence, expiry, deny precedence, protected GM authority, and multi-role cases.
+5. Verify migrations and existing security/accounting regressions on SQLite and PostgreSQL, then present evidence for owner review.
 
 Backend enforcement, login/MFA/recovery endpoints, employee administration, audit hardening, and frontend authorization are separate bounded workstreams (W0-2B onward). Do not bundle them into W0-2A.
 
@@ -357,14 +357,14 @@ Backend enforcement, login/MFA/recovery endpoints, employee administration, audi
 
 ## 12. Acceptance gate
 
-Before W0-2A code implementation, owner must approve:
+Before W0-2A code implementation, complete and present for owner review:
 
-1. Permission taxonomy and exact initial role matrix.
-2. Resolver precedence, including role aggregation and user override conflicts.
-3. Model mapping and migration approach.
-4. First-run GM bootstrap mechanism.
-5. Recovery key custody and encryption-key backup strategy.
-6. Numeric lockout, idle timeout, session, and TOTP clock-drift parameters.
-7. Audit database append-only mechanism and supported database behavior.
+1. Exact additive model mapping and migration plan, preserving Django's default User model and avoiding duplicate permission engines.
+2. Technical implementation design for one-time local GM bootstrap and offline recovery, including TOTP encryption and key-backup/restore behavior.
+3. SQLite and PostgreSQL audit enforcement details, hash-chain canonicalization, signed checkpoint handling, and restore continuity tests.
+4. Exact permission-key catalog and object-scope mapping for the owner-approved Accountant / Operations role and Warehouse Keeper role.
+5. A bounded W0-2A implementation plan proving existing endpoint authorization behavior and frozen Security Batch 2/3 contracts remain unchanged.
+
+The five policy decisions and Accountant-role amendment are already owner-approved; this remaining review is technical design and implementation planning, not a request to re-approve those decisions.
 
 **Current status:** five design items and the Accountant operational-role amendment are owner-approved. This document update records policy decisions only; it does not claim that any schema, migration, API, frontend, authentication behavior, or audit behavior has been implemented or verified.
