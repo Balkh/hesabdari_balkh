@@ -1222,7 +1222,7 @@ The following are proposed rather than silently approved:
 | Idempotency key format | PROPOSED — USER APPROVAL REQUIRED |
 | `4110` versus `4120` | RESOLVED — OWNER-APPROVED: WHOLESALE → 4110; RETAIL → 4120 (PH8.2-001) |
 | Revenue timing | RESOLVED — OWNER-APPROVED at successful invoice finalization for supported sale types including FUTURE (PH8-026, 2026-10-29); implementation review pending |
-| COGS/inventory timing | PARTIALLY RESOLVED — Type-B COGS trigger is resolved by OD-1; customer-custody financial inventory valuation/reporting and any remaining Type-A inventory presentation questions remain open | OD-1 resolves Type-B authorization timing and source-lot cost; custody accounting remains separately unresolved | Owner/accounting review of remaining custody and inventory presentation questions |
+| COGS/inventory timing | PARTIALLY RESOLVED — Type-B COGS at Warehouse Release Authorization using actual source-lot cost under OD-1; customer-custody financial inventory valuation/reporting and remaining Type-A inventory presentation questions remain open |
 | Custody accounting/valuation | UNRESOLVED — ACCOUNTING DECISION REQUIRED |
 | Cancellation/reversal | UNRESOLVED — USER/ACCOUNTING DECISION REQUIRED |
 | Phase 7 clean baseline | BLOCKED — BASELINE EVIDENCE |
