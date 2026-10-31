@@ -404,7 +404,7 @@ Revision 4 is a documentation-only correction to the already-pushed Revision 3 d
 
 ### 13.2 Mandatory repository inspection and revision evidence
 
-The following is the independently observed GitHub state immediately before the Revision 3 document update:
+The following is the historical GitHub state immediately before the Revision 3 document update (retained for audit history, not current branch status):
 
 | Item | Verified value | Method | Status |
 |---|---|---|---|
@@ -417,7 +417,7 @@ The following is the independently observed GitHub state immediately before the 
 | Exact pre-update branch commit SHA | Not exposed by the available branch/compare response | Connector response inspection | NOT VERIFIABLE |
 | CI for pre-update branch tip | No exact branch-tip SHA was exposed for a reliable check lookup in this inspection | Connector response inspection | NOT VERIFIABLE |
 
-After the Revision 3 update, the resulting commit SHA, file blob SHA, compare counts, PR search, and exact-commit CI/status lookup must be recorded in the owner handoff. No CI success is inferred from an empty or unavailable status response.
+Revision 3's post-update evidence is superseded by the current Revision 4 evidence in §24.3. No CI success is inferred from an empty or unavailable status response.
 
 ### 13.3 Independent re-verification of cited code facts (not trusted from prior reports)
 
@@ -1183,6 +1183,7 @@ Classification vocabulary: **ALREADY-DECIDED** (owner decided; closed) · **TECH
 | M | BasicAuthentication could satisfy password-only authentication despite mandatory GM MFA | W0-2C route inventory and proof that Basic-only requests cannot reach protected MFA routes; transition requires Batch 2/3 compatibility review | §6, §16.4 |
 | N | Resolver exception boundary did not cover account/session and permission lookup failures | One fail-closed boundary over all security lookups; tests for DB/cache/scope errors | §16.1–16.4 |
 | O | SQLite grant service treated first UPDATE as safe despite ambient DEFERRED transaction risk | Uniform outermost IMMEDIATE requirement for SQLite grant/audit operations; ambient DEFERRED prohibited; whole-operation retry; owner consent required | §14.6, §18.4–18.6, §23 |
+| P | Grant-service race text implied retry after same-slot unique conflict would necessarily succeed | Distinguish transient lock/busy retry from domain-level same-slot conflict; never automatically retry an active/scheduled conflicting grant | §14.6 |
 
 ## 23. Remaining owner decisions (explicit list)
 
@@ -1190,7 +1191,7 @@ Classification vocabulary: **ALREADY-DECIDED** (owner decided; closed) · **TECH
 2. **UQ-4** — approve adding the `cryptography` dependency (needed by W0-2C/E; not by A).
 3. **UQ-1** — GM-assignment revocation policy (needed before W0-2C).
 4. **UQ-10** — third-session behavior (needed before W0-2D).
-5. **W0-2E SQLite transaction policy consent** — approve or decline the required SQLite OPTIONS transaction_mode="IMMEDIATE" setting for audit-producing workflows. This is not a cosmetic recommendation: without an IMMEDIATE outermost transaction before business reads, the proposed SQLite chain-writer guarantee is not established. The setting affects all outermost atomic transactions on that SQLite connection. If declined, W0-2E must return with an alternative proven boundary design; it must not ship a DEFERRED/late-UPDATE approximation.
+5. **W0-2E SQLite transaction policy consent** — approve or decline the required SQLite OPTIONS transaction_mode="IMMEDIATE" setting for audit-producing and grant-writing workflows. This is not a cosmetic recommendation: without an IMMEDIATE outermost transaction before business reads, the proposed SQLite chain-writer guarantee is not established. The setting affects all outermost atomic transactions on that SQLite connection. If declined, W0-2E must return with an alternative proven boundary design; it must not ship a DEFERRED/late-UPDATE approximation.
 6. **UQ-6 / UQ-7** — backup cadence/retention and auditor masking parameters (before W0-2E).
 7. **UQ-8** — trusted origins list (before W0-2F).
 
@@ -1225,7 +1226,9 @@ Revision 4 changes exactly one repository file: `docs/architecture/W0-2A_RBAC_OF
 
 ### 24.3 Evidence availability statement
 
-Immediately before Revision 4, live GitHub inspection verified main at `99579d99f4b7c668118ad7e2add2a2ef91d04fba`; branch was 7 commits ahead and 0 behind, with exactly one file added (this document; 1,207 additions before Revision 4). Pre-update blob: `415f48261cfe263b75ed9a9b410142051f376384`. No matching W0-2A PR was returned. Prior Revision 3 commit `e562c73b2c9e6c24e2b999e5c406122e9480cc44` had zero check-runs and zero statuses; CI is NOT VERIFIABLE, not GREEN. After Revision 4, record new commit/blob SHA, refreshed compare, PR search, and exact-commit CI/check-run/status. Empty checks are NOT VERIFIABLE, never GREEN.
+Immediately before Revision 4, live GitHub inspection verified main at `99579d99f4b7c668118ad7e2add2a2ef91d04fba`; branch was 7 commits ahead and 0 behind, with exactly one file added (this document; 1,207 additions before Revision 4). Pre-update blob: `415f48261cfe263b75ed9a9b410142051f376384`. No matching W0-2A PR was returned. Prior Revision 3 commit `e562c73b2c9e6c24e2b999e5c406122e9480cc44` had zero check-runs and zero statuses; CI was NOT VERIFIABLE, not GREEN.
+
+**Post-Revision-4 live evidence:** branch tip `e10b1971322d0f7337deb6467cfce31dae716767`; file blob `add6ba62cdcc12917e14423ca5e6c04afd8a0ff6`; 1,234 lines; compare vs main `99579d99f4b7c668118ad7e2add2a2ef91d04fba` = 9 ahead / 0 behind, exactly one file added and no other file changes. Exact-commit status response: `pending`, zero statuses; check-runs: zero. Therefore CI is NOT VERIFIABLE, not GREEN. No matching W0-2A PR was returned by the current repository PR listing.
 
 ### 24.4 STOP
 
