@@ -964,14 +964,13 @@ Remaining blockers to an implementation-ready financial contract:
 
 1. `4110` versus `4120` rule — RESOLVED by owner: `WHOLESALE → 4110`; `RETAIL → 4120` (PH8.2-001);
 2. revenue timing — RESOLVED by owner at successful invoice finalization for supported sale types including FUTURE (PH8-026, 2026-10-29); implementation alignment remains pending review of exact-head test evidence;
-3. Type-B COGS trigger — RESOLVED by OD-1: Warehouse Release Authorization after actual receipt and allocation; actual source-lot cost is required;
-4. define financial inventory valuation/reporting for customer-owned custody;
-5. approve the custody/entitlement representation and reconciliation authority;
-6. define fulfillment allocation semantics and cost/source locking;
-7. approve the Warehouse Release Authorization and printing boundary;
-8. define controlled Sales cancellation/reversal rules;
-9. qualify the Phase 7 baseline discrepancy;
-10. provide or verify the authoritative GitHub baseline.
+3. define financial inventory valuation/reporting for customer-owned custody;
+4. approve the custody/entitlement representation and reconciliation authority;
+5. define fulfillment allocation semantics and cost/source locking;
+6. approve the Warehouse Release Authorization and printing boundary;
+7. define controlled Sales cancellation/reversal rules;
+8. qualify the Phase 7 baseline discrepancy;
+9. provide or verify the authoritative GitHub baseline.
 
 These are not implementation details. They are contract decisions.
 
