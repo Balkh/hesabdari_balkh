@@ -6,7 +6,8 @@
 **Status:** FIVE DESIGN ITEMS OWNER-APPROVED; ACCOUNTANT ROLE EXPANSION OWNER-APPROVED; TECHNICAL MODEL MAPPING AND IMPLEMENTATION PLAN REMAIN OPEN; OWNER REVIEW PENDING  
 **Date:** 2026-10-31  
 **Revision 2:** 2026-10-31 — technical design correction, pushed to the working branch for owner review.  
-**Revision 3:** 2026-10-31 — targeted documentation-only corrections to the audit hash-chain and SQLite transaction contract, plus refreshed repository evidence. No application code, model, migration, API, frontend, test, or runtime behavior changes. No PR, merge, deployment, or implementation authorization.
+**Revision 3:** 2026-10-31 — documentation-only corrections to the audit hash-chain and SQLite transaction contract.
+**Revision 4:** 2026-10-31 — documentation-only corrections to mandatory object-scope enforcement, Django Admin GM-only access, MFA/BasicAuthentication interaction, resolver fail-closed behavior, SQLite transaction consistency, and stale evidence. No application code, model, migration, API, frontend, test, settings, or runtime behavior changes. No PR, merge, deployment, or implementation authorization.
 
 ## 1. Purpose and boundary
 
@@ -66,7 +67,7 @@ The initial role catalog is limited to:
 
 Role names are approved. The initial Accountant permission matrix is owner-approved as a broad operational role, as amended in the owner decision record below. Exact permission keys, object scopes, and per-user configuration must still be mapped during implementation planning. Warehouse Keeper remains limited to warehouse duties unless the GM explicitly grants additional per-user permissions.
 
-Django Admin is GM-only (owner decision D5). Employee workflows must be provided through controlled ERP interfaces, not Django Admin.
+Django Admin is GM-only (owner decision D5). Employee workflows must be provided through controlled ERP interfaces, not Django Admin. This is a server-side gate, not a navigation/UI rule; see the binding AdminSite contract in §5.1.
 
 **[Rev 2]** The exact permission-key catalog is now defined: §15 (162 keys across 20 domains; seeds GM = 150, Accountant = 101, Warehouse Keeper = 12).
 
@@ -99,6 +100,14 @@ Permission checks must not bypass accounting/business-service validation. Existi
 
 GM has full ERP administrative authority within hard domain invariants. GM may create and approve the GM's own operations; a second approver is not required. No ordinary per-user deny/override may remove protected GM authority.
 
+### 5.1 Binding Django Admin access contract (Revision 4)
+
+Django Admin access MUST be checked by a custom `AdminSite.has_permission()` (or equivalent centralized server-side gate) on every admin request. Require authenticated user, `is_active=True`, an active GM role assignment at the current time, and `is_staff=True` only as an additional Django admission flag—not as the authorization decision. Non-GM staff is denied. `is_superuser=True` MUST NOT bypass the GM-role check. Inactive or locked GM is denied.
+
+Apply the same GM gate to admin index, app/model permissions, changelist, add/change/delete/history, autocomplete, actions, custom admin URLs, and exports. Tests: non-GM staff denied; non-GM superuser denied; active GM staff admitted; inactive/locked GM denied; direct/custom URLs denied for non-GM; actions cannot bypass the gate. Provisioning sets `is_staff` only for GM; never use `is_superuser` to grant ERP authority. Inspect and explicitly reconcile existing superuser accounts before enabling this gate.
+
+GM's authority remains subject to hard accounting/document invariants.
+
 GM administration must eventually support:
 
 - Create, activate/deactivate, and manage individual employee accounts.
@@ -113,6 +122,7 @@ Django Admin access is restricted to GM. Exact bootstrap and account-management 
 ## 6. Authentication, MFA, and sessions
 
 - GM MFA is mandatory; employee MFA is configurable by GM (D2).
+- **BasicAuthentication/MFA boundary:** DRF `BasicAuthentication` verifies username/password only and MUST NOT be a complete authentication path for protected ERP operations after MFA is introduced. W0-2A leaves the current stack untouched. Before W0-2C enables GM MFA, inventory every route accepting BasicAuthentication and prove Basic-only requests cannot reach protected ERP operations. Protected sessions must be established only after password + required MFA (or another separately owner-approved MFA-bound mechanism). Do not silently alter frozen Batch 2/3 behavior; any auth-class transition requires route-by-route compatibility review and owner approval.
 - Offline-capable TOTP is the preferred MFA direction; no internet validation service.
 - Strong password validation is required.
 - Failed logins are recorded; lockout is configurable and GM-reviewable.
@@ -390,7 +400,7 @@ The sections below are the Rev 2 technical deliverable. They correct identified 
 
 ### 13.1 Mission type
 
-Revision 3 is a documentation-only correction to the already-pushed Revision 2 design. It corrects (D) the audit hash-chain construction, (E) SQLite transaction-start/locking guarantees, and (F) repository evidence that became stale after Revision 2 was pushed. **No application code, Django models, migrations, API/frontend changes, tests, permission enforcement, authentication/session implementation, or runtime behavior were changed.** This revision updates only this design document on the existing W0-2A branch. It does not create a PR, merge, deploy, or authorize implementation. W0-2A implementation remains blocked on explicit owner approval.
+Revision 4 is a documentation-only correction to the already-pushed Revision 3 design. It resolves findings K–O in §22: mandatory object scope, Django Admin GM-only gate, MFA/BasicAuthentication boundary, resolver fail-closed coverage, SQLite transaction consistency, and repository evidence. **No application code, models, migrations, APIs, frontend, tests, settings, or runtime behavior changed.** This revision updates only this document on the existing branch; no PR, merge, deployment, or implementation authorization. W0-2A implementation remains blocked on explicit owner approval.
 
 ### 13.2 Mandatory repository inspection and revision evidence
 
@@ -504,7 +514,7 @@ Every grant/renewal/replacement/settlement operation runs:
 
 **Engine behavior:**
 
-- **SQLite (development):** single-writer per database. Step 2 executes a write before any read of slot state, so two concurrent grant operations serialize deterministically (the second blocks on the write lock, then proceeds and either finds the settled/closed row or fails the unique index). Django's SQLite default `busy_timeout` applies; W0-2B must set an explicit generous timeout and map lock errors to retriable `GrantConflictError`. Django ≥5.2 supports `"OPTIONS": {"transaction_mode": "IMMEDIATE"}` which takes the write lock at `BEGIN` — this is the **recommended belt-and-braces hardening**, proposed as an owner-visible settings change in W0-2E (not W0-2A; W0-2A changes no settings).
+- **SQLite (development):** grant-writing services MUST execute inside an outermost transaction acquiring the SQLite write reservation before business/slot reads. Preferred contract: Django ≥5.2 `"OPTIONS": {"transaction_mode": "IMMEDIATE"}`. A first-statement settlement UPDATE is safe only if no earlier statement/read has begun; it is not safe inside an ambient DEFERRED transaction. Reject entry from ambient DEFERRED transactions; nested `atomic()`/savepoints do not upgrade them. Configure explicit busy timeout; retry only the whole idempotent outer business operation. The global option affects all outermost SQLite atomic transactions and remains an owner decision before W0-2E; if declined, provide a separately proven design. W0-2A changes no settings.
 - **PostgreSQL (deployment):** partial unique index is the authoritative backstop; step 2 row-locks existing rows. Optional refinement (not required): `pg_advisory_xact_lock` keyed on the slot hash for cleaner serialization. Plain `transaction.atomic()` + settlement-first + unique backstop is sufficient and testable.
 - **Portability:** partial unique indexes with a `WHERE` condition are supported by SQLite (≥3.8) and PostgreSQL (repo precedent: `currencies/migrations/0001_initial.py:29`).
 
@@ -855,12 +865,12 @@ The resolver (`backend/security/authorization.py`, W0-2A; dormant — zero view 
 
 1. **Authentication** — `user` is None or `not user.is_authenticated` → DENY `UNAUTHENTICATED`. Nothing is persisted (frozen Batch 3 pin preserved).
 2. **Account state** — `not user.is_active` → DENY `INACTIVE_ACCOUNT`; account locked (`locked_until > now`, W0-2D; a no-op check until D ships) → DENY `ACCOUNT_LOCKED`.
-3. **Session validity** — enforced by the caller (DRF session machinery / W0-2D session records); invalid/expired → DENY `NO_ACTIVE_SESSION`.
-4. **Permission-key resolution (first catalog touch)** — unknown key or `is_active=False` → DENY `UNKNOWN_PERMISSION` + server-side warning log. Any resolver exception from here on → DENY `FAIL_CLOSED` + log (fail-closed wrapper around the whole body).
+3. **Session validity** — authentication layer MUST provide trusted session context; never infer validity from caller-supplied booleans/request fields. Validate server-side Django session and expiry; when W0-2D records exist, validate binding/revocation. Invalid, absent where required, or expired → DENY `NO_ACTIVE_SESSION`. BasicAuthentication-only context is insufficient for MFA-protected routes.
+4. **Permission-key resolution (first catalog touch)** — unknown/inactive key → DENY `UNKNOWN_PERMISSION` + warning log. The entire resolver—including account-lock/session checks and permission, override, role, scope, and GM-capability lookups—MUST be inside one fail-closed exception boundary. Expected denials retain their reason; unexpected DB/cache/resolver errors return DENY `FAIL_CLOSED` and log. No exception may escape before an authorization decision or fall through as ALLOW.
 5. **Protected GM authority** — active GM role assignment AND key ∈ GM capability set (§15.3 GM seed rule) → ALLOW `GM_PROTECTED`. Overrides are never consulted for GM. Domain invariants still apply downstream (they live below the resolver). A locked/inactive GM is denied at steps 2–3 — this is the owner-approved D9 lockout applying universally, not an authority change.
 6. **Explicit deny** — active user override with `effect=DENY` → DENY `USER_DENY`.
 7. **Explicit allow** — active user override with `effect=ALLOW` → evaluate scope (step 8); pass → ALLOW `USER_ALLOW`.
-8. **Warehouse/resource scope** — evaluated inside steps 7 and 9 wherever the operation declares a scope: unresolvable/failing scope → DENY `SCOPE_DENIED` (fail-closed; never fallback-to-global).
+8. **Mandatory object-scope policy** — every permission/operation MUST declare server-owned scope policy `NONE`, `WAREHOUSE_REQUIRED`, or `OBJECT_REQUIRED`. For every non-GM grant with policy other than `NONE`, trusted scope is mandatory. Missing scope, unresolved object, inability to derive warehouse/owner, mismatch, or scope error → DENY `SCOPE_DENIED`. `scope=None` is valid only for policy `NONE`. Derive scope from persisted target object/server-side route context; client-supplied IDs/booleans are not authoritative. Applies equally to role grants and explicit user ALLOW; ALLOW never bypasses scope. GM may use global scope but remains subject to domain invariants.
 9. **Role-derived permissions** — key ∈ union of ACTIVE role grants → scope check → ALLOW `ROLE_GRANT`.
 10. **Default deny** — otherwise DENY `NO_GRANT`.
 
@@ -869,47 +879,44 @@ Conflict rules (binding): explicit DENY (6) precedes explicit ALLOW (7) and role
 ### 16.2 Corrected pseudocode
 
 ```python
-def resolve(user, permission_key, *, at=None, scope=None) -> PermissionDecision:
+def resolve(user, permission_key, *, auth_context, resource=None, at=None) -> PermissionDecision:
+    """Conceptual contract; security-sensitive inputs are server-derived."""
     at = at or timezone.now()
     trace = []
-    # 1. Authentication — strictly first; no catalog access before this passes
-    if user is None or not user.is_authenticated:
-        return deny("UNAUTHENTICATED", trace)          # nothing persisted (Batch 3 pin)
-    # 2. Account state
-    if not user.is_active:
-        return deny("INACTIVE_ACCOUNT", trace)
-    if account_locked(user, at):                       # W0-2D; no-op until D ships
-        return deny("ACCOUNT_LOCKED", trace)
-    # 3. Session validity — caller-enforced; recorded in trace
-    if caller_session_invalid():
-        return deny("NO_ACTIVE_SESSION", trace)
     try:
-        # 4. First catalog touch happens only after 1–3
+        if user is None or not user.is_authenticated:
+            return deny("UNAUTHENTICATED", trace)  # preserve Batch 3 no-persist behavior
+        if not user.is_active:
+            return deny("INACTIVE_ACCOUNT", trace)
+        if account_locked(user, at):
+            return deny("ACCOUNT_LOCKED", trace)
+        if not auth_context.is_valid_for(user, at):
+            return deny("NO_ACTIVE_SESSION", trace)
+        if auth_context.is_basic_only and auth_context.requires_mfa:
+            return deny("MFA_REQUIRED", trace)
         perm = Permission.objects.get(key=permission_key, is_active=True)
-    except Permission.DoesNotExist:
-        return deny("UNKNOWN_PERMISSION", trace)       # + server-side warning log
-    try:
-        # 5. Protected GM
         if has_active_role(user, RoleCode.GM, at) and perm.key in gm_capability_set(at):
-            return allow("GM_PROTECTED", trace)        # overrides never consulted
-        # 6. Explicit deny
-        o = active_override(user, perm, at)
-        if o is not None and o.effect == Effect.DENY:
+            return allow("GM_PROTECTED", trace)
+        override = active_override(user, perm, at)
+        if override is not None and override.effect == Effect.DENY:
             return deny("USER_DENY", trace)
-        # 7. Explicit allow (scope may still deny)
-        if o is not None and o.effect == Effect.ALLOW:
-            if scope is not None and not scope.allows(user, perm):
-                return deny("SCOPE_DENIED", trace)     # 8. scope restriction
+        policy = permission_scope_policy(perm)  # server-owned registry metadata
+        trusted_scope = derive_scope_from_persisted_resource(resource, policy)
+        if policy != ScopePolicy.NONE:
+            if trusted_scope is None or not trusted_scope.allows(user, perm):
+                return deny("SCOPE_DENIED", trace)
+        elif trusted_scope is not None and not trusted_scope.is_consistent_with(resource):
+            return deny("SCOPE_DENIED", trace)
+        if override is not None and override.effect == Effect.ALLOW:
             return allow("USER_ALLOW", trace)
-        # 9. Role-derived union
         if perm.key in union_of_active_role_permissions(user, at):
-            if scope is not None and not scope.allows(user, perm):
-                return deny("SCOPE_DENIED", trace)     # 8. scope restriction
             return allow("ROLE_GRANT", trace)
-        # 10. Default deny
         return deny("NO_GRANT", trace)
+    except Permission.DoesNotExist:
+        return deny("UNKNOWN_PERMISSION", trace)  # server-side warning log
     except Exception:
-        return deny("FAIL_CLOSED", trace)              # + server-side warning log
+        log_resolver_failure(permission_key=permission_key, user_id=getattr(user, "pk", None))
+        return deny("FAIL_CLOSED", trace)
 ```
 
 ### 16.3 Resolver test additions (extends R1–R13)
@@ -921,6 +928,20 @@ def resolve(user, permission_key, *, at=None, scope=None) -> PermissionDecision:
 | R16 | structural: query-count assertion — resolver performs **zero** Permission/override/role queries when called with `AnonymousUser` | order proof (no catalog leak) |
 | R17 | expired-but-unsettled assignment (end_at past, revoked_at NULL) | resolver denies (ACTIVE predicate); settlement converts to `EXPIRED` and re-grant then succeeds |
 | R18 | unknown key with authenticated user | DENY `UNKNOWN_PERMISSION` + warning log; unknown key with anonymous user → DENY `UNAUTHENTICATED` (never `UNKNOWN_PERMISSION`) |
+
+### 16.4 Mandatory scope and resolver-failure tests (Revision 4)
+
+| # | Case | Expected |
+|---|---|---|
+| R19 | Warehouse Keeper has role grant but no trusted scope | DENY `SCOPE_DENIED` |
+| R20 | Client supplies warehouse ID outside assignment | DENY `SCOPE_DENIED`; client value is not authority |
+| R21 | Warehouse Keeper has explicit ALLOW but no/mismatched scope | DENY `SCOPE_DENIED` |
+| R22 | Accountant operation marked `WAREHOUSE_REQUIRED` with no scope | DENY `SCOPE_DENIED` |
+| R23 | User accesses resource in assigned warehouse | Grant only if role/override and domain checks pass |
+| R24 | Permission policy is `NONE` | No warehouse scope required; all other checks apply |
+| R25 | DB error during permission/override/role/scope lookup | DENY `FAIL_CLOSED`; error logged; no grant |
+| R26 | Non-GM staff or superuser requests Django Admin | DENY at AdminSite gate |
+| R27 | GM BasicAuthentication-only request to MFA-protected route | DENY; password alone cannot satisfy MFA |
 
 ## 17. AuditAction inventory and field length (Rev 2 — defect C fix)
 
@@ -1142,7 +1163,7 @@ Classification vocabulary: **ALREADY-DECIDED** (owner decided; closed) · **TECH
 | UQ-11 | Drift diagnostic UX | **TECHNICALLY-RESOLVED** | Log-only (`step_delta` in server logs); user-visible hint may be added later as cosmetics |
 | UQ-12 | G-8 closure timing (`finalize_sale`/`reverse_payment` dedicated audit events) | **DEFERRED** (W0-2E) | As planned in the W0-2 report; additive and safe |
 
-## 22. Technical issue resolution table (Revision 3 deliverable)
+## 22. Technical issue resolution table (Revision 4 deliverable)
 
 | Issue | Defect in Revision 1 | Resolution | Where |
 |---|---|---|---|
@@ -1156,10 +1177,15 @@ Classification vocabulary: **ALREADY-DECIDED** (owner decided; closed) · **TECH
 | H | Lifecycle conflated enforced rules with future contracts; TEST isolation risked being read as available | Status labels (ENFORCED-TODAY vs CONTRACT-ONLY) per rule; binding TEST enablement prerequisites; W0-2A explicitly implements none | §20 |
 | I | UQ-9 contradicted the owner's clarified policy | Owner rule recorded verbatim; removed from open list; not re-asked | §20.3, §21 |
 | J | Future-phase behavior risked being read as implemented | §13/§24 boundary matrix; CONTRACT-ONLY labels throughout; zero-endpoint-behavior-change proof plan retained | §13.1, §24 |
+| K | Optional scope allowed warehouse-bound grants to skip object scope | Server-owned scope policy; mandatory trusted resource-derived scope for all non-GM scoped grants; ALLOW cannot bypass scope | §16.1–16.4 |
+| L | Django Admin GM-only statement lacked enforceable gate; staff/superuser assumptions could bypass | Custom AdminSite gate on every admin route; active GM role required; superuser alone never grants access; direct-route tests | §5.1, §16.4 |
+| M | BasicAuthentication could satisfy password-only authentication despite mandatory GM MFA | W0-2C route inventory and proof that Basic-only requests cannot reach protected MFA routes; transition requires Batch 2/3 compatibility review | §6, §16.4 |
+| N | Resolver exception boundary did not cover account/session and permission lookup failures | One fail-closed boundary over all security lookups; tests for DB/cache/scope errors | §16.1–16.4 |
+| O | SQLite grant service treated first UPDATE as safe despite ambient DEFERRED transaction risk | Uniform outermost IMMEDIATE requirement for SQLite grant/audit operations; ambient DEFERRED prohibited; whole-operation retry; owner consent required | §14.6, §18.4–18.6, §23 |
 
 ## 23. Remaining owner decisions (explicit list)
 
-1. **Approve this Revision 3 design** — including the catalog registry (§15: 20 domains / 162 keys; seeds GM 150 / ACC 101 / WK 12) and the C† defaults (which keys stay unseeded pending explicit GM grants). **This is the only decision required before W0-2A implementation.**
+1. **Approve this Revision 4 design** — including the catalog registry (§15: 20 domains / 162 keys; seeds GM 150 / ACC 101 / WK 12) and the C† defaults (which keys stay unseeded pending explicit GM grants). **This is the only decision required before W0-2A implementation.**
 2. **UQ-4** — approve adding the `cryptography` dependency (needed by W0-2C/E; not by A).
 3. **UQ-1** — GM-assignment revocation policy (needed before W0-2C).
 4. **UQ-10** — third-session behavior (needed before W0-2D).
@@ -1169,11 +1195,11 @@ Classification vocabulary: **ALREADY-DECIDED** (owner decided; closed) · **TECH
 
 Technically-resolved items (UQ-2, UQ-3, UQ-11) need no decision; the owner may veto them without blocking.
 
-## 24. Revision 3 verification evidence and W0-2A implementation boundary
+## 24. Revision 4 verification evidence and W0-2A implementation boundary
 
 ### 24.1 Files changed by Revision 3
 
-Revision 3 changes exactly one repository file: `docs/architecture/W0-2A_RBAC_OFFLINE_SECURITY_DESIGN_DRAFT.md`. The GitHub update is a documentation-only commit on the existing branch `security/w0-2a-rbac-architecture`. No code, model, migration, API, frontend, test, settings, workflow, or other repository file is changed. No PR is created, no merge is performed, and no deployment occurs. The resulting commit SHA and final compare evidence are recorded in the accompanying owner handoff.
+Revision 4 changes exactly one repository file: `docs/architecture/W0-2A_RBAC_OFFLINE_SECURITY_DESIGN_DRAFT.md`. The GitHub update is a documentation-only commit on the existing branch `security/w0-2a-rbac-architecture`. No code, model, migration, API, frontend, test, settings, workflow, or other repository file is changed. No PR is created, no merge is performed, and no deployment occurs. The resulting commit SHA and final compare evidence are recorded in the accompanying owner handoff.
 
 ### 24.2 W0-2A boundary matrix (defect J)
 
@@ -1198,10 +1224,10 @@ Revision 3 changes exactly one repository file: `docs/architecture/W0-2A_RBAC_OF
 
 ### 24.3 Evidence availability statement
 
-Immediately before Revision 3, GitHub compare showed the branch 5 commits ahead and 0 behind main, with one documentation file added (1,152 additions, 0 deletions). The retrieved file blob was `9699bab8b143ae64ca8a3a15e39496893524ed9d`. No matching W0-2A PR was returned by PR search. The exact branch-tip commit SHA was not exposed by the available connector response. After the Revision 3 push, the owner handoff must record the exact new commit SHA, refreshed compare, file blob SHA, PR search result, and exact-commit CI/status result. Empty/unavailable checks are NOT VERIFIABLE, never GREEN.
+Immediately before Revision 4, live GitHub inspection verified main at `99579d99f4b7c668118ad7e2add2a2ef91d04fba`; branch was 7 commits ahead and 0 behind, with exactly one file added (this document; 1,207 additions before Revision 4). Pre-update blob: `415f48261cfe263b75ed9a9b410142051f376384`. No matching W0-2A PR was returned. Prior Revision 3 commit `e562c73b2c9e6c24e2b999e5c406122e9480cc44` had zero check-runs and zero statuses; CI is NOT VERIFIABLE, not GREEN. After Revision 4, record new commit/blob SHA, refreshed compare, PR search, and exact-commit CI/check-run/status. Empty checks are NOT VERIFIABLE, never GREEN.
 
 ### 24.4 STOP
 
-Revision 3 is a documentation-only correction. No models, migrations, services, permissions, endpoints, settings, or tests have been implemented. The branch must remain unmerged. The revised design is presented for owner review; implementation begins only after explicit owner approval.
+Revision 4 is a documentation-only correction. No models, migrations, services, permissions, endpoints, settings, or tests have been implemented. The branch must remain unmerged. The revised design is presented for owner review; implementation begins only after explicit owner approval.
 
-**STOP — REVISION 3 DOCUMENTATION UPDATE COMPLETE. AWAITING OWNER REVIEW.**
+**STOP — REVISION 4 DOCUMENTATION UPDATE COMPLETE. AWAITING OWNER REVIEW.**
