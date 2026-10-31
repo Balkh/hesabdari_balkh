@@ -3,7 +3,7 @@
 **Repository:** `Balkh/hesabdari_balkh`  
 **Baseline:** `main` at `99579d99f4b7c668118ad7e2add2a2ef91d04fba`  
 **Working branch:** `security/w0-2a-rbac-architecture`  
-**Status:** DESIGN PROPOSAL — FIVE ITEMS AWAITING EXPLICIT OWNER APPROVAL  
+**Status:** FIVE DESIGN ITEMS OWNER-APPROVED; ACCOUNTANT ROLE EXPANSION OWNER-APPROVED; TECHNICAL MODEL MAPPING AND IMPLEMENTATION PLAN REMAIN OPEN  
 **Date:** 2026-10-31
 
 ## 1. Purpose and boundary
@@ -60,7 +60,7 @@ The initial role catalog is limited to:
 - **Accountant** — accounting/finance duties, subject to an explicit permission matrix.
 - **Warehouse Keeper** — warehouse/inventory duties, subject to an explicit permission matrix.
 
-Role names are approved; the complete action-by-action permission matrix is not approved by this document. No role receives implicit broad access merely because it exists.
+Role names are approved. The initial Accountant permission matrix is owner-approved as a broad operational role, as amended in the owner decision record below. Exact permission keys, object scopes, and per-user configuration must still be mapped during implementation planning. Warehouse Keeper remains limited to warehouse duties unless the GM explicitly grants additional per-user permissions.
 
 Django Admin is GM-only (owner decision D5). Employee workflows must be provided through controlled ERP interfaces, not Django Admin.
 
@@ -81,7 +81,7 @@ Avoid duplicate permission engines or using Django Groups as a second competing 
 
 Default decision is **deny** unless a valid permission is positively established. The owner selected deny precedence for conflicts (D3), and GM authority is protected from ordinary employee overrides.
 
-The exact resolver ordering and edge cases remain an explicit design sign-off item before implementation. In particular, the implementation must specify how an explicit user deny interacts with a role grant, how multiple roles combine, and how expired/revoked assignments are excluded. Do not silently settle these semantics in code.
+The owner-approved resolver ordering and edge cases are specified in Section 9A, Item 2. Implementation must encode those semantics exactly and test explicit user deny vs role grant, explicit user allow, multiple-role union, protected GM authority, expiry/revocation, and hard domain invariants.
 
 Authorization must be enforced on the backend for every protected operation. Frontend hiding/disabled controls are usability only and never security boundaries. Object-level checks are required wherever access depends on ownership, assigned warehouse, document state, or another business boundary.
 
@@ -112,7 +112,7 @@ Django Admin access is restricted to GM. Exact bootstrap and account-management 
 - Multiple sessions may be allowed, but sessions/devices must be visible, auditable, and terminable by GM.
 - Permission revocation and account deactivation must take effect promptly, including termination/invalidation of affected sessions where required.
 - Preserve 403 for denied protected requests (D6); do not change Batch 2/3 status-code contracts.
-- Exact numeric lockout thresholds, idle timeout, TOTP clock-drift allowance, and session policy are not set in this document and must be decided before implementation.
+- The numeric defaults in Section 9A, Item 4 are owner-approved starting values. Any change requires an explicit owner decision.
 
 ## 7. GM account provisioning and easy recovery
 
@@ -178,27 +178,27 @@ Still to specify before implementation:
 - Final permission taxonomy and role matrix.
 - Final resolver precedence details and multi-role conflict semantics.
 
-## 9A. Proposed concrete decisions for owner review — five open items
+## 9A. Owner-approved concrete security decisions — five items
 
-The following are concrete, least-privilege proposals prepared for owner review. They are **not owner-approved policy** until the owner explicitly accepts or amends them. They must not be implemented merely because they appear here.
+The five items below were explicitly approved by the owner in the conversation on 2026-10-31. The Accountant permission matrix was subsequently amended and approved by the owner on 2026-10-31 as recorded in Section 9C. These decisions are approved policy boundaries; implementation details explicitly marked open still require technical validation and must not be invented in code.
 
-### Item 1 — Initial permission taxonomy and role matrix (proposal)
+### Item 1 — Initial permission taxonomy and role matrix (owner-approved, with Accountant amendment)
 
 Use action-level permission keys in the form `<domain>.<resource>.<action>`. Permission catalog is explicit and default-deny. UI visibility never implies API authorization.
 
 | Domain / action | GM | Accountant | Warehouse Keeper |
 |---|---:|---:|---:|
-| Dashboard and operational summaries | Full | Finance summaries only | Warehouse summaries only |
-| Customers / suppliers / party master data | Full | View; create/edit draft master data | View minimum fields needed for warehouse execution |
-| Chart of accounts, currencies, exchange rates, fiscal periods | Full | View; maintain only where existing accounting contract permits | No access |
-| Sales documents | Full | View/create/edit draft/submit; no post/reverse by default | View only assigned fulfillment data; perform authorized warehouse handover/release steps only |
-| Purchase documents and supplier settlements | Full | View/create/edit draft/submit; payment/settlement actions only if separately granted | View minimum receiving data; record physical receipt and quantity/condition evidence |
-| Journals, posting, reversal, trial balance, financial reports | Full within immutable accounting rules | View; prepare/submit journal drafts; posting/reversal not granted by default | No access |
-| Inventory, stock movements, receiving, transfers, counts | Full | View quantities/valuation summaries only; no physical movement | View assigned warehouse; record receipts, movements, counts, and release execution |
-| Cash, bank/exchange-house, treasury, reconciliation | Full | View/create/prepare transactions; execution/post/reconcile only by explicit named permission | No access |
-| Approvals / evidence review | Full; GM may approve own operations as owner-approved | No approval of own submitted item; approval only if a separately assigned permission and workflow allows it | No financial/document approval; may confirm physical evidence |
-| Cancel / reverse posted financial or stock history | Full authority to initiate approved correction only; never direct edit/delete of posted history | No by default; reversal preparation only if separately granted | No |
-| Print / export / download | Full | Finance and party data only within granted access | Assigned warehouse operational documents only; no financial export |
+| Dashboard and operational summaries | Full | Full operational and finance summaries within assigned permissions | Warehouse summaries only |
+| Customers / suppliers / party master data | Full | Create, view, edit, and manage operational master data | View minimum fields needed for warehouse execution |
+| Chart of accounts, currencies, exchange rates, fiscal periods | Full | View and perform routine maintenance only where explicitly delegated; structural accounting configuration and period lock/reopen remain GM-controlled unless separately authorized | No access |
+| Sales documents | Full | Create, view, edit, submit, and post eligible operational sales documents when the user's permission allows; manage routine sales workflow | View assigned fulfillment data; perform authorized warehouse handover/release steps only |
+| Purchase documents and supplier settlements | Full | Create, view, edit, submit, and process routine purchase/supplier workflows; payment execution remains subject to explicit treasury permission and controls | View minimum receiving data; record physical receipt and quantity/condition evidence |
+| Journals, posting, reversal, trial balance, financial reports | Full within immutable accounting rules | Create/manage journal drafts; view balances, trial balance, and reports; post eligible routine entries only when explicitly permitted; posted history remains immutable and reversal/correction is controlled | No access |
+| Inventory, stock movements, receiving, transfers, counts | Full | Full routine inventory and warehouse operations, including receiving, movements, transfers, counts, and physical handover, subject to assigned scope and stock controls | View assigned warehouse; record receipts, movements, counts, and release execution |
+| Cash, bank/exchange-house, treasury, reconciliation | Full | Record/manage routine receipts and payments and prepare treasury/reconciliation operations; execution, settlement, and reconciliation permissions are individually configurable by GM | No access |
+| Approvals / evidence review | Full; GM may approve own operations as owner-approved | Perform operational reviews and evidence completion; cannot approve own submitted item where workflow requires independent approval; additional approval rights only by explicit GM grant and workflow rules | No financial/document approval; may confirm physical evidence |
+| Cancel / reverse posted financial or stock history | Full authority to initiate approved correction only; never direct edit/delete of posted history | Cancel eligible unposted documents with reason; prepare and, only if explicitly delegated, execute controlled reversal/correction workflows. Never directly edit/delete posted history | No |
+| Print / export / download | Full | Operational, financial, party, and warehouse documents needed for assigned duties; bulk export and sensitive data export remain separately permissioned | Assigned warehouse operational documents only; no financial export |
 | User, role, permission, session, MFA, recovery, security administration | Full | No | No |
 | Audit/security logs | Full | Restricted read-only finance-relevant subset only if separately granted | No |
 | Django Admin | GM only | No | No |
@@ -206,8 +206,9 @@ Use action-level permission keys in the form `<domain>.<resource>.<action>`. Per
 **Important constraints:**
 
 - GM's full administrative authority never bypasses accounting/domain invariants, evidence gates, immutable posted records, or reversal-only correction.
-- Accountant and Warehouse Keeper receive only listed minimum permissions; all unlisted actions are denied.
-- The role matrix does not silently grant employee approval, posting, reversal, treasury execution, bulk export, or user administration.
+- Accountant receives broad operational permissions across finance, sales, purchases, parties, inventory, warehouse, and routine company administration. High-impact permissions (treasury execution, structural accounting configuration, period close/reopen, bulk export, sensitive security administration, and posted-history reversal) remain individually configurable/restricted by GM.
+- Warehouse Keeper remains focused on warehouse execution; all unlisted actions are denied.
+- The Accountant role may perform routine posting and operational approvals only where the action is part of the approved workflow and the user's explicit permission allows it. Treasury execution, period close/reopen, bulk export, user/security administration, and reversal of posted history are not blanket grants of the role.
 - Access to sensitive customer/employee data must be field- and purpose-limited where supported.
 - Object-level scope (assigned warehouse, assigned documents, permitted parties) must be enforced server-side.
 - Any additional role or permission requires a documented owner-approved matrix change.
@@ -279,7 +280,7 @@ Recommended initial single-computer defaults:
 | TOTP accepted clock drift | Current step ±1 step | 30 seconds tolerance on either side; require local clock correction if outside |
 | Recovery codes | 10 single-use codes | Rotate after recovery or suspected exposure |
 
-These are proposed defaults, not established requirements. TOTP remains mandatory for GM; employee MFA remains configurable by GM. Lockout must not provide an unauthenticated denial-of-service lever: rate-limit by account and local source, use bounded lock duration, and allow GM recovery through the controlled local administration path. Exact rate-limit implementation must remain compatible with the one-computer/no-Redis architecture.
+These defaults are owner-approved starting values. TOTP remains mandatory for GM; employee MFA remains configurable by GM. Lockout must not provide an unauthenticated denial-of-service lever: rate-limit by account and local source, use bounded lock duration, and allow GM recovery through the controlled local administration path. Exact rate-limit implementation must remain compatible with the one-computer/no-Redis architecture.
 
 ### Item 5 — Database append-only audit mechanism (proposal)
 
@@ -296,15 +297,40 @@ The threat model must explicitly state that an attacker with unrestricted operat
 
 ## 9B. Owner decision checklist for these five items
 
-Please approve or amend each item before implementation:
+Owner approval status:
 
-- [ ] Item 1 — role/permission matrix.
-- [ ] Item 2 — resolver precedence and multiple-role behavior.
-- [ ] Item 3 — local GM bootstrap, recovery codes, emergency key, and encryption-key custody.
-- [ ] Item 4 — numeric lockout/session/TOTP defaults.
-- [ ] Item 5 — SQLite/PostgreSQL append-only triggers, hash chain, and offline signed checkpoints.
+- [x] Item 1 — role/permission matrix, including the Accountant operational-role amendment in Section 9C.
+- [x] Item 2 — resolver precedence and multiple-role behavior.
+- [x] Item 3 — local GM bootstrap, recovery codes, emergency key, and encryption-key custody direction.
+- [x] Item 4 — numeric lockout/session/TOTP defaults.
+- [x] Item 5 — SQLite/PostgreSQL append-only triggers, hash chain, and offline signed checkpoints direction.
 
-Until all five are explicitly approved, this document remains a design proposal and no RBAC schema, migration, authorization enforcement, login/recovery endpoint, or audit trigger may be implemented.
+The five design decisions are owner-approved. This does not authorize W0-2B onward or permit implementation to bypass the W0-2A architecture-first inspection, technical validation, migration review, tests, or owner review gate.
+
+
+## 9C. Owner decision record — Accountant operational-role expansion
+
+**Decision date:** 2026-10-31  
+**Decision:** APPROVED by the project owner  
+**Applies to:** Initial RBAC role/permission matrix in W0-2A
+
+The owner clarified that, in the target operating environment, one employee commonly performs several company duties. The Accountant role must therefore be designed as **Accountant / Operations**, not as a finance-only or read-mostly role.
+
+The Accountant / Operations role is intended to support broad day-to-day company work, including:
+
+- Accounting and routine finance operations, financial records, balances, and reports.
+- Sales, purchases, customer and supplier management, and related document workflows.
+- Warehouse and inventory operations, including receiving, movements, transfers, counts, and physical handover, subject to business and stock controls.
+- Routine receipts, payments, treasury preparation, and company administration, with sensitive execution rights configurable per user by the GM.
+- Creation, viewing, editing, and management of ordinary operational records and documents.
+
+**Draft and experimental records:** The Accountant must be able to create trial/test transactions and ordinary drafts, edit them repeatedly, and delete them before they become approved/posted or otherwise financially/operationally effective. Such deletion must be audited and must not create journal entries or affect stock, party balances, cash, or other live business state. The system must distinguish disposable Draft/Test records from Pending Evidence or approved workflow records. A Pending Evidence record must be cancelled with a reason and retained in the audit/history trail, not silently deleted. Editing an approved record must revoke its approval according to OD-6.
+
+**Posted and effective records:** Once a transaction has been posted or has otherwise created an irreversible financial/stock effect, it must not be directly edited or deleted. Corrections must follow the approved cancellation, reversal, or controlled correction workflow; the original record and its audit history remain preserved. This role expansion does not alter accounting, inventory, posting, reversal, or document-integrity contracts.
+
+**Per-user configuration:** The GM can tailor an individual Accountant's permissions to the employee's actual duties. The role should provide broad operational capability, while high-impact permissions—such as treasury execution, period close/reopen, structural accounting configuration, bulk export, security/user administration, and reversal of posted history—remain individually grantable/restrictable and subject to domain invariants. No Accountant permission can bypass backend authorization, evidence requirements, atomicity/idempotency, or posted-history immutability.
+
+This amendment supersedes the narrower Accountant entries in the original Section 9A Item 1 proposal. It does not expand the Warehouse Keeper role or change the GM role.
 
 ## 10. Implementation sequence after design approval
 
@@ -341,4 +367,4 @@ Before W0-2A code implementation, owner must approve:
 6. Numeric lockout, idle timeout, session, and TOTP clock-drift parameters.
 7. Audit database append-only mechanism and supported database behavior.
 
-**Current status:** design proposal only. The five concrete items in Section 9A await explicit owner approval. No schema, migration, API, frontend, authentication behavior, or audit behavior has been changed by this document.
+**Current status:** five design items and the Accountant operational-role amendment are owner-approved. This document update records policy decisions only; it does not claim that any schema, migration, API, frontend, authentication behavior, or audit behavior has been implemented or verified.
