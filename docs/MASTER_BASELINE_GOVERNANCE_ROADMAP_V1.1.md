@@ -207,9 +207,18 @@ Do not assume all three methods are interchangeable in their accounting treatmen
 
 ### 6.2.1 Supplier purchase settlement — explicit owner clarification
 
-For payments settling a supplier's purchase payable, the supplier must receive the
-full amount owed. Exchange-house commission is a separate company expense and MUST
-NOT reduce the supplier's payable or the principal credited as paid to the supplier.
+For payments settling a supplier's purchase payable, the default is that the
+supplier receives the full principal owed. Exchange-house commission is a separate
+company expense and MUST NOT reduce the supplier's payable or principal paid, except
+for the narrowly controlled Method A exception below and in OD-3.
+
+**Method A — deduction from supplier remittance principal — is an exception, not a
+default.** It is permitted only when a prior agreement explicitly authorizes the
+deduction, that agreement is documented and linked to the transaction, an authorized
+user records the reason, and the required approval is recorded before settlement
+finalization. Gross principal, deducted commission, net amount received, currency,
+rate, and supporting evidence must remain separately traceable. Without the prior
+documented agreement and authorization, the full supplier principal must be settled.
 
 Owner-approved rules:
 
@@ -224,8 +233,9 @@ Owner-approved rules:
   the supplier-principal settlement.
 - If commission is paid separately from company cash/bank, debit the commission
   expense and credit the actual cash/bank account separately.
-- The supplier payable is settled for the full principal amount, regardless of
-  the separate commission.
+- The supplier payable is settled for the full principal by default. Method A
+  may reduce the remittance principal only when every documented prior-agreement
+  and authorization condition above is satisfied.
 - Preserve separate principal and commission amounts, currencies, rates, dates,
   exchange-house/payment references, and source-document traceability.
 - Apply atomicity, idempotency, historical FX integrity, and reversal-only
@@ -299,9 +309,14 @@ Preserve approved revenue, COGS, custody, allocation, return, and release behavi
 
 ## STEP 5 — FUTURE Sales
 
-Proceed only after the unresolved FUTURE sales contract is fully reviewed and approved.
+Proceed under the owner-approved Type-B chain and COGS/ownership decision recorded in
+OD-1. The decision establishes actual-source-lot COGS and physical-goods ownership
+transfer at Warehouse Release Authorization, after actual receipt and fulfillment
+allocation. Implement only after repository inspection and a separately approved
+bounded implementation plan.
 
-Do not infer fulfillment COGS, stock reduction, custody valuation, ownership transfer, or release authorization.
+Do not infer or invent any remaining custody valuation/reporting, Sales Return,
+cancellation/reversal, or other accounting policy not resolved by OD-1.
 
 ## STEP 6 — Master Data and Party Ledger
 
@@ -410,3 +425,26 @@ The owner has explicitly revised OD-6 Item 2 and restored persisted Draft docume
 Detailed owner amendment: `docs/decisions/OD-6_ITEM_2_DRAFT_PERSISTENCE_OWNER_AMENDMENT_2026-10-30.md`.
 
 **Implementation status:** owner decision recorded; no implementation, migration, API/UI change, test result, freeze, or merge is implied by this amendment.
+
+# 12. OWNER DECISION REGISTER — W0-1 RECONCILIATION (2026-10-31)
+
+The following decision records consolidate owner-approved policies. They are
+authoritative for the subjects stated, but their existence does not prove that the
+corresponding code, API, UI, migrations, or tests have been implemented.
+
+| Decision | Subject | Authoritative record | Scope / precedence |
+|---|---|---|---|
+| OD-1 | Future Type-B Sale ownership and COGS | [OD-1 Future Type-B Owner Decision](decisions/OD-1_FUTURE_TYPE_B_OWNER_DECISION.md) | Type-B ownership and COGS occur at Warehouse Release Authorization after actual receipt and allocation; actual source-lot cost is required. Existing AVAILABLE and Phase 11 Transit invoice-time COGS contracts are unchanged. |
+| OD-3 | Exchange-house commission and company treasury | [OD-3 Exchange-House Commission Owner Decision](decisions/OD-3_EXCHANGE_HOUSE_COMMISSION_OWNER_DECISION.md) | Company exchange-house operations are in scope; standalone third-party remittance remains out of scope. Supplier Method A is a documented, pre-agreed and authorized exception to the full-principal default. |
+| OD-4 | Document authority and evidence | [OD-4 Document Authority Owner Decision](decisions/OD-4_DOCUMENT_AUTHORITY_OWNER_DECISION.md) | Commercial evidence, posted accounting effect, and audit trail remain distinct; required evidence and material discrepancies gate normal posting. |
+| OD-5 | Roles, permissions, and user security | [OD-5 Roles & Permissions Owner Decision](decisions/OD-5_ROLES_PERMISSIONS_OWNER_DECISION.md) | GM administration, duty-based employee access, individual accounts, temporary access, MFA, sessions, and security audit requirements. Does not reopen Security Batch 2/3. |
+| OD-6 | Document workflow and approval | [OD-6 Document Workflow Owner Decision](decisions/OD-6_DOCUMENT_WORKFLOW_OWNER_DECISION.md) | Consolidates the approved workflow items and the separately merged Draft persistence amendment; approval remains distinct from posting. |
+
+The OD-6 Item 2 amendment remains separately recorded in
+[OD-6 Item 2 Draft Persistence Owner Amendment](decisions/OD-6_ITEM_2_DRAFT_PERSISTENCE_OWNER_AMENDMENT_2026-10-30.md)
+and merged through PR #53. This register does not replace or rewrite that amendment.
+
+**Status boundary:** W0-1 records approved decisions and reconciles contradictory
+documentation only. It is not an implementation approval, merge approval, or freeze.
+Security Batch 2 and Batch 3 freeze records and the Phase 11 Goods-in-Transit
+contract remain protected and are not modified by W0-1.

@@ -511,11 +511,11 @@ Their existence does not establish the Sales policy.
 | Event | Inventory | Ownership | Receivable | Revenue | COGS |
 |---|---|---|---|---|---|
 | Type A finalization | No fabricated stock; valuation timing unresolved | Buyer owns actual goods | May create receivable if approved | Unresolved | Unresolved |
-| Type B finalization | No StockMovement | Commercial entitlement only | May create receivable if approved | Unresolved | Unresolved |
+| Type B finalization | No StockMovement | Commercial entitlement only | May create receivable if approved | Revenue at successful invoice finalization under PH8-026 | No Type-B COGS at finalization; COGS occurs at later Release Authorization under OD-1 |
 | Purchase/receipt | Actual inventory through Purchase/`receive_stock()` | Company holds actual goods before Type B authorization | Purchase payable per Purchase | None from Sale | Cost established under Purchase/AVCO |
-| Allocation | Uses actual inventory; no fake stock | No Type B ownership transfer yet | None directly | None directly | Unresolved |
-| Type B authorization | No physical issue solely from authorization | Physical-goods ownership transfers | None directly | Unresolved | Unresolved |
-| Physical release | Reuse `issue_stock()` for actual issue | Handover; Type A ownership already existed | None directly | None directly | Unresolved |
+| Allocation | Uses actual inventory; no fake stock | No Type-B ownership transfer yet | None directly | None directly | Identifies actual source lot and quantity; allocation alone does not trigger COGS; Type-B COGS occurs at Release Authorization under OD-1 |
+| Type B authorization | No physical issue solely from authorization | Physical-goods ownership transfers for actual allocated goods | None directly | No new revenue | Type-B COGS at authorization using actual source-lot cost; unknown cost blocks operation (OD-1) |
+| Physical release | Reuse issue_stock() for actual issue | Physical handover; Type-B ownership already transferred at authorization | None directly | None | No second Type-B COGS recognition |
 | Payment | None directly | None | Settles receivable under future Payment | None | None |
 | Custody | Physical location remains; customer-owned status separate | Customer owns | None | None | Valuation/reporting unresolved |
 | Customer → Company | Purchase receipt | Company ownership under Purchase | Payable as applicable | None | Purchase/AVCO |
@@ -535,20 +535,16 @@ Historical discovery note (superseded by the owner's decision on 2026-09-23, exp
 
 ### 14.2 Revenue timing
 
-Owner-approved decision recorded 2026-10-29 (PH8-026): revenue is recognized at successful invoice finalization for all currently supported sale types, including FUTURE. Payment, physical receipt/custody, and customer delivery are separate events and do not delay or repeat revenue recognition.
+Owner-approved decision recorded 2026-10-29 (PH8-026): revenue is recognized at successful invoice finalization for all currently supported sale types, including FUTURE. Payment receipt, physical receipt/custody, and customer delivery are separate events and do not delay or repeat revenue recognition.
 
-This does not resolve FUTURE fulfillment/authorization/allocation accounting, the future-sale COGS trigger, custody valuation, or cancellation/reversal.
+OD-1 resolves the Type-B ownership and COGS triggers. This does not resolve any remaining Type-B accounting beyond those triggers, customer-custody valuation/reporting, or cancellation/reversal.
 
 ### 14.3 COGS and inventory reduction
 
-Unresolved:
+The Type-B COGS trigger is resolved by OD-1. Remaining questions are:
 
-- Type A COGS event;
-- Type B COGS event;
-- inventory-reduction event;
-- AVCO preservation through allocation;
-- delayed custody valuation;
-- delayed physical release.
+- Type-A company inventory reduction and any valuation/reclassification required for customer-owned custody;
+- financial inventory valuation/reporting for customer-owned custody while goods remain physically held after Type-B authorization.
 
 ### 14.4 Customer-custody accounting
 
@@ -800,7 +796,7 @@ This is not approval to implement. It is the smallest architecture consistent wi
 | PH8-023 | Immutability | Finalized facts immutable | Protected posted-history convention | USER DIRECTIVE + REPOSITORY FACT | RESOLVED principle | Controlled correction only | Reversal policy later |
 | PH8-024 | Idempotency | Separate event boundaries | Existing accounting/inventory patterns | ARCHITECTURAL PROPOSAL | PROPOSED | Reuse conventions | Implementation review |
 | PH8-025 | Custody accounting | No silent financial treatment | No evidence | UNRESOLVED DECISION | BLOCKED | Financial Sales blocked | Accounting owner |
-| PH8-026 | Revenue/COGS timing | Owner-approved 2026-10-29 in the working conversation: sales revenue is recognized at successful invoice finalization for all supported sale types including FUTURE; payment, custody, and delivery remain separate events. COGS timing at invoice finalization was already owner-approved for the existing AVAILABLE and transit-sale paths only (Decisions A1/B1, 2026-10-24); FUTURE-sale COGS remains unresolved until actual goods are fulfilled and the cost trigger is approved. Full record: `docs/phase-8-invoice-time-cogs-allocation-contract.md`. This row update aligns this document with `PHASE_8_FINAL_CONTRACT_LOCK.md` | Implementation alignment remains subject to owner review of the resulting diff and test evidence | USER DIRECTIVE — RECORDED 2026-10-29 | RESOLVED — OWNER-APPROVED, PENDING OWNER REVIEW OF RESULTING CHANGES | Revenue timing no longer blocks financial Sales | Owner review of the resulting diff and tests; not a merge or freeze authorization |
+| PH8-026 | Revenue/COGS timing | Revenue is recognized at successful invoice finalization for supported sale types including FUTURE. Existing AVAILABLE/Transit COGS remains invoice-time under A1/B1. Type-B COGS is recognized at Warehouse Release Authorization after actual receipt/allocation using actual source-lot cost under OD-1. | Owner-approved decisions and OD-1 | RESOLVED — OWNER-APPROVED; implementation evidence pending separately | Preserve sale-type-specific triggers | Review exact-head tests; not merge/freeze approval |
 | PH8-027 | Money/FX | Reuse existing conventions | Currency/accounting/FX services exist | REPOSITORY FACT + PROPOSAL | PROPOSED | No duplicate engine | Exact field review |
 | PH8-028 | Cancellation/reversal | No edit rollback; policy required | Immutability/reversal conventions | UNRESOLVED DECISION | BLOCKED | Release/financial work gated | User/accounting owner |
 | PH8-029 | Type B trigger | Authorization after actual fulfillment | Explicit user rule | USER DIRECTIVE | RESOLVED | Physical ownership event explicit | None |
@@ -1033,7 +1029,7 @@ Remaining blockers:
 | Commercial lifecycle | PROPOSED | Existing immutability precedent; no Sales lifecycle | User approval |
 | `4110` versus `4120` | RESOLVED — OWNER-APPROVED | WHOLESALE → 4110; RETAIL → 4120 (PH8.2-001) | No new decision required |
 | Revenue timing | RESOLVED — OWNER-APPROVED at successful invoice finalization for supported sale types including FUTURE (PH8-026, 2026-10-29); implementation evidence pending | Owner decision recorded in `docs/phase-8-invoice-time-cogs-allocation-contract.md` | Review exact-head tests; not a merge/freeze authorization |
-| COGS/inventory timing | UNRESOLVED | Sales revenue recognition timing owner-approved at successful invoice finalization for supported sale types including FUTURE (PH8-026); FUTURE-sale COGS trigger and related future-fulfillment inventory accounting remain unresolved and gated | Accounting decision |
+| COGS/inventory timing | PARTIALLY RESOLVED — Type-B COGS trigger is resolved by OD-1; customer-custody valuation/reporting and remaining inventory presentation questions remain open | OD-1 resolves Type-B authorization timing and actual source-lot cost; custody accounting remains separately unresolved | Owner/accounting review of remaining custody and inventory presentation questions |
 | Custody accounting | UNRESOLVED | No custody accounting contract | Accounting decision |
 | Cancellation/reversal | UNRESOLVED | No Sales policy | User/accounting decision |
 | Phase 7 baseline | BLOCKED | Working tree differs from HEAD | Qualify baseline |

@@ -54,10 +54,10 @@ The existing Phase 6 `StockMovement` identity must not be changed to `Product + 
 Remaining accounting matters must not be invented:
 
 1. how customer-owned goods physically held in company warehouses are treated in company inventory valuation and financial reporting;
-2. Type B fulfillment/authorization/allocation accounting and future-sale COGS trigger;
+2. any remaining Type-B accounting questions beyond the owner-approved ownership and COGS triggers recorded in OD-1;
 3. cancellation/reversal and Sales Return accounting.
 
-The revenue-account selector is already owner-approved (`WHOLESALE → 4110`; `RETAIL → 4120`, PH8.2-001). Revenue timing is also owner-approved at successful invoice finalization for all supported sale types including FUTURE (PH8-026, 2026-10-29), pending review of implementation and exact-head evidence. The separate invoice-time COGS contract applies to existing AVAILABLE and transit paths only; FUTURE-sale COGS timing remains unresolved.
+The revenue-account selector is already owner-approved (`WHOLESALE → 4110`; `RETAIL → 4120`, PH8.2-001). Revenue timing is also owner-approved at successful invoice finalization for all supported sale types including FUTURE (PH8-026, 2026-10-29), pending review of implementation and exact-head evidence. The separate invoice-time COGS contract applies to existing AVAILABLE and Phase 11 Transit paths only. Under OD-1, Type-B COGS is recognized at Warehouse Release Authorization after actual receipt and allocation, using actual source-lot cost; unknown source-lot cost blocks the operation.
 
 ---
 
@@ -799,7 +799,7 @@ It is not Sales Return.
 
 | ID | Decision | User Rule | Repository Evidence | Status | Contract Consequence | Implementation Gate |
 |---|---|---|---|---|---|---|
-| PH8-001 | Ownership transfer | Finalized Sale transfers ownership | User directive; no Sales implementation | RESOLVED | Ownership at finalization | Must be encoded; no payment trigger |
+| PH8-001 | Ownership transfer | Type A: finalization transfers ownership of actual goods; Type B: Warehouse Release Authorization after actual receipt and allocation transfers ownership of actual allocated goods | User directives; OD-1 | RESOLVED — OWNER-APPROVED | Separate triggers by Sale Type | Encode both paths distinctly |
 | PH8-002 | Customer custody | Customer-owned goods may remain in company Warehouse indefinitely | No existing custody domain | RESOLVED BUSINESS / ACCOUNTING OPEN | Independent custody history | Custody accounting approval required |
 | PH8-003 | Sale vs release | Separate events | Inventory has issue primitive; no Sales release model | RESOLVED | Release layer required | Authorization and issue boundaries |
 | PH8-004 | Payment boundary | Payment separate; ownership independent | Payments placeholder; Party Ledger exists | RESOLVED | Later Payment domain | No hidden Payment Engine |
@@ -810,7 +810,7 @@ It is not Sales Return.
 | PH8-009 | GitHub baseline | Verify official state if possible | No usable remote configured | BLOCKED EVIDENCE | External baseline unavailable | Provide remote/authority |
 | PH8-010 | Company inventory vs custody | Customer custody is not company-owned goods | No custody accounting contract | UNRESOLVED | Separate reports and accounting decision | Financial implementation blocked |
 | PH8-011 | Payment vs ownership | Payment never triggers ownership | User directive | RESOLVED | Payment state independent | Must test unpaid/partial cases |
-| PH8-012 | Release vs ownership | Release does not trigger ownership | User directive | RESOLVED | Ownership exists before release | No release-based ownership rule |
+| PH8-012 | Release vs ownership | Type A: physical release is not ownership trigger; Type B: Release Authorization is ownership trigger, while physical handover remains separate | Explicit owner rules; OD-1 | RESOLVED | Do not collapse authorization and physical issue | None for trigger |
 | PH8-013 | Warehouse at SalesLine | Warehouse belongs on each line | Product/Warehouse inventory primitives | RESOLVED | Line-level Warehouse mandatory | Header-only Warehouse forbidden |
 | PH8-014 | Multi-Warehouse invoice | One invoice may span Warehouses | No Sales model yet | RESOLVED | Group release operationally, retain line trace | Required from foundation |
 | PH8-015 | Release authorization | Warehouse needs authoritative instruction | No existing document | PROPOSED / USER APPROVAL | Parent authorization plus ReleaseLines | Approve before implementation |
@@ -824,7 +824,7 @@ It is not Sales Return.
 | PH8-023 | Immutability | Finalized facts cannot be edited | Existing posted immutability | RESOLVED PRINCIPLE | Protect line, Warehouse, quantity, price | Reuse core conventions |
 | PH8-024 | Idempotency | Business events need duplicate protection | Existing journal/inventory idempotency | PROPOSED | Separate finalization, release, allocation keys | Define event keys |
 | PH8-025 | Custody accounting | Do not invent treatment | No existing contract found | BLOCKING UNRESOLVED | Define valuation/reporting/journal boundary | Accounting approval required |
-| PH8-026 | Revenue/COGS timing | Owner-approved 2026-10-29 in the working conversation: sales revenue is recognized at successful invoice finalization for all supported sale types including FUTURE; payment, custody, and delivery remain separate events. COGS timing was already owner-approved at invoice finalization (Decisions A1/B1, 2026-10-24). Full record: `docs/phase-8-invoice-time-cogs-allocation-contract.md`. This row update aligns this document with `PHASE_8_FINAL_CONTRACT_LOCK.md` | Implementation alignment remains subject to owner review of the resulting diff and test evidence | RESOLVED — OWNER-APPROVED, PENDING OWNER REVIEW OF RESULTING CHANGES | Revenue timing no longer blocks financial Sales; payment, custody, and delivery remain separate events | Owner review of the resulting diff and tests; not a merge or freeze authorization |
+| PH8-026 | Revenue/COGS timing | Revenue: successful invoice finalization for supported sale types including FUTURE. Existing AVAILABLE/Transit COGS: invoice finalization under A1/B1. Type-B COGS: Warehouse Release Authorization after actual receipt/allocation, using actual source-lot cost under OD-1. | Owner-approved decisions 2026-10-24, 2026-10-29, and OD-1 | RESOLVED — OWNER-APPROVED; implementation evidence remains separately required | Preserve distinct sale-type triggers | Review exact-head tests; no merge/freeze authorization |
 | PH8-027 | Currency/totals | Reuse existing money/FX conventions | Accounting `post_journal()` and currency contracts exist | PROPOSED | No duplicate money engine | Inspect exact Sales fields before implementation |
 | PH8-028 | Cancellation/reversal | Must not release invalidated Sale | Existing reversal/immutability principles | UNRESOLVED | Controlled lifecycle contract required | Define before release implementation |
 
@@ -964,14 +964,13 @@ Remaining blockers to an implementation-ready financial contract:
 
 1. `4110` versus `4120` rule — RESOLVED by owner: `WHOLESALE → 4110`; `RETAIL → 4120` (PH8.2-001);
 2. revenue timing — RESOLVED by owner at successful invoice finalization for supported sale types including FUTURE (PH8-026, 2026-10-29); implementation alignment remains pending review of exact-head test evidence;
-3. define COGS and inventory reduction timing when ownership and physical release differ;
-4. define financial inventory valuation/reporting for customer-owned custody;
-5. approve the custody/entitlement representation and reconciliation authority;
-6. define fulfillment allocation semantics and cost/source locking;
-7. approve the Warehouse Release Authorization and printing boundary;
-8. define controlled Sales cancellation/reversal rules;
-9. qualify the Phase 7 baseline discrepancy;
-10. provide or verify the authoritative GitHub baseline.
+3. define financial inventory valuation/reporting for customer-owned custody;
+4. approve the custody/entitlement representation and reconciliation authority;
+5. define fulfillment allocation semantics and cost/source locking;
+6. approve the Warehouse Release Authorization and printing boundary;
+7. define controlled Sales cancellation/reversal rules;
+8. qualify the Phase 7 baseline discrepancy;
+9. provide or verify the authoritative GitHub baseline.
 
 These are not implementation details. They are contract decisions.
 
