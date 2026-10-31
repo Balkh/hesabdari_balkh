@@ -3,7 +3,7 @@
 **Repository:** `Balkh/hesabdari_balkh`  
 **Baseline:** `main` at `99579d99f4b7c668118ad7e2add2a2ef91d04fba`  
 **Working branch:** `security/w0-2a-rbac-architecture`  
-**Status:** DESIGN DRAFT — NOT IMPLEMENTATION APPROVAL  
+**Status:** DESIGN PROPOSAL — FIVE ITEMS AWAITING EXPLICIT OWNER APPROVAL  
 **Date:** 2026-10-31
 
 ## 1. Purpose and boundary
@@ -178,6 +178,134 @@ Still to specify before implementation:
 - Final permission taxonomy and role matrix.
 - Final resolver precedence details and multi-role conflict semantics.
 
+## 9A. Proposed concrete decisions for owner review — five open items
+
+The following are concrete, least-privilege proposals prepared for owner review. They are **not owner-approved policy** until the owner explicitly accepts or amends them. They must not be implemented merely because they appear here.
+
+### Item 1 — Initial permission taxonomy and role matrix (proposal)
+
+Use action-level permission keys in the form `<domain>.<resource>.<action>`. Permission catalog is explicit and default-deny. UI visibility never implies API authorization.
+
+| Domain / action | GM | Accountant | Warehouse Keeper |
+|---|---:|---:|---:|
+| Dashboard and operational summaries | Full | Finance summaries only | Warehouse summaries only |
+| Customers / suppliers / party master data | Full | View; create/edit draft master data | View minimum fields needed for warehouse execution |
+| Chart of accounts, currencies, exchange rates, fiscal periods | Full | View; maintain only where existing accounting contract permits | No access |
+| Sales documents | Full | View/create/edit draft/submit; no post/reverse by default | View only assigned fulfillment data; perform authorized warehouse handover/release steps only |
+| Purchase documents and supplier settlements | Full | View/create/edit draft/submit; payment/settlement actions only if separately granted | View minimum receiving data; record physical receipt and quantity/condition evidence |
+| Journals, posting, reversal, trial balance, financial reports | Full within immutable accounting rules | View; prepare/submit journal drafts; posting/reversal not granted by default | No access |
+| Inventory, stock movements, receiving, transfers, counts | Full | View quantities/valuation summaries only; no physical movement | View assigned warehouse; record receipts, movements, counts, and release execution |
+| Cash, bank/exchange-house, treasury, reconciliation | Full | View/create/prepare transactions; execution/post/reconcile only by explicit named permission | No access |
+| Approvals / evidence review | Full; GM may approve own operations as owner-approved | No approval of own submitted item; approval only if a separately assigned permission and workflow allows it | No financial/document approval; may confirm physical evidence |
+| Cancel / reverse posted financial or stock history | Full authority to initiate approved correction only; never direct edit/delete of posted history | No by default; reversal preparation only if separately granted | No |
+| Print / export / download | Full | Finance and party data only within granted access | Assigned warehouse operational documents only; no financial export |
+| User, role, permission, session, MFA, recovery, security administration | Full | No | No |
+| Audit/security logs | Full | Restricted read-only finance-relevant subset only if separately granted | No |
+| Django Admin | GM only | No | No |
+
+**Important constraints:**
+
+- GM's full administrative authority never bypasses accounting/domain invariants, evidence gates, immutable posted records, or reversal-only correction.
+- Accountant and Warehouse Keeper receive only listed minimum permissions; all unlisted actions are denied.
+- The role matrix does not silently grant employee approval, posting, reversal, treasury execution, bulk export, or user administration.
+- Access to sensitive customer/employee data must be field- and purpose-limited where supported.
+- Object-level scope (assigned warehouse, assigned documents, permitted parties) must be enforced server-side.
+- Any additional role or permission requires a documented owner-approved matrix change.
+
+### Item 2 — Resolver precedence and multiple roles (proposal)
+
+Recommended deterministic resolver:
+
+1. Inactive user, inactive account, expired session, or missing authentication: deny.
+2. Protected GM authority: grant only the protected GM administrative capability set; it cannot be removed by ordinary user overrides. Domain invariants still apply.
+3. For non-GM users, an active explicit user **DENY** overrides every role grant.
+4. Otherwise, an active explicit user **ALLOW** grants the permission.
+5. Otherwise, active role grants are combined additively (union of grants).
+6. If no active role grants the permission, deny.
+
+Additional rules:
+
+- Expired, revoked, future-dated, or inactive role assignments/overrides are ignored.
+- Multiple active roles combine by union; any explicit user DENY still wins.
+- A user ALLOW may add a permission absent from their roles, but cannot override a user DENY or a hard domain invariant.
+- Temporary access is an explicit time-bounded ALLOW, with mandatory reason, granting GM, start/end timestamps, and audit trail; explicit DENY and domain invariants still win.
+- All decisions must be explainable in a diagnostic trace (subject, action, object scope, matched rule, result), without exposing secrets to the frontend.
+- Unknown permission keys, malformed scope, and resolver errors fail closed.
+
+This proposal resolves the D3 deny-precedence requirement while preserving explicit per-user grants. Owner confirmation is required.
+
+### Item 3 — GM first-run bootstrap and recovery key custody (proposal)
+
+**First-run bootstrap:**
+
+- Use a local management command, not an always-open public setup endpoint.
+- The command creates a cryptographically random, one-time setup token, stores only its hash, and displays it once.
+- Token expires after 10 minutes, can be used once, and is invalidated on successful setup or expiry.
+- A loopback-only local setup screen consumes the token to set the GM password and enroll mandatory TOTP; the application refuses all subsequent setup attempts once the GM is provisioned.
+- If local browser origin/loopback isolation cannot be proven in the actual packaging, use a local CLI provisioning utility instead. Do not expose bootstrap over LAN.
+- No hardcoded password or default credentials.
+
+**Recovery:**
+
+- Issue 10 random single-use recovery codes at initial setup; show/print once; persist only strong salted hashes. Each successful use consumes one code; regeneration revokes all previous codes.
+- Store one separate high-entropy emergency owner recovery key offline, on paper or removable offline media, in a sealed location separate from the computer. It is used only with physical/local access through a controlled recovery utility, never for routine login.
+- Forgotten password + working TOTP: verify TOTP and reset password.
+- Lost phone + known password: verify password plus one unused recovery code, revoke old TOTP, enroll replacement, rotate recovery codes.
+- Lost password + lost phone: physical/local recovery utility plus emergency owner key; reset password, revoke old MFA and all sessions, enroll new MFA, issue new recovery codes, and create a high-severity audit record.
+- No email/SMS/cloud dependency and no permanent master password/backdoor.
+
+**Encryption and backup key custody:**
+
+- Encrypt TOTP secrets at rest using authenticated encryption; never store plaintext TOTP seeds.
+- Keep the encryption key outside the ordinary database where OS-protected secret storage is available (Windows DPAPI/Credential Manager or equivalent OS facility). Validate availability on the actual target OS before selecting the implementation.
+- Recovery/backup must include a separately protected export/recovery mechanism for the encryption key; otherwise a restored database could make MFA secrets unrecoverable.
+- The emergency owner key and encryption-key recovery material must be stored separately from the computer and separately from ordinary database backups.
+- Recovery utility use must be one-time, locally authorized, logged, and must invalidate prior sessions and MFA factors.
+
+### Item 4 — Numeric security and session defaults (proposal)
+
+Recommended initial single-computer defaults:
+
+| Control | Proposed value | Behavior |
+|---|---:|---|
+| Failed password attempts | 5 consecutive failures | Trigger temporary account lock |
+| Lock duration | 15 minutes | GM may manually unlock sooner; each attempt remains audited |
+| Failure counter reset | 15 minutes after last failure, or successful authentication | No permanent lockout from typo-only events |
+| Idle session timeout | 15 minutes | Require re-authentication after inactivity |
+| Pre-expiry warning | 2 minutes | Warn before idle session expires |
+| Absolute session lifetime | 12 hours | Require full sign-in again |
+| Concurrent sessions per user | 2 | GM may inspect and terminate; new session does not silently hide old sessions |
+| TOTP period | 30 seconds | Standard time-based code period |
+| TOTP accepted clock drift | Current step ±1 step | 30 seconds tolerance on either side; require local clock correction if outside |
+| Recovery codes | 10 single-use codes | Rotate after recovery or suspected exposure |
+
+These are proposed defaults, not established requirements. TOTP remains mandatory for GM; employee MFA remains configurable by GM. Lockout must not provide an unauthenticated denial-of-service lever: rate-limit by account and local source, use bounded lock duration, and allow GM recovery through the controlled local administration path. Exact rate-limit implementation must remain compatible with the one-computer/no-Redis architecture.
+
+### Item 5 — Database append-only audit mechanism (proposal)
+
+Use a layered, cross-database design:
+
+1. **Application contract:** all audit writes go through one audited append service; normal application code has no update/delete path for audit rows.
+2. **Database enforcement:** install SQLite `BEFORE UPDATE` and `BEFORE DELETE` triggers, and PostgreSQL equivalent triggers, that reject mutation/deletion of audit rows. Migration tests must prove both operations fail.
+3. **Tamper evidence:** each event stores a canonicalized payload hash and previous-event hash, forming a per-database append chain. Verify the chain on startup/health diagnostics and in a dedicated audit-integrity command.
+4. **Independent offline evidence:** periodically export a signed audit checkpoint to a separately stored offline backup location; a database administrator with full machine access may still bypass local controls, so do not describe triggers alone as absolute tamper-proofing.
+5. **Failure policy:** security-critical actions must fail closed if their required audit write cannot be committed atomically. Do not allow a successful role grant, MFA reset, recovery, or sensitive administrative change without its audit event.
+6. **Compatibility:** prove behavior on SQLite (development) and PostgreSQL (deployment); ensure normal migrations and backup/restore preserve triggers and chain continuity.
+
+The threat model must explicitly state that an attacker with unrestricted operating-system and database-owner access can potentially replace local files or database objects. Hash chaining and offline signed checkpoints provide detection/resilience, not magical prevention against a fully privileged machine attacker.
+
+## 9B. Owner decision checklist for these five items
+
+Please approve or amend each item before implementation:
+
+- [ ] Item 1 — role/permission matrix.
+- [ ] Item 2 — resolver precedence and multiple-role behavior.
+- [ ] Item 3 — local GM bootstrap, recovery codes, emergency key, and encryption-key custody.
+- [ ] Item 4 — numeric lockout/session/TOTP defaults.
+- [ ] Item 5 — SQLite/PostgreSQL append-only triggers, hash chain, and offline signed checkpoints.
+
+Until all five are explicitly approved, this document remains a design proposal and no RBAC schema, migration, authorization enforcement, login/recovery endpoint, or audit trigger may be implemented.
+
 ## 10. Implementation sequence after design approval
 
 W0-2A is architecture-first and additive:
@@ -213,4 +341,4 @@ Before W0-2A code implementation, owner must approve:
 6. Numeric lockout, idle timeout, session, and TOTP clock-drift parameters.
 7. Audit database append-only mechanism and supported database behavior.
 
-**Current status:** design draft only. No schema, migration, API, frontend, authentication behavior, or audit behavior has been changed by this document.
+**Current status:** design proposal only. The five concrete items in Section 9A await explicit owner approval. No schema, migration, API, frontend, authentication behavior, or audit behavior has been changed by this document.
