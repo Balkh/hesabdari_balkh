@@ -513,7 +513,7 @@ Their existence does not establish the Sales policy.
 | Type A finalization | No fabricated stock; valuation timing unresolved | Buyer owns actual goods | May create receivable if approved | Unresolved | Unresolved |
 | Type B finalization | No StockMovement | Commercial entitlement only | May create receivable if approved | Revenue at successful invoice finalization under PH8-026 | No Type-B COGS at finalization; COGS occurs at later Release Authorization under OD-1 |
 | Purchase/receipt | Actual inventory through Purchase/`receive_stock()` | Company holds actual goods before Type B authorization | Purchase payable per Purchase | None from Sale | Cost established under Purchase/AVCO |
-| Allocation | Uses actual inventory; no fake stock | No Type B ownership transfer yet | None directly | None directly | Unresolved |
+| Allocation | Uses actual inventory; no fake stock | No Type-B ownership transfer yet | None directly | None directly | Identifies actual source lot and quantity; allocation alone does not trigger COGS; Type-B COGS occurs at Release Authorization under OD-1 |
 | Type B authorization | No physical issue solely from authorization | Physical-goods ownership transfers for actual allocated goods | None directly | No new revenue | Type-B COGS at authorization using actual source-lot cost; unknown cost blocks operation (OD-1) |
 | Physical release | Reuse issue_stock() for actual issue | Physical handover; Type-B ownership already transferred at authorization | None directly | None | No second Type-B COGS recognition |
 | Payment | None directly | None | Settles receivable under future Payment | None | None |
