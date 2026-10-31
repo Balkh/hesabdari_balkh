@@ -544,8 +544,6 @@ OD-1 resolves the Type-B ownership and COGS triggers. This does not resolve any 
 The Type-B COGS trigger is resolved by OD-1. Remaining questions are:
 
 - Type-A company inventory reduction and any valuation/reclassification required for customer-owned custody;
-- financial inventory reporting for customer-owned custody and delayed physical release;
-- delayed custody valuation;
 - delayed physical release.
 
 ### 14.4 Customer-custody accounting
