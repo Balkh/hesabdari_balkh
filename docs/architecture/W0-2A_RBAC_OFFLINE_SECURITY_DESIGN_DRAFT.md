@@ -988,7 +988,7 @@ Revision 2 had two incomplete guarantees:
 1. It computed a payload hash without incorporating the previous event hash. That produces individually hashed events, not a cryptographically linked hash chain.
 2. It assumed that the audit-head UPDATE would be the first write in the SQLite transaction. Existing business transactions may already have performed reads before calling the audit service. In SQLite's default DEFERRED mode, a read transaction that later attempts to upgrade to a writer can fail with a busy/snapshot conflict; the audit service cannot retroactively make its UPDATE the transaction's first statement.
 
-Django documents that SQLite's default transaction mode is DEFERRED, that IMMEDIATE obtains the write reservation at transaction start, and that select_for_update() has no effect on SQLite. Therefore atomic() by itself and a late UPDATE are not a sufficient cross-engine serialization contract. See the Django database documentation cited in the owner handoff.
+Django documents that SQLite's default transaction mode is DEFERRED, that IMMEDIATE obtains the write reservation at transaction start, and that select_for_update() has no effect on SQLite. Therefore atomic() by itself and a late UPDATE are not a sufficient cross-engine serialization contract. See the [Django 5.2 database documentation on SQLite transaction behavior](https://docs.djangoproject.com/en/5.2/ref/databases/#transactions-behavior), which documents DEFERRED/IMMEDIATE modes and the absence of SQLite select_for_update() support.
 
 ### 18.2 Event fields and canonical hash definition
 
@@ -997,6 +997,8 @@ The W0-2E audit-chain extension must add the following immutable fields to each 
 - event_uuid: application-generated UUID, created before the INSERT and unique.
 - prev_event_hash: 64-character lowercase hexadecimal SHA-256 digest; the first event uses 64 zeroes.
 - event_hash: 64-character lowercase hexadecimal SHA-256 digest.
+
+The database schema must enforce uniqueness for event_uuid, event_hash, and prev_event_hash. Unique prev_event_hash ensures that no committed event can create a second successor from the same chain link; the genesis all-zero previous hash can therefore occur only once. The verifier independently checks these constraints and reports any fork or duplicate as corruption.
 
 The canonical payload is a versioned object containing every immutable persisted audit-event field other than the database-generated primary key and the two chain fields. It MUST include event_uuid and all available actor, action, target/resource, timestamp, request-origin, and metadata fields. The canonicalization contract is:
 
@@ -1140,15 +1142,14 @@ Classification vocabulary: **ALREADY-DECIDED** (owner decided; closed) · **TECH
 | UQ-11 | Drift diagnostic UX | **TECHNICALLY-RESOLVED** | Log-only (`step_delta` in server logs); user-visible hint may be added later as cosmetics |
 | UQ-12 | G-8 closure timing (`finalize_sale`/`reverse_payment` dedicated audit events) | **DEFERRED** (W0-2E) | As planned in the W0-2 report; additive and safe |
 
-## 22. Technical issue resolution table (Rev 2 deliverable)
+## 22. Technical issue resolution table (Revision 3 deliverable)
 
 | Issue | Defect in Revision 1 | Resolution | Where |
 |---|---|---|---|
 | A | Temporal uniqueness: expired-but-unrevoked rows could permanently block re-grant; partial unique treated as sufficient | Settlement operation + `revocation_kind` + one-live-row-per-slot uniqueness as race backstop + grant service algorithm + overlap policy + renewal/replacement semantics + per-engine concurrency strategy | §14.1–14.7 |
 | B | Catalog had wildcard-style prefixes, "similar to" rows, and an unresolved 20-vs-23 domain count | Exact machine-readable registry: 20 domains, 162 keys, per-key meaning/sensitivity/seed/status; reconciliation of 20-vs-23; unresolved keys marked, not guessed | §15 |
 | C | `AuditAction` max_length 20 < longest proposed name (26) | Complete inventory with lengths; `CharField(40)`; binding naming convention; migration note | §17 |
-| D | Chain writer omitted prev_event_hash from the digest and treated a late SQLite UPDATE as if it were always the transaction's first write | Versioned canonical payload; domain-separated SHA-256 over previous-hash bytes plus payload; event UUID; link-based verifier; immutable INSERT-only chain fields | §18.2–18.3 |
-| E | SQLite DEFERRED transactions could read before audit-head UPDATE; late write cannot retroactively acquire the outer transaction's write reservation | Mandatory IMMEDIATE outermost transaction for every SQLite audit-producing path; explicit ambient-transaction prohibition; timeout and whole-operation retry rules; negative-control tests; owner approval required because setting affects all outermost transactions | §18.4–18.6 |
+| D | Audit-chain digest did not include the previous hash, and SQLite locking assumed a late audit UPDATE was always the transaction's first write | Versioned canonical payload; domain-separated SHA-256 over previous-hash bytes plus payload; unique event/link constraints; link-based verifier; mandatory IMMEDIATE outermost SQLite transaction; explicit ambient-transaction prohibition; timeout and whole-operation retry rules; owner approval because the setting affects all outermost transactions | §18.2–18.6 |
 | E | "Test-bypass mechanism" in the trigger migration could weaken production protections | Binding no-bypass rule; triggers in every test DB by migration; verification tests; mandatory rewrite of legacy mutating tests; STOP-and-report escalation | §19 |
 | F | `user` FKs CASCADE on M4/M5/M6 could erase authorization history | PROTECT everywhere on user/attribution FKs; deactivation-not-deletion policy; invariant test | §14.8 |
 | G | Resolver consulted the permission catalog before authentication checks | Corrected 10-step binding sequence (auth → account → session → catalog → GM → deny → allow → role → scope → default-deny) + corrected pseudocode + new tests R14–R18 | §16 |
@@ -1158,7 +1159,7 @@ Classification vocabulary: **ALREADY-DECIDED** (owner decided; closed) · **TECH
 
 ## 23. Remaining owner decisions (explicit list)
 
-1. **Approve this Rev 2 design** — including the catalog registry (§15: 20 domains / 162 keys; seeds GM 150 / ACC 101 / WK 12) and the C† defaults (which keys stay unseeded pending explicit GM grants). **This is the only decision required before W0-2A implementation.**
+1. **Approve this Revision 3 design** — including the catalog registry (§15: 20 domains / 162 keys; seeds GM 150 / ACC 101 / WK 12) and the C† defaults (which keys stay unseeded pending explicit GM grants). **This is the only decision required before W0-2A implementation.**
 2. **UQ-4** — approve adding the `cryptography` dependency (needed by W0-2C/E; not by A).
 3. **UQ-1** — GM-assignment revocation policy (needed before W0-2C).
 4. **UQ-10** — third-session behavior (needed before W0-2D).
@@ -1168,7 +1169,7 @@ Classification vocabulary: **ALREADY-DECIDED** (owner decided; closed) · **TECH
 
 Technically-resolved items (UQ-2, UQ-3, UQ-11) need no decision; the owner may veto them without blocking.
 
-## 24. Rev 2 verification evidence and W0-2A implementation boundary
+## 24. Revision 3 verification evidence and W0-2A implementation boundary
 
 ### 24.1 Files changed by Revision 3
 
