@@ -535,18 +535,16 @@ Historical discovery note (superseded by the owner's decision on 2026-09-23, exp
 
 ### 14.2 Revenue timing
 
-Owner-approved decision recorded 2026-10-29 (PH8-026):
+Owner-approved decision recorded 2026-10-29 (PH8-026): revenue is recognized at successful invoice finalization for all currently supported sale types, including FUTURE. Payment receipt, physical receipt/custody, and customer delivery are separate events and do not delay or repeat revenue recognition.
 
 OD-1 resolves the Type-B ownership and COGS triggers. This does not resolve any remaining Type-B accounting beyond those triggers, customer-custody valuation/reporting, or cancellation/reversal.
 
 ### 14.3 COGS and inventory reduction
 
-Unresolved:
+The Type-B COGS trigger is resolved by OD-1. Remaining questions are:
 
-- Type A COGS event;
-- Type-B COGS trigger: RESOLVED by OD-1 — Warehouse Release Authorization after actual receipt and allocation, using actual source-lot cost;
-- inventory-reduction event;
-- AVCO preservation through allocation;
+- Type-A company inventory reduction and any valuation/reclassification required for customer-owned custody;
+- financial inventory reporting for customer-owned custody and delayed physical release;
 - delayed custody valuation;
 - delayed physical release.
 
