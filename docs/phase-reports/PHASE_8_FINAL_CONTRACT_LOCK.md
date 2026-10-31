@@ -740,11 +740,9 @@ This decision does not resolve customer-custody valuation/reporting, cancellatio
 
 ## Q. COGS / Inventory Timing
 
-Remaining unresolved questions are:
+OD-1 resolves the Type-B COGS trigger. Remaining unresolved questions are:
 
 - Type A company inventory reduction and any valuation reclassification required for customer-owned custody;
-- Type-B COGS trigger: RESOLVED by OD-1 — Warehouse Release Authorization after actual receipt and allocation, using actual source-lot cost; unknown source cost blocks the operation.
-- any implementation must preserve the approved actual source-lot cost and must not blend distinct purchase lots (OD-1);
 - how delayed release affects financial inventory reporting.
 
 For AVAILABLE and Phase 11 Transit sales, the existing owner-approved invoice-time COGS/allocation contract remains in force (Decisions A1/B1, 2026-10-24). Type-B COGS is separate and occurs at Warehouse Release Authorization under OD-1. No Type-B COGS is recognized before actual goods are received, allocated, and authorized.
