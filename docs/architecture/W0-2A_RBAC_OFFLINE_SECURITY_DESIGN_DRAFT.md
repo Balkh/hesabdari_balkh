@@ -3,9 +3,10 @@
 **Repository:** `Balkh/hesabdari_balkh`  
 **Baseline:** `main` at `99579d99f4b7c668118ad7e2add2a2ef91d04fba`  
 **Working branch:** `security/w0-2a-rbac-architecture`  
-**Status:** FIVE DESIGN ITEMS OWNER-APPROVED; ACCOUNTANT ROLE EXPANSION OWNER-APPROVED; TECHNICAL MODEL MAPPING AND IMPLEMENTATION PLAN REMAIN OPEN  
+**Status:** FIVE DESIGN ITEMS OWNER-APPROVED; ACCOUNTANT ROLE EXPANSION OWNER-APPROVED; TECHNICAL MODEL MAPPING AND IMPLEMENTATION PLAN REMAIN OPEN; OWNER REVIEW PENDING  
 **Date:** 2026-10-31  
-**Revision 2:** 2026-10-31 — TECHNICAL CORRECTIONS ONLY (read-only documentation revision). No code, models, migrations, API, frontend, tests, enforcement, or authentication/session implementation. No commits, pushes, PRs, merges, or deployment. The revision is present in the working tree, uncommitted, pending owner review. Revision record: §13. Technical issue resolution table: §22. UQ re-classification: §21.
+**Revision 2:** 2026-10-31 — technical design correction, pushed to the working branch for owner review.  
+**Revision 3:** 2026-10-31 — targeted documentation-only corrections to the audit hash-chain and SQLite transaction contract, plus refreshed repository evidence. No application code, model, migration, API, frontend, test, or runtime behavior changes. No PR, merge, deployment, or implementation authorization.
 
 ## 1. Purpose and boundary
 
@@ -389,24 +390,24 @@ The sections below are the Rev 2 technical deliverable. They correct identified 
 
 ### 13.1 Mission type
 
-Technical design correction only, performed read-only. **No application code, Django models, migrations, API/frontend changes, test changes, permission enforcement, authentication/session implementation, git commits, pushes, PRs, merges, or deployment were performed.** The only artifact changed inside the repository is this document, in the working tree, uncommitted, pending owner review. Implementation begins only after explicit owner approval.
+Revision 3 is a documentation-only correction to the already-pushed Revision 2 design. It corrects (D) the audit hash-chain construction, (E) SQLite transaction-start/locking guarantees, and (F) repository evidence that became stale after Revision 2 was pushed. **No application code, Django models, migrations, API/frontend changes, tests, permission enforcement, authentication/session implementation, or runtime behavior were changed.** This revision updates only this design document on the existing W0-2A branch. It does not create a PR, merge, deploy, or authorize implementation. W0-2A implementation remains blocked on explicit owner approval.
 
-### 13.2 Mandatory initial inspection results (live, this revision)
+### 13.2 Mandatory repository inspection and revision evidence
+
+The following is the independently observed GitHub state immediately before the Revision 3 document update:
 
 | Item | Verified value | Method | Status |
 |---|---|---|---|
-| Live `main` SHA | `99579d99f4b7c668118ad7e2add2a2ef91d04fba` | `git fetch origin --prune` + `git ls-remote origin` | VERIFIED |
-| W0-2A branch HEAD SHA | `4036a5c5037437e993ca15d6ea75bd7b20c8b064` | `git ls-remote origin security/w0-2a-rbac-architecture` | VERIFIED |
-| Branch ↔ main | merge-base = `99579d9` = main head → branch strictly ahead, fast-forwardable, not merged | `git merge-base origin/main origin/security/w0-2a-rbac-architecture` | VERIFIED |
-| Branch commits | 4 docs-only commits by Reza Faizi 2026-10-31: `5622627`, `b21b98b`, `c55a4c0`, `4036a5c` | `git log origin/main..origin/security/w0-2a-rbac-architecture` | VERIFIED |
-| Branch content delta vs main | exactly 1 file added, +370/−0: `docs/architecture/W0-2A_RBAC_OFFLINE_SECURITY_DESIGN_DRAFT.md`; zero code files | `git diff --name-status origin/main...origin/security/w0-2a-rbac-architecture` | VERIFIED |
-| Tags | 0 | `git ls-remote --tags` (empty) | VERIFIED |
-| Working tree before edit | clean at branch HEAD | `git status --short` | VERIFIED |
-| Related PR | GitHub API `GET /pulls?state=all` → HTTP 403 rate limit | curl output recorded | **NOT VERIFIABLE** (unavailable evidence) |
-| CI evidence for `99579d9` / `4036a5c` | check-runs API → HTTP 403 rate limit | curl output recorded | **NOT VERIFIABLE** (unavailable evidence) |
-| CI definition | 4 jobs (backend py3.13, frontend node 22, postgresql postgres:16, tauri cargo check) — unchanged | `.github/workflows/ci.yml` local read | VERIFIED (definition only) |
+| Live `main` SHA | `99579d99f4b7c668118ad7e2add2a2ef91d04fba` | GitHub compare base | VERIFIED |
+| W0-2A branch | `security/w0-2a-rbac-architecture` | GitHub branch lookup | VERIFIED |
+| Branch ↔ main | 5 commits ahead, 0 behind; merge-base equals main | GitHub compare endpoint | VERIFIED |
+| Branch content delta vs main | Exactly one file added: `docs/architecture/W0-2A_RBAC_OFFLINE_SECURITY_DESIGN_DRAFT.md`; 1,152 additions, 0 deletions in the pre-Rev-3 compare | GitHub compare endpoint | VERIFIED |
+| Retrieved document | 1,153 lines; blob SHA `9699bab8b143ae64ca8a3a15e39496893524ed9d` | GitHub file fetch | VERIFIED |
+| Related W0-2A PR | No matching PR returned by repository PR search | GitHub PR search | NOT FOUND (search result only; not a statement about unrelated PRs) |
+| Exact pre-update branch commit SHA | Not exposed by the available branch/compare response | Connector response inspection | NOT VERIFIABLE |
+| CI for pre-update branch tip | No exact branch-tip SHA was exposed for a reliable check lookup in this inspection | Connector response inspection | NOT VERIFIABLE |
 
-No unexpected branch changes were found; the branch state was fully established; the stop condition did not fire.
+After the Revision 3 update, the resulting commit SHA, file blob SHA, compare counts, PR search, and exact-commit CI/status lookup must be recorded in the owner handoff. No CI success is inferred from an empty or unavailable status response.
 
 ### 13.3 Independent re-verification of cited code facts (not trusted from prior reports)
 
@@ -978,45 +979,99 @@ def resolve(user, permission_key, *, at=None, scope=None) -> PermissionDecision:
 - **Naming convention (binding):** UPPER_SNAKE_CASE; pattern `<SUBJECT>_<PAST_TENSE_VERB>` or `<SUBJECT>_<QUALIFIER>_<VERB>`; maximum 3 underscore-separated segments; each segment ≤ 12 chars; total ≤ 40 chars. Enforced by a unit test that iterates `AuditAction.choices` and by the registry constant `AUDIT_ACTION_MAX_LENGTH = 40`.
 - **Migration:** one `AlterField` (20 → 40) in W0-2E (combined with the additive choices extension). PostgreSQL widens the column (metadata-only); SQLite performs the standard Django table rebuild. Existing business event names are **not** renamed or shortened.
 
-## 18. Audit hash-chain concurrency (Rev 2 — defect D fix)
+## 18. Audit hash-chain integrity and concurrency (Revision 3 — defects D/E corrected)
 
-### 18.1 Defect in Revision 1
+### 18.1 Defects corrected
 
-Rev 1 relied on `select_for_update()` on a chain-head singleton "(or PG advisory lock; SQLite inherits BEGIN IMMEDIATE serialization)". This is **rejected as insufficient**: (a) Django does **not** implement `SELECT ... FOR UPDATE` on SQLite — it is silently ignored, so it provides no locking there; (b) with SQLite's default DEFERRED `BEGIN`, a transaction may read the chain head *before* another writer commits, then insert using a stale `prev_event_hash`, tearing the chain; (c) `transaction.atomic()` alone therefore does **not** guarantee safe SQLite writer serialization for a read-then-write chain protocol.
+Revision 2 had two incomplete guarantees:
 
-### 18.2 Corrected writer protocol — lock-before-read (engine-portable)
+1. It computed a payload hash without incorporating the previous event hash. That produces individually hashed events, not a cryptographically linked hash chain.
+2. It assumed that the audit-head UPDATE would be the first write in the SQLite transaction. Existing business transactions may already have performed reads before calling the audit service. In SQLite's default DEFERRED mode, a read transaction that later attempts to upgrade to a writer can fail with a busy/snapshot conflict; the audit service cannot retroactively make its UPDATE the transaction's first statement.
 
-New model (W0-2E): `AuditChainHead` singleton — `id=1` (fixed), `head_hash CharField(64)`, `last_event_id BigInt`, `updated_at`. Created by migration with `head_hash = 64×"0"`, `last_event_id = 0`.
+Django documents that SQLite's default transaction mode is DEFERRED, that IMMEDIATE obtains the write reservation at transaction start, and that select_for_update() has no effect on SQLite. Therefore atomic() by itself and a late UPDATE are not a sufficient cross-engine serialization contract. See the Django database documentation cited in the owner handoff.
 
-Every audit write inside the caller's business transaction executes, in order:
+### 18.2 Event fields and canonical hash definition
 
-1. `UPDATE audit_chain_head SET updated_at = <now> WHERE id = 1` — **the first statement is a write**. On SQLite this upgrades the deferred transaction to the write transaction immediately (serializing all chain writers at the database lock); on PostgreSQL it takes the row lock on the singleton.
-2. `SELECT head_hash, last_event_id FROM audit_chain_head WHERE id = 1` — read happens only **after** the write lock is held; a stale head read is impossible by construction.
-3. Compute `payload_hash = SHA-256(canonical_json(all event fields except chain fields))`; `prev_event_hash = head_hash`.
-4. `INSERT` the event (PK assigned).
-5. `UPDATE audit_chain_head SET head_hash = <payload_hash>, last_event_id = <new id> WHERE id = 1`.
-6. COMMIT — insert and head update commit or roll back **together**.
+The W0-2E audit-chain extension must add the following immutable fields to each audit event:
 
-### 18.3 Guarantees and boundaries
+- event_uuid: application-generated UUID, created before the INSERT and unique.
+- prev_event_hash: 64-character lowercase hexadecimal SHA-256 digest; the first event uses 64 zeroes.
+- event_hash: 64-character lowercase hexadecimal SHA-256 digest.
 
-- **Serialization (D.1):** at most one chain writer holds the head at a time — via the SQLite database write lock (step 1 upgrades before any read) or the PostgreSQL singleton row lock. Optional PG-only refinement: `pg_advisory_xact_lock(<constant>)` — equivalent, not required.
-- **Ordering (D.2):** canonical chain order = PK order; serialized inserts make the chain linear by construction; `prev_event_hash` always equals the committed head.
-- **Transaction boundaries (D.3):** the chain write joins the caller's existing business transaction (unchanged from the current single-writer architecture — 68 call sites, all inside business atomics). There is no separate chain transaction.
-- **Failed writes and rollback (D.4):** any failure between steps 1–6 rolls back the event AND the head update together — the chain is left exactly as before the attempt, with no holes. A rolled-back business action leaves no event, consistent with the 7 existing rollback-on-audit-failure tests.
-- **SQLite specifics (D.5):** default DEFERRED begin is safe **only because step 1 is a write**; the protocol forbids any read of the head before the first write. `busy_timeout` must be set explicitly at W0-2E; transient lock errors on the head UPDATE are retried (bounded) at the service boundary. **Recommended hardening (owner-visible settings change, W0-2E):** set `"OPTIONS": {"transaction_mode": "IMMEDIATE"}` for the SQLite dev/test profile (supported: Django ≥5.2, verified `requirements.txt:1`) so every transaction takes the write lock at BEGIN. W0-2A changes no settings.
-- **PostgreSQL specifics (D.5):** READ COMMITTED + singleton-row UPDATE gives correct serialization for this protocol; no `select_for_update()` dependency.
-- **Honest limitation (D.6):** on the single-machine target, concurrent write volume is trivial; the protocol is nevertheless fully specified and tested because correctness must not depend on workload optimism.
+The canonical payload is a versioned object containing every immutable persisted audit-event field other than the database-generated primary key and the two chain fields. It MUST include event_uuid and all available actor, action, target/resource, timestamp, request-origin, and metadata fields. The canonicalization contract is:
 
-### 18.4 Required concurrency tests (both engines)
+- UTF-8 JSON, recursively sorted object keys, compact separators, explicit nulls, and no NaN/Infinity.
+- Timestamps normalized to UTC ISO-8601 with a fixed precision and explicit Z suffix.
+- Decimal values serialized as canonical decimal strings; UUIDs as lowercase canonical strings.
+- Metadata must contain only supported JSON scalar/list/object values; unsupported Python objects and binary values are rejected, not stringified with repr().
+- The payload includes a fixed schema/version identifier so future canonicalization changes are explicit and verifiable.
+
+For each event, calculate:
+
+    payload_bytes = canonical_json_bytes(versioned_immutable_event_payload)
+    previous_hash_bytes = bytes.fromhex(prev_event_hash)
+    event_hash = SHA256(
+        b"HESABDARI-AUDIT-CHAIN-V1\x00"
+        + previous_hash_bytes
+        + payload_bytes
+    ).hexdigest()
+
+The domain-separation prefix is a fixed protocol constant, not configurable at runtime. The previous hash is part of the digest input. Storing prev_event_hash without incorporating it into event_hash is prohibited.
+
+The verifier MUST recompute each event_hash from its canonical payload and prev_event_hash, verify that the first event links to the all-zero genesis hash, verify that every subsequent event links to exactly one preceding event_hash, detect missing links/forks/duplicate event UUIDs, and verify that AuditChainHead matches the final verified event. Verification order follows the hash links, not assumptions about timestamp ordering. The database primary key is a locator only; it is not the cryptographic chain order.
+
+### 18.3 Transactional writer protocol
+
+New W0-2E model: AuditChainHead singleton with fixed id=1, head_hash, last_event_id, and updated_at. It is initialized with the genesis hash and a null/zero last-event pointer appropriate to the model field.
+
+Every audit write remains inside the same database transaction as its business operation. Under the chain lock, the writer:
+
+1. Acquires the AuditChainHead row for writing before reading its current hash.
+2. Reads head_hash only after acquiring that write lock.
+3. Creates event_uuid and constructs the canonical immutable payload.
+4. Sets prev_event_hash to the locked head_hash and computes event_hash using §18.2.
+5. Inserts the event once, with all chain fields populated in the INSERT; the append-only trigger must never require a later UPDATE to the event row.
+6. Updates AuditChainHead.head_hash to the new event_hash and last_event_id to the inserted row's primary key.
+7. Commits the business mutation, audit event, and chain-head update atomically.
+
+Any failure rolls back the business mutation, event insert, and head update together. There is no separate audit transaction and no post-commit audit write.
+
+PostgreSQL: the first chain operation is UPDATE of the singleton AuditChainHead row (or an equivalent row-lock acquisition before the head SELECT). Under the repository's normal READ COMMITTED isolation, the subsequent SELECT sees the latest committed head after any lock wait. The implementation must not silently assume this behavior under REPEATABLE READ/SERIALIZABLE; if another isolation level is configured, the lock/read strategy and tests must be revisited. The singleton row serializes writers; select_for_update() may be used on PostgreSQL but is not the portability mechanism.
+
+### 18.4 SQLite transaction-start requirement — mandatory, not an optional late lock
+
+For SQLite, the supported chain-writer contract is:
+
+- The outermost transaction for every audit-producing business operation MUST begin with SQLite transaction_mode=IMMEDIATE. This obtains the database write reservation at BEGIN, before business-service reads and before any audit-head read.
+- Configure Django's SQLite database OPTIONS with transaction_mode="IMMEDIATE" for every SQLite database alias that can execute audit-producing business operations. Django >=5.2 supports this setting. It is a connection-level transaction policy and affects all outermost atomic transactions on that alias, not just the audit function.
+- Nested atomic() blocks are savepoints; they do not change an already-open outer transaction from DEFERRED to IMMEDIATE. Therefore an audit-producing operation MUST NOT be entered inside an ambient DEFERRED transaction. The implementation inventory must inspect request wrappers, ATOMIC_REQUESTS, tests, management commands, and service callers to prove the IMMEDIATE transaction is outermost.
+- If the application cannot guarantee that boundary, SQLite hash-chain concurrency is NOT supported by that call path and the implementation must STOP rather than claim that a late AuditChainHead UPDATE repairs it.
+- Set an explicit SQLite timeout/busy_timeout. A lock/busy error aborts and rolls back the entire outer business transaction. A retry, if needed, may only retry the entire business operation from its outermost boundary and only where the operation has an idempotency guarantee. Never catch a lock error and retry only the audit insert/head update inside a broken transaction.
+- The owner must explicitly approve the global SQLite IMMEDIATE setting because it changes transaction behavior for all outermost transactions on that SQLite connection and can reduce write concurrency/throughput. If the owner declines, W0-2E must present a different proven transaction-boundary architecture; it may not silently fall back to DEFERRED plus a late UPDATE.
+
+This requirement is stronger and more accurate than Revision 2's claim that a first UPDATE inside the audit function is always the first transaction write. The audit function cannot know or undo reads that happened earlier in the caller's transaction.
+
+### 18.5 Guarantees and boundaries
+
+- Serialization: SQLite serializes audit-producing outer transactions from BEGIN IMMEDIATE; PostgreSQL serializes on the singleton head row.
+- Chain integrity: each event_hash commits to both the immutable payload and the previous event_hash. A changed payload, changed previous link, missing event, duplicate successor, or fork is detected by verification.
+- Atomicity: business state, inserted audit event, and head pointer commit or roll back together.
+- Ordering: the previous-hash link defines the canonical order. Do not use created_at or primary-key ordering as a substitute for verifying the links.
+- Append-only compatibility: all event chain fields are populated at INSERT time. No later UPDATE to an audit event is permitted; the existing append-only database triggers remain authoritative.
+- No unbounded or partial-transaction retries. A retry must restart the entire outer business transaction and preserve the operation's idempotency contract.
+
+### 18.6 Required concurrency and integrity tests (both engines)
 
 | # | Test | Assertion |
 |---|---|---|
-| CH1 | PG writer storm (8 threads × 25 events, separate transactions) | chain validates; head == max(id); no gaps; 200 events |
-| CH2 | SQLite concurrent writers (threads × events) | serialization holds (with/without IMMEDIATE mode); no unhandled lock errors after bounded retry; chain validates |
-| CH3 | rollback injection (exception between insert and head update) | nothing persisted; next event chains from the pre-failure head |
-| CH4 | out-of-band row edit with triggers dropped | `audit_verify` detects the hash mismatch (detection layer independent of prevention layer) |
-| CH5 | chain validation on fresh DB and after N events | passes |
-| CH6 | concurrent business transactions each writing audits (existing flows) | all 7 existing rollback tests stay green |
+| CH1 | PostgreSQL concurrent writers (8 independent connections × 25 events) | One unbranched chain; every digest verifies; head equals final event |
+| CH2 | SQLite concurrent writers using IMMEDIATE outermost transactions | No stale-head read, fork, or partial commit; lock waiting follows configured timeout |
+| CH3 | SQLite negative control using DEFERRED with a read before the first write | Test demonstrates the unsafe upgrade/race path; implementation does not claim this path is supported |
+| CH4 | Rollback injection after event INSERT but before head update | Business mutation, event, and head all roll back; next successful event links to prior committed head |
+| CH5 | Tampered payload, tampered prev hash, deleted middle event, duplicate successor, and fork fixtures on isolated test DB | Verifier detects every corruption class |
+| CH6 | Canonicalization vectors across SQLite and PostgreSQL | Same logical event yields identical canonical bytes and digest on both engines |
+| CH7 | Existing audit rollback tests and representative business call paths | Existing atomicity behavior remains intact; all audited call paths begin at the required outer transaction boundary |
+| CH8 | Append-only trigger integration | Event INSERT succeeds; UPDATE/DELETE fail; chain/head writes require no event-row UPDATE |
 
 ## 19. Append-only audit protection and test isolation (Rev 2 — defect E fix)
 
@@ -1092,7 +1147,8 @@ Classification vocabulary: **ALREADY-DECIDED** (owner decided; closed) · **TECH
 | A | Temporal uniqueness: expired-but-unrevoked rows could permanently block re-grant; partial unique treated as sufficient | Settlement operation + `revocation_kind` + one-live-row-per-slot uniqueness as race backstop + grant service algorithm + overlap policy + renewal/replacement semantics + per-engine concurrency strategy | §14.1–14.7 |
 | B | Catalog had wildcard-style prefixes, "similar to" rows, and an unresolved 20-vs-23 domain count | Exact machine-readable registry: 20 domains, 162 keys, per-key meaning/sensitivity/seed/status; reconciliation of 20-vs-23; unresolved keys marked, not guessed | §15 |
 | C | `AuditAction` max_length 20 < longest proposed name (26) | Complete inventory with lengths; `CharField(40)`; binding naming convention; migration note | §17 |
-| D | Chain concurrency relied on `select_for_update()` (silently ignored on SQLite) and implied `atomic()` alone serializes SQLite writers | Lock-before-read protocol via `AuditChainHead` singleton write-first statement; SQLite deferred-vs-IMMEDIATE analysis; failure/rollback semantics; 6 concurrency tests | §18 |
+| D | Chain writer omitted prev_event_hash from the digest and treated a late SQLite UPDATE as if it were always the transaction's first write | Versioned canonical payload; domain-separated SHA-256 over previous-hash bytes plus payload; event UUID; link-based verifier; immutable INSERT-only chain fields | §18.2–18.3 |
+| E | SQLite DEFERRED transactions could read before audit-head UPDATE; late write cannot retroactively acquire the outer transaction's write reservation | Mandatory IMMEDIATE outermost transaction for every SQLite audit-producing path; explicit ambient-transaction prohibition; timeout and whole-operation retry rules; negative-control tests; owner approval required because setting affects all outermost transactions | §18.4–18.6 |
 | E | "Test-bypass mechanism" in the trigger migration could weaken production protections | Binding no-bypass rule; triggers in every test DB by migration; verification tests; mandatory rewrite of legacy mutating tests; STOP-and-report escalation | §19 |
 | F | `user` FKs CASCADE on M4/M5/M6 could erase authorization history | PROTECT everywhere on user/attribution FKs; deactivation-not-deletion policy; invariant test | §14.8 |
 | G | Resolver consulted the permission catalog before authentication checks | Corrected 10-step binding sequence (auth → account → session → catalog → GM → deny → allow → role → scope → default-deny) + corrected pseudocode + new tests R14–R18 | §16 |
@@ -1106,7 +1162,7 @@ Classification vocabulary: **ALREADY-DECIDED** (owner decided; closed) · **TECH
 2. **UQ-4** — approve adding the `cryptography` dependency (needed by W0-2C/E; not by A).
 3. **UQ-1** — GM-assignment revocation policy (needed before W0-2C).
 4. **UQ-10** — third-session behavior (needed before W0-2D).
-5. **W0-2E settings consent** — SQLite `"OPTIONS": {"transaction_mode": "IMMEDIATE"}` hardening (recommended; owner-visible settings change).
+5. **W0-2E SQLite transaction policy consent** — approve or decline the required SQLite OPTIONS transaction_mode="IMMEDIATE" setting for audit-producing workflows. This is not a cosmetic recommendation: without an IMMEDIATE outermost transaction before business reads, the proposed SQLite chain-writer guarantee is not established. The setting affects all outermost atomic transactions on that SQLite connection. If declined, W0-2E must return with an alternative proven boundary design; it must not ship a DEFERRED/late-UPDATE approximation.
 6. **UQ-6 / UQ-7** — backup cadence/retention and auditor masking parameters (before W0-2E).
 7. **UQ-8** — trusted origins list (before W0-2F).
 
@@ -1114,39 +1170,37 @@ Technically-resolved items (UQ-2, UQ-3, UQ-11) need no decision; the owner may v
 
 ## 24. Rev 2 verification evidence and W0-2A implementation boundary
 
-### 24.1 Files changed by this revision
+### 24.1 Files changed by Revision 3
 
-- Inside the repository: **exactly one file** — `docs/architecture/W0-2A_RBAC_OFFLINE_SECURITY_DESIGN_DRAFT.md` — modified in the working tree, **uncommitted** (evidence: `git status --short` shows ` M docs/architecture/W0-2A_RBAC_OFFLINE_SECURITY_DESIGN_DRAFT.md` only). No other file is touched.
-- Outside the repository (owner record only): the exact diff (`W0-2A_DESIGN_DRAFT_REV2.diff`), the original document copy, and the revision report.
-- **No application code, no Django models, no migrations, no API/frontend changes, no test changes, no runtime behavior change. No commits, pushes, PRs, merges, or deployment.**
+Revision 3 changes exactly one repository file: `docs/architecture/W0-2A_RBAC_OFFLINE_SECURITY_DESIGN_DRAFT.md`. The GitHub update is a documentation-only commit on the existing branch `security/w0-2a-rbac-architecture`. No code, model, migration, API, frontend, test, settings, workflow, or other repository file is changed. No PR is created, no merge is performed, and no deployment occurs. The resulting commit SHA and final compare evidence are recorded in the accompanying owner handoff.
 
 ### 24.2 W0-2A boundary matrix (defect J)
 
 | Component | Disposition in W0-2A |
 |---|---|
-| Architecture design (this document) | DELIVERED (design only) |
+| Architecture design (this document) | DELIVERED (design only; owner review pending) |
 | Six RBAC models + constraints/indexes | SCHEMA-ONLY (additive migrations 0002; dormant) |
 | Permission catalog registry + seed | SCHEMA+SEED (0003; 162 keys / 20 domains) |
 | Superuser→GM mapping | MIGRATION (0004; idempotent; no-op on current DBs) |
 | Resolver service + trace | CODE, DORMANT — zero view wiring, zero settings change, zero importers among views (structural test asserts) |
 | Temporal grant services (settlement/renewal/replacement) | CONTRACT-ONLY (§14 — implemented with W0-2B admin services; W0-2A ships schema + resolver only) |
-| Endpoint enforcement (`HasERPPermission`, denial-audit hook) | FUTURE — W0-2B (feature-flagged) |
+| Endpoint enforcement (HasERPPermission, denial-audit hook) | FUTURE — W0-2B (feature-flagged) |
 | Login/MFA/bootstrap/admin APIs | FUTURE — W0-2C |
 | Sessions/lockout/concurrency controls | FUTURE — W0-2D |
-| Audit chain fields, `AuditChainHead`, triggers, `CharField(40)`, new AuditAction wiring, checkpoints | FUTURE — W0-2E |
+| Audit chain fields, AuditChainHead, triggers, CharField(40), new AuditAction wiring, checkpoints | FUTURE — W0-2E; must implement §18 exactly and wait for the SQLite transaction-policy owner decision |
 | Frontend auth/guards/UX | FUTURE — W0-2F |
-| Full regression + PG exact-head evidence | FUTURE — W0-2G |
+| Full regression + PostgreSQL exact-head evidence | FUTURE — W0-2G |
 | TEST record capabilities | FUTURE — domain batches, gated by §20.2 prerequisites |
 | Pending Evidence / Approval workflow | FUTURE — OD-6 batch |
 
-**Zero-endpoint-behavior-change proof plan (retained from the implementation blueprint):** no view/permission/settings/middleware/URL changes (grep-diff scoped proof); resolver unwired; full existing suite (1022 passed / 9 skipped baseline on the identical code tree) green unmodified on SQLite and PostgreSQL; Security Batch 2 and Batch 3 pins untouched; `makemigrations --check` clean; migration forward+reverse on both engines.
+**Zero-endpoint-behavior-change proof plan (retained from the implementation blueprint):** no view/permission/settings/middleware/URL changes (grep-diff scoped proof); resolver unwired; full existing suite (1022 passed / 9 skipped baseline on the identical code tree) green unmodified on SQLite and PostgreSQL; Security Batch 2 and Batch 3 pins untouched; makemigrations --check clean; migration forward+reverse on both engines. These are required future implementation checks, not claims that Revision 3 ran them.
 
 ### 24.3 Evidence availability statement
 
-PR existence/number/review/merge state and CI conclusions for `99579d9` and `4036a5c` are **NOT VERIFIABLE** (GitHub API HTTP 403 rate limit, tokenless environment — recorded as unavailable evidence, explicitly not success). Git-level evidence (§13.2) is complete and sufficient to establish the branch state.
+Immediately before Revision 3, GitHub compare showed the branch 5 commits ahead and 0 behind main, with one documentation file added (1,152 additions, 0 deletions). The retrieved file blob was `9699bab8b143ae64ca8a3a15e39496893524ed9d`. No matching W0-2A PR was returned by PR search. The exact branch-tip commit SHA was not exposed by the available connector response. After the Revision 3 push, the owner handoff must record the exact new commit SHA, refreshed compare, file blob SHA, PR search result, and exact-commit CI/status result. Empty/unavailable checks are NOT VERIFIABLE, never GREEN.
 
 ### 24.4 STOP
 
-This revision is complete. No models, migrations, services, permissions, endpoints, or tests have been implemented. Nothing has been committed, pushed, merged, or deployed. The revised document and its exact diff are presented for owner review. **Implementation begins only after explicit owner approval.**
+Revision 3 is a documentation-only correction. No models, migrations, services, permissions, endpoints, settings, or tests have been implemented. The branch must remain unmerged. The revised design is presented for owner review; implementation begins only after explicit owner approval.
 
-**STOP — REVISION 2 COMPLETE. AWAITING OWNER REVIEW.**
+**STOP — REVISION 3 DOCUMENTATION UPDATE COMPLETE. AWAITING OWNER REVIEW.**
