@@ -506,11 +506,11 @@ WHERE <slot predicate> AND revoked_at IS NULL
 Every grant/renewal/replacement/settlement operation runs:
 
 1. `transaction.atomic()` begins.
-2. **Settlement UPDATE for the slot runs FIRST** (§14.3). On SQLite this first write statement upgrades the deferred transaction to a write transaction immediately, taking the database write lock before any slot-state read; on PostgreSQL it takes row locks on the rows it closes.
+2. **SQLite transaction boundary:** the outermost transaction MUST already be `IMMEDIATE` before this operation begins; an ambient `DEFERRED` transaction is rejected. Settlement UPDATE then runs before slot-state read. It does not retroactively upgrade a transaction that has already performed reads. On PostgreSQL, settlement updates and locks existing expired rows; the unique constraint remains the race backstop when no row exists.
 3. Validate window: `end_at > start_at`; bounded grants require `end_at` and `reason`.
 4. Overlap check: `SELECT ... WHERE <slot> AND revoked_at IS NULL` → if found, raise domain error `GrantConflictError`.
 5. INSERT the new row.
-6. COMMIT. If a concurrent writer raced past steps 4–5, the partial unique index rejects the second INSERT with `IntegrityError`, which the service translates to `GrantConflictError` (caller may retry; retry re-runs settlement and succeeds).
+6. COMMIT. If a concurrent writer wins the same-slot insert race, the partial unique index rejects the losing INSERT with `IntegrityError`, translated to `GrantConflictError`. Do not promise retry will succeed: if the winning row remains ACTIVE/SCHEDULED, retry must return the same conflict. Retry only after a verified transient lock/busy failure or after the conflicting grant is legitimately closed; never retry a business conflict automatically.
 
 **Engine behavior:**
 
@@ -560,6 +560,7 @@ TOTP credentials, recovery codes, `UserSession`, login-attempt/lockout state, bo
 
 - **No wildcard keys. No vague entries.** Every key is a literal `<domain>.<resource>.<action>` matching `^[a-z][a-z_]+\.[a-z_]+\.[a-z_]+$` (validated in the registry module and by a migration data assertion).
 - Single source of truth: `SECURITY_PERMISSION_CATALOG` in `backend/security/permissions_catalog.py`; a W0-2A migration seeds rows from it; a Django `check` asserts registry == DB (drift fails loudly). Display labels are never authorization identifiers.
+- The registry MUST define an explicit `scope_policy` for every key: `NONE`, `WAREHOUSE_REQUIRED`, or `OBJECT_REQUIRED`. Missing/unrecognized metadata is a configuration error and fails closed; it MUST NOT default to `NONE`. Existing `(W)` markers in the role matrix map to `WAREHOUSE_REQUIRED`. The implementation plan must enumerate all 162 keys before code; `OBJECT_REQUIRED` classifications must be grounded in persisted object models and owning-domain contracts, not guessed.
 - **Status vocabulary (grounding):**
   - `ENDPOINT` — mounted API endpoint exists today (mapping verified).
   - `SERVICE` — service-layer chokepoint exists today (verified); enforceable once wired in W0-2B.
@@ -1065,7 +1066,7 @@ PostgreSQL: the first chain operation is UPDATE of the singleton AuditChainHead 
 
 For SQLite, the supported chain-writer contract is:
 
-- The outermost transaction for every audit-producing business operation MUST begin with SQLite transaction_mode=IMMEDIATE. This obtains the database write reservation at BEGIN, before business-service reads and before any audit-head read.
+- The outermost transaction for every audit-producing business operation MUST begin with SQLite transaction_mode=IMMEDIATE. This obtains the database write reservation at BEGIN, before business-service reads and before any audit-head read. This is the same transaction-start rule imposed on grant-writing services in §14.6; both workflows use one consistent outermost boundary.
 - Configure Django's SQLite database OPTIONS with transaction_mode="IMMEDIATE" for every SQLite database alias that can execute audit-producing business operations. Django >=5.2 supports this setting. It is a connection-level transaction policy and affects all outermost atomic transactions on that alias, not just the audit function.
 - Nested atomic() blocks are savepoints; they do not change an already-open outer transaction from DEFERRED to IMMEDIATE. Therefore an audit-producing operation MUST NOT be entered inside an ambient DEFERRED transaction. The implementation inventory must inspect request wrappers, ATOMIC_REQUESTS, tests, management commands, and service callers to prove the IMMEDIATE transaction is outermost.
 - If the application cannot guarantee that boundary, SQLite hash-chain concurrency is NOT supported by that call path and the implementation must STOP rather than claim that a late AuditChainHead UPDATE repairs it.
