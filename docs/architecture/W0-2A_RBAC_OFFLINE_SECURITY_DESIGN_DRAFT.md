@@ -1421,7 +1421,7 @@ Classification vocabulary: **ALREADY-DECIDED** (owner decided; closed) · **TECH
 
 ## 23. Remaining owner decisions (explicit list)
 
-1. **Approve this Revision 5 design** — including the catalog registry (§15: 20 domains / 162 keys; scope registry §15A: NONE=140 / WAREHOUSE_REQUIRED=10 / OBJECT_REQUIRED=2 / UNRESOLVED=10; seeds GM 152 / ACC 102 / WK 12) and the C† defaults (which keys stay unseeded pending explicit GM grants). **This is the only decision required before W0-2A implementation.**
+1. **Revision 5 design approval — RESOLVED.** The owner has approved this W0-2A architecture design, including the catalog registry (§15: 20 domains / 162 keys; scope registry §15A: NONE=140 / WAREHOUSE_REQUIRED=10 / OBJECT_REQUIRED=2 / UNRESOLVED=10; seeds GM 152 / ACC 102 / WK 12) and the C† defaults. No further approval of the design text is pending. This approval is not implementation authorization: W0-2A/R1 implementation still requires a separate explicit owner instruction after review of the exact R1 execution plan.
 2. **UQ-4** — approve adding the `cryptography` dependency (needed by W0-2C/E; not by A).
 3. **UQ-1** — GM-assignment revocation policy (needed before W0-2C).
 4. **UQ-10** — third-session behavior (needed before W0-2D).
