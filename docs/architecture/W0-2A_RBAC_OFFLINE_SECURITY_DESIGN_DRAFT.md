@@ -3,7 +3,7 @@
 **Repository:** `Balkh/hesabdari_balkh`  
 **Baseline:** `main` at `99579d99f4b7c668118ad7e2add2a2ef91d04fba`  
 **Working branch:** `security/w0-2a-rbac-architecture`  
-**Status:** FIVE DESIGN ITEMS OWNER-APPROVED; ACCOUNTANT ROLE EXPANSION OWNER-APPROVED; TECHNICAL MODEL MAPPING AND IMPLEMENTATION PLAN REMAIN OPEN; OWNER REVIEW PENDING  
+**Status:** ARCHITECTURE DESIGN OWNER-APPROVED; ACCOUNTANT ROLE EXPANSION OWNER-APPROVED; TECHNICAL IMPLEMENTATION PLAN AND REMAINING OWNER DECISIONS TRACKED BELOW; R1 IMPLEMENTATION NOT YET AUTHORIZED  
 **Date:** 2026-10-31  
 **Revision 2:** 2026-10-31 — technical design correction, pushed to the working branch for owner review.  
 **Revision 3:** 2026-10-31 — documentation-only corrections to the audit hash-chain and SQLite transaction contract.
@@ -1443,7 +1443,7 @@ Revisions 3, 4, and 5 each change exactly one repository file: `docs/architectur
 
 | Component | Disposition in W0-2A |
 |---|---|
-| Architecture design (this document) | DELIVERED (design only; owner review pending) |
+| Architecture design (this document) | DELIVERED AND OWNER-APPROVED; implementation authorization remains separate |
 | Six RBAC models + constraints/indexes | SCHEMA-ONLY (additive migrations 0002; dormant) |
 | Permission catalog registry + seed | SCHEMA+SEED (0003; 162 keys / 20 domains) |
 | Superuser→GM mapping | MIGRATION (0004; idempotent; no-op on current DBs) |
@@ -1468,6 +1468,22 @@ Revisions 3, 4, and 5 each change exactly one repository file: `docs/architectur
 
 ### 24.4 STOP
 
-Revision 5 and its final consistency follow-up are documentation-only updates. This follow-up corrects two stale step references, distinguishes server-side resource binding from permission-level scope policy, and accurately states the implementation boundary. It adds or changes no runtime artifact. The pre-existing RBAC models, migrations, permission seed, and dormant resolver remain as listed in §24.2; no additional models, migrations, services, permissions, endpoints, settings, or tests were implemented as part of this documentation update. The branch must remain unmerged. The revised design is presented for owner review; implementation begins only after explicit owner approval (§23).
+Revision 5 and its final consistency follow-up are documentation-only updates. This follow-up corrects two stale step references, distinguishes server-side resource binding from permission-level scope policy, and accurately states the implementation boundary. It adds or changes no runtime artifact. **The RBAC models, migrations, permission seed, and dormant resolver listed in §24.2 are W0-2A implementation deliverables; they are not present in `main` at baseline `99579d99f4b7c668118ad7e2add2a2ef91d04fba`.** Section 24.2 defines the approved implementation boundary; it must not be read as evidence that those runtime artifacts already exist. No RBAC runtime artifacts were implemented by these documentation revisions. The branch must remain unmerged. The architecture design has received owner approval; that approval does not itself authorize implementation, migration, PR creation, merge, or freeze.
 
-**STOP — REVISION 5 DOCUMENTATION FOLLOW-UP COMPLETE. AWAITING OWNER REVIEW.**
+### 24.5 W0-2A fresh-database bootstrap compatibility requirement
+
+The current `backend/accounting/management/commands/bootstrap_fresh_database.py` treats populated application models as evidence that a database is not fresh. Its current exemptions are Django's generated `contenttypes.ContentType` and `auth.Permission` rows only. W0-2A's permission seed will also create system reference rows in `security.Role`, `security.Permission`, and `security.RolePermission`. Those three seeded reference models must be treated as bootstrap metadata, not operator-entered ERP data, or a genuinely fresh migrated database will be refused before canonical COA/currency initialization.
+
+The eventual W0-2A implementation must therefore:
+
+- Exempt only `security.Role`, `security.Permission`, and `security.RolePermission` in addition to the existing Django-generated reference models.
+- Continue treating `security.UserRoleAssignment`, `security.UserPermissionOverride`, and `security.UserWarehouseScope` as meaningful application data; their presence must continue to block first-time bootstrap.
+- Preserve the existing schema-completeness preflight, partial/divergent-accounting checks, audit-marker checks, transaction rollback, and no-overwrite behavior.
+- Update `docs/operations/FRESH_DATABASE_BOOTSTRAP.md` to state the exact additional reference-data exemptions.
+- Add regression coverage for both permitted seeded reference rows and blocking user-specific authorization rows.
+
+**Static impact review of current `backend/accounting/test_bootstrap.py`:** 9 of its 15 test methods first invoke the bootstrap command on an otherwise empty database and would be affected if the three W0-2A reference tables were counted as ordinary populated application data: `test_fresh_database_creates_canonical_coa_currencies_and_audit`, `test_repeat_run_is_noop_and_does_not_duplicate_audit`, `test_rerun_refuses_when_bootstrap_audit_event_is_missing`, `test_rerun_refuses_when_bootstrap_audit_event_is_duplicated`, `test_audit_failure_rolls_back_all_bootstrap_rows`, `test_rerun_refuses_when_bootstrap_audit_action_is_wrong`, `test_rerun_refuses_when_another_base_currency_exists`, `test_existing_currency_edit_is_never_overwritten`, and `test_existing_accountant_edit_is_never_overwritten`. This is a source-based impact assessment, not an executed test result. The other six tests either stop before the populated-model guard or already expect refusal for an independent pre-existing condition.
+
+This is a compatibility requirement for the future W0-2A implementation, not authorization to change the bootstrap command now. The code, runbook, and tests remain unchanged until the R1 implementation is explicitly authorized.
+
+**STOP — DOCUMENTATION CORRECTION COMPLETE. ARCHITECTURE OWNER-APPROVED; R1 IMPLEMENTATION NOT AUTHORIZED.**
