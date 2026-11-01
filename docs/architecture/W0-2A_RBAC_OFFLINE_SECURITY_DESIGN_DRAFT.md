@@ -9,6 +9,7 @@
 **Revision 3:** 2026-10-31 — documentation-only corrections to the audit hash-chain and SQLite transaction contract.
 **Revision 4:** 2026-10-31 — documentation-only corrections to mandatory object-scope enforcement, Django Admin GM-only access, MFA/BasicAuthentication interaction, resolver fail-closed behavior, SQLite transaction consistency, and stale evidence. No application code, model, migration, API, frontend, test, settings, or runtime behavior changes. No PR, merge, deployment, or implementation authorization.
 **Revision 5:** 2026-10-31 — documentation-only complete permission-scope audit: evidence-backed registry of all 162 keys (§15A: scope policy, source, basis, resolver context, evidence, status per key), Warehouse Keeper matrix reconciliation, seed-total recount with corrections, evidence-error corrections (including the `sales.refund.*` misclassification), and stale-evidence repairs. No application code, model, migration, API, frontend, test, settings, or runtime behavior changes. No PR, merge, deployment, or implementation authorization.
+**Revision 5 final consistency correction:** 2026-11-01 — documentation-only correction of independent Revision 5 review findings: Warehouse Keeper seed vocabulary (§15.4, §22 rows V/W), resolver candidate-vs-scope semantics (§16, §9A Item 2 note, §22 rows G/X), §15A source-path convention, and evidence reconciliation (§13.5). No policy, seed, permission, code, model, migration, API, frontend, test, or settings change; no owner decision re-decided; no PR, merge, deployment, or implementation authorization.
 
 ## 1. Purpose and boundary
 
@@ -256,7 +257,7 @@ Additional rules:
 
 This owner-approved resolution satisfies D3 deny precedence while preserving explicit per-user grants.
 
-**[Rev 2]** §16 is the binding technical encoding of Item 2. It adds the explicit step ordering (authentication → account state → session validity → protected GM → explicit deny → explicit allow → role union → scope → default deny), places the permission-key catalog lookup strictly after the first three steps so unauthenticated callers learn nothing about the catalog, and adds the `ACCOUNT_LOCKED` account state from Item 4's approved lockout semantics. No approved rule is weakened.
+**[Rev 2]** §16 is the binding technical encoding of Item 2. It adds the explicit step ordering (authentication → account state → session validity → protected GM → explicit deny → explicit allow / role union as candidate grants gated by mandatory scope validation → default deny), places the permission-key catalog lookup strictly after the first three steps so unauthenticated callers learn nothing about the catalog, and adds the `ACCOUNT_LOCKED` account state from Item 4's approved lockout semantics. No approved rule is weakened. **[Rev 5 final consistency correction]** §16.1, §16.2, and §22 row G now state one identical evaluation behavior: explicit DENY takes precedence; an explicit ALLOW and a role grant are candidate grants until the required scope has passed; no ALLOW result bypasses scope validation; default deny is unchanged.
 
 ### Item 3 — GM first-run bootstrap and recovery key custody (owner-approved direction; implementation details open)
 
@@ -449,6 +450,15 @@ Revision 5 performs the evidence-backed scope audit required before implementati
 5. **DOCUMENT / VALIDATE** — registry inserted (§15A); totals, headings, and stale GitHub evidence repaired; counts re-verified programmatically (162 rows, 162 unique, 0 duplicates, 0 omissions).
 
 No code, models, migrations, API, frontend, tests, settings, or runtime behavior changed. W0-2A implementation remains blocked on explicit owner approval (§23).
+
+### 13.5 Revision 5 — final consistency correction (documentation-only)
+
+Independent review of the published Revision 5 identified four documentation-consistency findings; all four are corrected in this commit. Nothing else changed: no application code, model, migration, API, frontend, test, settings, or runtime behavior; no permission, seed, or scope reclassification; no owner decision re-decided and no unresolved question answered.
+
+1. **Warehouse Keeper seed vocabulary (§15.4, §22 rows V/W).** The WK seed was described as "8 warehouse-scoped `(W)` keys", conflating two distinct mechanisms. Corrected to the verified composition: 4 `WAREHOUSE_REQUIRED` keys (`inventory.movement.view/create`, `inventory.count.view/create`) + 4 keys with `scope_policy=NONE` under mandatory role-conditional WK warehouse data filtering (`warehouses.warehouse.view`, `purchases.document.view`, `sales.document.view`, `reporting.dashboard.view`) + 2 field-restricted keys (`parties.party.view`, `products.product.view`) + 2 self-scope keys (`security.account.view_own`, `security.mfa.enroll_own`). The total remains 12; permission-level scope vs role-conditional data filtering stay explicit; the alternative modeling remains owner decision §23 item 9.
+2. **Resolver sequence consistency (§16.1, §16.2, §9A Item 2 note, §22 rows G/X).** The numbered sequence, the pseudocode, and both resolution summaries now describe one evaluation behavior: explicit DENY takes precedence; an explicit ALLOW is only a candidate grant until the mandatory scope validation (§16.1 step 8) has passed; a role grant is only a candidate grant until the same validation has passed; no ALLOW result may bypass scope validation; default deny (step 10), protected GM authority (step 5), and hard domain invariants are unchanged. The approved authorization policy is not changed; the pseudocode is aligned to the binding sequence — with no candidate grant, the result is `NO_GRANT` (default deny), which the binding sequence already prescribed.
+3. **§15A source-path convention.** §15A code references are relative to `backend/`; an explicit, unambiguous statement now says so (§15A "Evidence method"). No line number or source claim was altered.
+4. **Evidence accuracy.** The prior owner handoff stated the Revision 5 file as 1,449 lines; the live Revision 5 file independently verifies as 1,445 lines (201,170 bytes, UTF-8, editor count; `wc -l` reports 1,444 because the file does not end with a newline). Final post-commit metrics (line count, byte size, 162 rows / 162 unique keys, scope and seed totals, changed-file list, ahead/behind, commit SHA, document blob SHA, PR/CI status) are recomputed from live GitHub after this commit and recorded in the owner handoff per the §24.3 evidence discipline. No in-document figure depends on the 1,449 value.
 
 ## 14. Technical model mapping (Rev 2) — temporal semantics, uniqueness, and deletion policies
 
@@ -863,7 +873,7 @@ Legend: Sens = `is_sensitive`. Status: E=ENDPOINT, S=SERVICE, M=MATRIX, R=RESERV
 | Status mix | **E=11, S=53, M=88, R=10, U=0** (after the 20 evidence corrections of §15.3) |
 | GM seed (= GM capability set) | **152** (all ENDPOINT/SERVICE/MATRIX keys) |
 | Accountant seed | **102** (matrix 'A' cells; Revision 2–4 published 101 without a row-level audit) |
-| Warehouse Keeper seed | **12** = 8 warehouse-scoped `(W)` keys + 2 field-restricted keys (`parties.party.view`, `products.product.view` — minimum-fields serializer restriction per matrix row 2, not warehouse scope) + 2 self-scope keys (`security.account.view_own`, `security.mfa.enroll_own`) |
+| Warehouse Keeper seed | **12** = 4 `WAREHOUSE_REQUIRED` keys (`inventory.movement.view/create`, `inventory.count.view/create` — key-level scope per §15A) + 4 keys with `scope_policy=NONE` carrying mandatory role-conditional WK warehouse data filtering (`warehouses.warehouse.view`, `purchases.document.view`, `sales.document.view`, `reporting.dashboard.view` — assignment-based data filter for WK holders only, not key-level scope; §23 item 9) + 2 field-restricted keys (`parties.party.view`, `products.product.view` — minimum-fields serializer restriction per matrix row 2, not warehouse scope) + 2 self-scope keys (`security.account.view_own`, `security.mfa.enroll_own`) |
 | Seeded to no one | **10** (`documents.*` 9 RESERVED + `sales.document.approve` RESERVED) |
 | ENDPOINT-backed keys (enforceable immediately at W0-2B wiring) | 11 |
 | Registry-UNRESOLVED (ungrounded) keys | 0 — every key is evidence-grounded or explicitly scope-UNRESOLVED |
@@ -876,7 +886,7 @@ Legend: Sens = `is_sensitive`. Status: E=ENDPOINT, S=SERVICE, M=MATRIX, R=RESERV
 2. **Accountant seed 101 → 102.** Recount of the matrix 'A' cells; the corrected count must be used by the W0-2C seed migration.
 3. **`sales.document.approve` (ACC=C†, status R).** C† describes its post-OD-6 posture (matrix row 9: approval rights only by explicit GM grant and workflow rules). Today, per §15.1's RESERVED rule, it is seeded to no one and is counted in "seeded to no one" — Revision 2–4's total of 12 omitted it.
 4. **17 keys carried status S without an existing service-layer chokepoint** (e.g., `payments.payment.*` — no supplier-payment code exists anywhere; `parties/products/catalog/cash/exchange` view rows — resolver-only apps). Corrected to M with `[R5]` markers; per-key evidence in §15A; issue record in §22 row T.
-5. **Warehouse Keeper reconciliation (Defect E).** The two vocabularies are distinct and both correct: **12** = WK seeded keys; **14** = keys carrying `(W)`/assignment semantics anywhere in the matrix (10 with ACC-column markers → `WAREHOUSE_REQUIRED`; 4 with WK-column-only markers → role-conditional data filter). The 12 WK seeds comprise 8 of the W-scope keys plus the 2 field-restricted and 2 self-scope keys.
+5. **Warehouse Keeper reconciliation (Defect E; wording corrected by the final consistency correction).** The two vocabularies are distinct and both correct: **12** = WK seeded keys; **14** = keys carrying `(W)`/assignment semantics anywhere in the matrix (10 with ACC-column markers → `WAREHOUSE_REQUIRED`; 4 with WK-column-only markers → role-conditional data filter). The 12 WK seeds comprise **4 of the 10 `WAREHOUSE_REQUIRED` keys** (`inventory.movement.view/create`, `inventory.count.view/create`), **all 4 role-conditional data-filter keys** (`warehouses.warehouse.view`, `purchases.document.view`, `sales.document.view`, `reporting.dashboard.view` — key `scope_policy=NONE`; WK holders receive assignment-based filtering enforced server-side against M6 by the owning API batch), **the 2 field-restricted keys** (`parties.party.view`, `products.product.view`), and **the 2 self-scope keys** (`security.account.view_own`, `security.mfa.enroll_own`). Permission-level scope (`WAREHOUSE_REQUIRED`) and role-conditional data filtering (key scope `NONE`) are distinct mechanisms; the earlier "8 warehouse-scoped `(W)` keys" wording merged them and is corrected. The alternative modeling remains owner decision §23 item 9 and is not decided here.
 
 ### 15.5 Resolution status of previously-unresolved keys (Rev 5)
 
@@ -890,6 +900,8 @@ Legend: Sens = `is_sensitive`. Status: E=ENDPOINT, S=SERVICE, M=MATRIX, R=RESERV
 **Classification framework.** `NONE` = the approved policy places no warehouse/object restriction on holders of the key; target/parent objects are still resolved server-side from persisted rows (§16.1 step 8) — `NONE` is never a shortcut for unknown scope. `WAREHOUSE_REQUIRED` = access is limited to warehouses assigned to the user (M6 registry); used exactly where the approved matrix carries a `(W)` marker in the **Accountant** column (all ten inventory keys — the restriction applies to every holder). `OBJECT_REQUIRED` = access is constrained to a specific persisted object tied to the caller (the two self-scope keys). For the four keys whose `(W)` marker appears only in the **Warehouse Keeper** column (`warehouses.warehouse.view`, `purchases.document.view`, `sales.document.view`, `reporting.dashboard.view`), the registry records `NONE` plus the role-conditional WK data filter, because the approved matrix does not warehouse-restrict the Accountant; the alternative modeling is owner decision §23 item 9.
 
 **Evidence method.** Rows cite exact repository paths and symbols current at branch tip `33fd1a1f90fc49ccdbaf081b8a2ef9fbd45d4e27` (baseline main `99579d99f4b7c668118ad7e2add2a2ef91d04fba`). Absences (e.g., "no supplier-payment code exists") were verified by stated searches recorded in the Revision 5 evidence sweeps (§13.4).
+
+**Path convention (final consistency correction).** Code paths in this section are relative to the `backend/` directory (the Django repository root): `inventory/models.py:26` denotes `backend/inventory/models.py:26`. Paths already carrying a `backend/` prefix are literal repository paths. No line number or source claim in §15A was altered by the final consistency correction (it changes only this document), so the cited branch tip `33fd1a1f…` remains the code-evidence reference point.
 
 | permission_key | domain | scope_policy | source_model_or_contract | scope_basis | resolver_context | evidence | reason | status |
 |---|---|---|---|---|---|---|---|---|
@@ -1069,13 +1081,13 @@ The resolver (`backend/security/authorization.py`, W0-2A; dormant — zero view 
 3. **Session validity** — authentication layer MUST provide trusted session context; never infer validity from caller-supplied booleans/request fields. Validate server-side Django session and expiry; when W0-2D records exist, validate binding/revocation. Invalid, absent where required, or expired → DENY `NO_ACTIVE_SESSION`. BasicAuthentication-only context is insufficient for MFA-protected routes.
 4. **Permission-key resolution (first catalog touch)** — unknown/inactive key → DENY `UNKNOWN_PERMISSION` + warning log. The entire resolver—including account-lock/session checks and permission, override, role, scope, and GM-capability lookups—MUST be inside one fail-closed exception boundary. Expected denials retain their reason; unexpected DB/cache/resolver errors return DENY `FAIL_CLOSED` and log. No exception may escape before an authorization decision or fall through as ALLOW.
 5. **Protected GM authority** — active GM role assignment AND key ∈ GM capability set (§15.3 GM seed rule) → ALLOW `GM_PROTECTED`. Overrides are never consulted for GM. Domain invariants still apply downstream (they live below the resolver). A locked/inactive GM is denied at steps 2–3 — this is the owner-approved D9 lockout applying universally, not an authority change.
-6. **Explicit deny** — active user override with `effect=DENY` → DENY `USER_DENY`.
-7. **Explicit allow** — active user override with `effect=ALLOW` → evaluate scope (step 8); pass → ALLOW `USER_ALLOW`.
-8. **Mandatory object-scope policy** — every permission/operation MUST declare server-owned scope policy `NONE`, `WAREHOUSE_REQUIRED`, or `OBJECT_REQUIRED`. For every non-GM grant with policy other than `NONE`, trusted scope is mandatory. Missing scope, unresolved object, inability to derive warehouse/owner, mismatch, or scope error → DENY `SCOPE_DENIED`. `scope=None` is valid only for policy `NONE`. Derive scope from persisted target object/server-side route context; client-supplied IDs/booleans are not authoritative. Applies equally to role grants and explicit user ALLOW; ALLOW never bypasses scope. GM may use global scope but remains subject to domain invariants.
-9. **Role-derived permissions** — key ∈ union of ACTIVE role grants → scope check → ALLOW `ROLE_GRANT`.
-10. **Default deny** — otherwise DENY `NO_GRANT`.
+6. **Explicit deny** — active user override with `effect=DENY` → DENY `USER_DENY`. Explicit DENY takes precedence over every candidate grant below.
+7. **Explicit allow — candidate grant** — active user override with `effect=ALLOW` → candidate ALLOW `USER_ALLOW`. A candidate is not a result: it returns ALLOW only after the mandatory scope validation (step 8) has passed. An explicit ALLOW never bypasses scope validation.
+8. **Mandatory object-scope policy — one gate for every candidate grant** — every permission/operation MUST declare server-owned scope policy `NONE`, `WAREHOUSE_REQUIRED`, or `OBJECT_REQUIRED`. For every non-GM grant with policy other than `NONE`, trusted scope is mandatory. Missing scope, unresolved object, inability to derive warehouse/owner, mismatch, or scope error → DENY `SCOPE_DENIED`. `scope=None` is valid only for policy `NONE`. Derive scope from persisted target object/server-side route context; client-supplied IDs/booleans are not authoritative. The same gate applies to candidate grants from the explicit user ALLOW (step 7) and from role union (step 9): no ALLOW result may bypass scope validation. GM may use global scope but remains subject to domain invariants.
+9. **Role-derived permissions — candidate grant** — key ∈ union of ACTIVE role grants → candidate ALLOW `ROLE_GRANT`; it returns ALLOW only after the same scope validation (step 8) has passed. A role grant never bypasses scope validation.
+10. **Default deny** — otherwise (no candidate grant exists, or no candidate survives scope validation) → DENY `NO_GRANT`. Unchanged.
 
-Conflict rules (binding): explicit DENY (6) precedes explicit ALLOW (7) and role union (9) — a role grant can never override an explicit denial; if both a live ALLOW and DENY existed (the schema of §14.4 makes this unreachable), DENY wins; GM protection (5) precedes overrides — ordinary overrides can never revoke GM authority (D3); unknown keys and all errors fail closed.
+Conflict rules (binding): explicit DENY (6) precedes explicit ALLOW (7) and role union (9) — a role grant can never override an explicit denial; if both a live ALLOW and DENY existed (the schema of §14.4 makes this unreachable), DENY wins; an explicit ALLOW (7) and a role grant (9) are candidate grants only — each becomes an ALLOW result exclusively after the same mandatory scope validation (8) has passed, and no ALLOW result may bypass scope validation; GM protection (5) precedes overrides — ordinary overrides can never revoke GM authority (D3) and GM authority remains subject to hard domain invariants; unknown keys and all errors fail closed; default deny (10) is unchanged.
 
 ### 16.2 Corrected pseudocode
 
@@ -1097,10 +1109,16 @@ def resolve(user, permission_key, *, auth_context, resource=None, at=None) -> Pe
             return deny("MFA_REQUIRED", trace)
         perm = Permission.objects.get(key=permission_key, is_active=True)
         if has_active_role(user, RoleCode.GM, at) and perm.key in gm_capability_set(at):
-            return allow("GM_PROTECTED", trace)
+            return allow("GM_PROTECTED", trace)  # GM authority unchanged; domain invariants apply downstream
         override = active_override(user, perm, at)
         if override is not None and override.effect == Effect.DENY:
-            return deny("USER_DENY", trace)
+            return deny("USER_DENY", trace)  # step 6: explicit DENY takes precedence
+        # Steps 7/9: candidate grants — a candidate is not a result until scope (step 8) has passed.
+        user_allow = override is not None and override.effect == Effect.ALLOW  # step 7 candidate
+        role_grant = perm.key in union_of_active_role_permissions(user, at)  # step 9 candidate
+        if not (user_allow or role_grant):
+            return deny("NO_GRANT", trace)  # step 10: default deny (unchanged)
+        # Step 8: one mandatory scope gate for every candidate grant — no ALLOW bypasses it.
         policy = permission_scope_policy(perm)  # server-owned registry metadata
         trusted_scope = derive_scope_from_persisted_resource(resource, policy)
         if policy != ScopePolicy.NONE:
@@ -1108,11 +1126,9 @@ def resolve(user, permission_key, *, auth_context, resource=None, at=None) -> Pe
                 return deny("SCOPE_DENIED", trace)
         elif trusted_scope is not None and not trusted_scope.is_consistent_with(resource):
             return deny("SCOPE_DENIED", trace)
-        if override is not None and override.effect == Effect.ALLOW:
-            return allow("USER_ALLOW", trace)
-        if perm.key in union_of_active_role_permissions(user, at):
-            return allow("ROLE_GRANT", trace)
-        return deny("NO_GRANT", trace)
+        if user_allow:
+            return allow("USER_ALLOW", trace)  # step 7 grant: required scope has passed
+        return allow("ROLE_GRANT", trace)  # step 9 grant: required scope has passed
     except Permission.DoesNotExist:
         return deny("UNKNOWN_PERMISSION", trace)  # server-side warning log
     except Exception:
@@ -1374,7 +1390,7 @@ Classification vocabulary: **ALREADY-DECIDED** (owner decided; closed) · **TECH
 | D | Audit-chain digest did not include the previous hash, and SQLite locking assumed a late audit UPDATE was always the transaction's first write | Versioned canonical payload; domain-separated SHA-256 over previous-hash bytes plus payload; unique event/link constraints; link-based verifier; mandatory IMMEDIATE outermost SQLite transaction; explicit ambient-transaction prohibition; timeout and whole-operation retry rules; owner approval because the setting affects all outermost transactions | §18.2–18.6 |
 | E | "Test-bypass mechanism" in the trigger migration could weaken production protections | Binding no-bypass rule; triggers in every test DB by migration; verification tests; mandatory rewrite of legacy mutating tests; STOP-and-report escalation | §19 |
 | F | `user` FKs CASCADE on M4/M5/M6 could erase authorization history | PROTECT everywhere on user/attribution FKs; deactivation-not-deletion policy; invariant test | §14.8 |
-| G | Resolver consulted the permission catalog before authentication checks | Corrected 10-step binding sequence (auth → account → session → catalog → GM → deny → allow → role → scope → default-deny) + corrected pseudocode + new tests R14–R18 | §16 |
+| G | Resolver consulted the permission catalog before authentication checks | Corrected 10-step binding sequence (auth → account → session → catalog → GM → explicit-deny → candidate grants (explicit allow / role union) gated by mandatory scope validation → default-deny) + corrected pseudocode + new tests R14–R18; explicit DENY takes precedence; explicit ALLOW and role grants are candidate grants until the required scope has passed; no ALLOW result bypasses scope validation; default deny unchanged (semantics aligned across §16.1/§16.2/row G by the final consistency correction) | §16 |
 | H | Lifecycle conflated enforced rules with future contracts; TEST isolation risked being read as available | Status labels (ENFORCED-TODAY vs CONTRACT-ONLY) per rule; binding TEST enablement prerequisites; W0-2A explicitly implements none | §20 |
 | I | UQ-9 contradicted the owner's clarified policy | Owner rule recorded verbatim; removed from open list; not re-asked | §20.3, §21 |
 | J | Future-phase behavior risked being read as implemented | §13/§24 boundary matrix; CONTRACT-ONLY labels throughout; zero-endpoint-behavior-change proof plan retained | §13.1, §24 |
@@ -1389,7 +1405,11 @@ Classification vocabulary: **ALREADY-DECIDED** (owner decided; closed) · **TECH
 | S | `sales.refund.*` marked UNRESOLVED "no verified service" — false: `Refund` model + `create_refund`/`reverse_refund` existed on main; Revision 2's grep was scoped to `sales/services.py` only | Keys grounded `[R5]` (M/S/S); GM seed updated to 152; Accountant seed = owner decision; §13.3 evidence row annotated | §13.3, §15.3, §15.5, §23.8 |
 | T | 17 keys carried status S without an existing service-layer chokepoint (4× `payments.payment.*` — no supplier-payment code exists anywhere; 6× master-data view rows with resolver-only apps; `sales.document.view/edit_draft/reverse`; `purchases.document.view`; `purchases.supplierrefund.view`; `inventory.adjustment.reverse`) | Corrected to M with `[R5]` markers; per-key evidence in §15A | §15.3, §15A |
 | U | Stale evidence: §24.1 heading said "Revision 3" under the Revision 4 section; §24.3 "Post-Revision-4" numbers (9 ahead / 1,234 lines / blob add6ba62) were mid-revision, not final (final Revision 4 state: 10 ahead / 1,237 lines / blob bf36e6c3) | Heading corrected; §24.3 replaced with verifiable pre-commit facts; final post-commit evidence delegated to the owner handoff report (not copied from old counts) | §24 |
-| V | Warehouse Keeper vocabularies conflated: "12 seeded" vs 14 keys bearing `(W)`/assignment semantics appeared contradictory | Reconciled: 12 WK seeds = 8 `(W)`-scoped + 2 field-restricted + 2 self-scope; 14 `(W)`-bearing keys = 10 WAREHOUSE_REQUIRED (ACC-column markers) + 4 role-conditional (WK-column-only markers) | §15.4, §15A, §23.9 |
+| V | Warehouse Keeper vocabularies conflated: "12 seeded" vs 14 keys bearing `(W)`/assignment semantics appeared contradictory | Reconciled (wording corrected by the final consistency correction — row W): 12 WK seeds = 4 `WAREHOUSE_REQUIRED` (WK-seeded inventory keys) + 4 role-conditional data-filter keys (key scope `NONE`) + 2 field-restricted + 2 self-scope; 14 `(W)`-bearing keys = 10 WAREHOUSE_REQUIRED (ACC-column markers) + 4 role-conditional (WK-column-only markers) | §15.4, §15A, §23.9 |
+| W | Revision 5 WK-seed wording ("8 warehouse-scoped `(W)` keys") conflated permission-level `WAREHOUSE_REQUIRED` scope with role-conditional WK data filtering (key scope `NONE`) | Seed composition corrected: 4 `WAREHOUSE_REQUIRED` + 4 `NONE`-with-role-conditional-filter + 2 field-restricted + 2 self-scope = 12; both mechanisms kept explicit; §23 item 9 decision preserved (not decided here) | §15.4, §13.5, row V |
+| X | §16.1 numbered steps, §16.2 pseudocode, §9A Item 2 note, and row G described candidate/scope ordering inconsistently; the pseudocode could return `SCOPE_DENIED` where the binding sequence prescribes default deny (no candidate grant) | All four aligned to one evaluation behavior: DENY precedence; explicit ALLOW and role grants are candidate grants until the mandatory scope validation passes; no ALLOW bypasses scope; default deny, GM authority, and domain invariants unchanged | §16.1, §16.2, §9A Item 2 note, row G, §13.5 |
+| Y | §15A code paths were written relative to `backend/` without stating the convention | Explicit path-convention statement added to §15A "Evidence method"; no line number or source claim altered | §15A, §13.5 |
+| Z | Prior owner handoff stated 1,449 lines for the Revision 5 file; the live Revision 5 file verifies as 1,445 lines (201,170 bytes) | Resolved against the final exact file: post-commit metrics recomputed live and recorded in the owner handoff per §24.3 discipline; no in-document figure depended on the 1,449 value | §13.5, §24.3 |
 
 ## 23. Remaining owner decisions (explicit list)
 
