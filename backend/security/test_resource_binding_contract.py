@@ -180,14 +180,55 @@ class ResourceBindingContractTests(ResolverTestBase):
     # ------------------------------------------------------------------
     def test_collection_none_passes_without_target(self):
         self.grant(NONE_KEY)
-        self.grant("security.account.view")  # undeclared NONE key
+        # A collection is valid only when explicitly declared server-side.
+        register_operation_binding(
+            NONE_KEY, _ResourceBinding(is_target_bound=False)
+        )
+        self.linked_keys.append(NONE_KEY)
 
         decision = self.resolve(self.actor, NONE_KEY, resource=None)
         self.assertTrue(decision.allowed, decision)
         self.assertEqual(decision.reason, "ROLE_GRANT")
 
-        decision = self.resolve(self.actor, "security.account.view", resource=None)
-        self.assertTrue(decision.allowed, decision)
+        # A different NONE key with a grant remains UNDECLARED and denied.
+        undeclared_key = "security.account.view"
+        self.grant(undeclared_key)
+        decision = self.resolve(self.actor, undeclared_key, resource=None)
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.reason, "SCOPE_DENIED")
+
+    # ------------------------------------------------------------------
+    # UNDECLARED NONE operations are not implicit collections
+    # ------------------------------------------------------------------
+    def test_undeclared_none_denies_role_grant_with_or_without_resource(self):
+        self.grant(NONE_KEY)
+
+        decision = self.resolve(self.actor, NONE_KEY, resource=None)
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.reason, "SCOPE_DENIED")
+        self.assertIn("9:SCOPE_DENIED:binding-undeclared", decision.trace)
+
+        # Supplying a resource cannot implicitly declare the operation.
+        decision = self.resolve(self.actor, NONE_KEY, resource=self.warehouse)
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.reason, "SCOPE_DENIED")
+
+    def test_undeclared_none_denies_explicit_user_allow(self):
+        permission = Permission.objects.get(key=NONE_KEY)
+        UserPermissionOverride.objects.create(
+            user=self.actor,
+            permission=permission,
+            effect=OverrideEffect.ALLOW,
+        )
+
+        decision = self.resolve(self.actor, NONE_KEY, resource=None)
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.reason, "SCOPE_DENIED")
+        self.assertIn("9:SCOPE_DENIED:binding-undeclared", decision.trace)
+
+        decision = self.resolve(self.actor, NONE_KEY, resource=self.warehouse)
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.reason, "SCOPE_DENIED")
 
     # ------------------------------------------------------------------
     # 6) explicit user ALLOW cannot bypass target binding
