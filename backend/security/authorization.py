@@ -47,12 +47,25 @@ Known R1 limitations (documented, fail-closed, tested):
   does not exist yet (W0-2C). The MFA_REQUIRED branch is implemented now
   and pinned by tests, so BasicAuthentication can never satisfy an
   MFA-protected operation later (§6, R27).
-- The per-operation resource-binding table is derived from the approved
-  key-level scope registry (§15A): WAREHOUSE_REQUIRED binds the persisted
-  ``warehouses.Warehouse`` target; OBJECT_REQUIRED binds the persisted
-  target user (the two self-scope keys); NONE binds no target. W0-2B's
-  endpoint wiring will provide per-operation bindings; this derivation
-  keeps a single server-owned source of truth and fails closed.
+- Per-operation resource binding is SERVER-OWNED operation metadata,
+  independent of the permission's ``scope_policy`` (§16.1 step 9, §16.2:
+  ``server_defined_resource_binding(permission_key)``). The shipped R1
+  registry declares the only architecture-unambiguous bindings: the ten
+  WAREHOUSE_REQUIRED keys bind the persisted ``warehouses.Warehouse``
+  target and the two OBJECT_REQUIRED keys bind the persisted target user
+  (self-scope). ``scope_policy=NONE`` means no warehouse/object
+  authorization restriction — it NEVER waives target resolution or
+  validation for a target-bound operation (§15A classification
+  framework). The §15A ``resolver_context`` column defers each NONE
+  operation's executable binding to the owning API batch (W0-2B), which
+  declares them through ``register_operation_binding``; undeclared keys
+  resolve as non-target-bound with an explicit UNDECLARED status and are
+  unreachable in production while the resolver is dormant (§24.2).
+- Target resolution always re-resolves from persisted rows (fresh fetch
+  by pk plus any declared required parents): unsaved instances,
+  fabricated pks, deleted rows, wrong types, and unresolvable required
+  parents are denied. Client-supplied identifiers/booleans are never
+  authority (§16.1 step 9).
 - Scope ``allows`` evaluation reads the M6 registry for WAREHOUSE_REQUIRED
   and self-scope equality for OBJECT_REQUIRED. Broader ScopeContext
   machinery arrives with W0-2B+ (§14.9).
@@ -95,9 +108,13 @@ DENY_NO_GRANT = "NO_GRANT"
 DENY_SCOPE_DENIED = "SCOPE_DENIED"
 DENY_FAIL_CLOSED = "FAIL_CLOSED"
 
-# Target kinds for the R1 derived resource-binding table (§16.1 step 9).
+# Target kinds for the R1 resource-binding registry (§16.1 step 9).
 BINDING_TARGET_WAREHOUSE = "WAREHOUSE"
 BINDING_TARGET_SELF_USER = "SELF_USER"
+
+# Binding status vocabulary (server-owned operation metadata).
+BINDING_STATUS_DECLARED = "DECLARED"
+BINDING_STATUS_UNDECLARED = "UNDECLARED_W0_2B"  # owning API batch must declare
 
 
 @dataclass(frozen=True)
@@ -199,22 +216,194 @@ def account_locked(user, at) -> bool:
 
 @dataclass(frozen=True)
 class _ResourceBinding:
+    """Server-owned per-operation resource-binding metadata (§16.1 step 9).
+
+    Defined per OPERATION, independently of the permission's
+    ``scope_policy``: a NONE-policy operation may be target-bound (the
+    gate then validates the target), and a target-bound declaration never
+    implies any warehouse/object authorization restriction — scope is
+    applied only according to the registered scope policy.
+    """
+
     is_target_bound: bool
     target_kind: Optional[str] = None
+    binding_status: str = BINDING_STATUS_DECLARED
+    required_parent_paths: tuple = ()
 
 
-def _server_defined_resource_binding(permission_key, scope_policy):
-    """Server-owned per-key binding contract (§16.1 step 9).
+# ----------------------------------------------------------------------
+# Server-owned operation resource-binding registry (§16.1 step 9).
+#
+# Shipped R1 entries: exactly the architecture-unambiguous bindings.
+# The WAREHOUSE_REQUIRED inventory keys operate on a specific persisted
+# ``warehouses.Warehouse`` (scope basis: the M6 registry, §15A), and the
+# two OBJECT_REQUIRED self-scope keys operate on the persisted target
+# user. ``warehouses.Warehouse`` is a flat master with no FK relations
+# (verified §15A), so no required parent paths apply to it.
+#
+# Every NONE key is deliberately NOT declared here: the approved §15A
+# ``resolver_context`` column defers each NONE operation's executable
+# target binding to the owning API batch (W0-2B). Undeclared is NOT
+# "collection": it is an explicit UNDECLARED status, and the owning
+# batch MUST declare target-bound operations through
+# ``register_operation_binding`` before wiring them. The resolver gate
+# fully supports target-bound NONE declarations (pinned by the resource
+# binding contract tests).
+# ----------------------------------------------------------------------
+_OPERATION_RESOURCE_BINDINGS = {
+    "inventory.adjustment.create": _ResourceBinding(
+        is_target_bound=True, target_kind=BINDING_TARGET_WAREHOUSE
+    ),
+    "inventory.adjustment.export": _ResourceBinding(
+        is_target_bound=True, target_kind=BINDING_TARGET_WAREHOUSE
+    ),
+    "inventory.adjustment.post": _ResourceBinding(
+        is_target_bound=True, target_kind=BINDING_TARGET_WAREHOUSE
+    ),
+    "inventory.adjustment.view": _ResourceBinding(
+        is_target_bound=True, target_kind=BINDING_TARGET_WAREHOUSE
+    ),
+    "inventory.count.create": _ResourceBinding(
+        is_target_bound=True, target_kind=BINDING_TARGET_WAREHOUSE
+    ),
+    "inventory.count.export": _ResourceBinding(
+        is_target_bound=True, target_kind=BINDING_TARGET_WAREHOUSE
+    ),
+    "inventory.count.view": _ResourceBinding(
+        is_target_bound=True, target_kind=BINDING_TARGET_WAREHOUSE
+    ),
+    "inventory.movement.create": _ResourceBinding(
+        is_target_bound=True, target_kind=BINDING_TARGET_WAREHOUSE
+    ),
+    "inventory.movement.export": _ResourceBinding(
+        is_target_bound=True, target_kind=BINDING_TARGET_WAREHOUSE
+    ),
+    "inventory.movement.view": _ResourceBinding(
+        is_target_bound=True, target_kind=BINDING_TARGET_WAREHOUSE
+    ),
+    "security.account.view_own": _ResourceBinding(
+        is_target_bound=True, target_kind=BINDING_TARGET_SELF_USER
+    ),
+    "security.mfa.enroll_own": _ResourceBinding(
+        is_target_bound=True, target_kind=BINDING_TARGET_SELF_USER
+    ),
+}
 
-    R1 derivation from the approved scope registry (§15A) — see module
-    docstring. Unknown registry metadata never reaches this function: the
-    resolver fails closed before consulting a binding it cannot derive.
+_BINDING_STATUS_UNDECLARED = _ResourceBinding(
+    is_target_bound=False,
+    target_kind=None,
+    binding_status=BINDING_STATUS_UNDECLARED,
+)
+
+_BINDING_TARGET_MODELS = {
+    BINDING_TARGET_WAREHOUSE: "warehouses.models.Warehouse",
+    BINDING_TARGET_SELF_USER: "django.contrib.auth User",
+}
+
+
+def _binding_target_model(kind):
+    """Resolve a declared target kind to its persisted model class.
+
+    The two shipped kinds resolve lazily (import-cycle safety, app
+    registry readiness); seam-registered kinds store their model class
+    directly.
     """
-    if scope_policy == "WAREHOUSE_REQUIRED":
-        return _ResourceBinding(is_target_bound=True, target_kind=BINDING_TARGET_WAREHOUSE)
-    if scope_policy == "OBJECT_REQUIRED":
-        return _ResourceBinding(is_target_bound=True, target_kind=BINDING_TARGET_SELF_USER)
-    return _ResourceBinding(is_target_bound=False, target_kind=None)
+    if kind == BINDING_TARGET_WAREHOUSE:
+        from warehouses.models import Warehouse
+
+        return Warehouse
+    if kind == BINDING_TARGET_SELF_USER:
+        from django.contrib.auth import get_user_model
+
+        return get_user_model()
+    model = _BINDING_TARGET_MODELS.get(kind)
+    if model is None:
+        raise LookupError(kind)
+    return model
+
+
+def register_binding_target_kind(kind, model):
+    """Server-owned extension seam: declare a persisted target kind.
+
+    The owning API batch (W0-2B) registers its document/pk kinds here
+    before declaring target-bound operations that use them. ``model`` is
+    the persisted model class the kind resolves to.
+    """
+    if kind in _BINDING_TARGET_MODELS:
+        raise ValueError(f"binding target kind already declared: {kind}")
+    _BINDING_TARGET_MODELS[kind] = model
+
+
+def unregister_binding_target_kind(kind):
+    """Remove a seam-registered target kind (test isolation / rewiring)."""
+    if kind in (BINDING_TARGET_WAREHOUSE, BINDING_TARGET_SELF_USER):
+        raise ValueError("shipped target kinds cannot be unregistered")
+    _BINDING_TARGET_MODELS.pop(kind, None)
+
+
+def register_operation_binding(permission_key, binding):
+    """Server-owned extension seam (§16.1 step 9, §16.2).
+
+    The owning API batch declares each wired operation's resource binding
+    here — explicitly, per operation, never inferred from scope_policy.
+    Unknown catalog keys are rejected (fail loud at declaration time).
+    """
+    if permission_key not in CATALOG_BY_KEY:
+        raise ValueError(f"operation not in approved catalog: {permission_key}")
+    if not isinstance(binding, _ResourceBinding):
+        raise TypeError("binding must be a _ResourceBinding")
+    if binding.is_target_bound and binding.target_kind not in _BINDING_TARGET_MODELS:
+        raise ValueError(f"undeclared binding target kind: {binding.target_kind}")
+    _OPERATION_RESOURCE_BINDINGS[permission_key] = binding
+
+
+def unregister_operation_binding(permission_key):
+    """Remove a seam-registered operation binding (test isolation)."""
+    _OPERATION_RESOURCE_BINDINGS.pop(permission_key, None)
+
+
+def _validate_operation_bindings_against_catalog():
+    """Fail loud on drift between the binding registry and the catalog.
+
+    Two directions: every shipped binding must reference an existing
+    catalog key whose registered scope policy matches the binding's
+    implied policy, and EVERY WAREHOUSE_REQUIRED / OBJECT_REQUIRED
+    catalog key must carry a declared target binding (their binding is
+    architecture-unambiguous, §15A classification framework).
+    """
+    for key, binding in _OPERATION_RESOURCE_BINDINGS.items():
+        entry = CATALOG_BY_KEY.get(key)
+        if entry is None:
+            raise RuntimeError(
+                f"operation binding references unknown catalog key: {key}"
+            )
+        policy = entry["scope_policy"]
+        if binding.target_kind == BINDING_TARGET_WAREHOUSE and policy != "WAREHOUSE_REQUIRED":
+            raise RuntimeError(f"binding/policy drift for {key}: {policy}")
+        if binding.target_kind == BINDING_TARGET_SELF_USER and policy != "OBJECT_REQUIRED":
+            raise RuntimeError(f"binding/policy drift for {key}: {policy}")
+    for key, entry in CATALOG_BY_KEY.items():
+        policy = entry["scope_policy"]
+        if policy in ("WAREHOUSE_REQUIRED", "OBJECT_REQUIRED"):
+            binding = _OPERATION_RESOURCE_BINDINGS.get(key)
+            if binding is None or not binding.is_target_bound:
+                raise RuntimeError(
+                    f"missing required target binding for {policy} key: {key}"
+                )
+
+
+_validate_operation_bindings_against_catalog()
+
+
+def _server_defined_resource_binding(permission_key):
+    """Server-owned per-operation binding contract (§16.1 step 9, §16.2).
+
+    A function of the operation's key ONLY — never of scope_policy.
+    Undeclared keys return the UNDECLARED sentinel (non-target-bound,
+    explicit status); unknown catalog metadata never reaches the gate
+    because the resolver fails closed before consulting a binding.
+    """
+    return _OPERATION_RESOURCE_BINDINGS.get(permission_key, _BINDING_STATUS_UNDECLARED)
 
 
 @dataclass(frozen=True)
@@ -228,30 +417,41 @@ class _TrustedScope:
         return True
 
 
-def _resolve_target(binding, resource):
-    """Resolve and validate the persisted target (existence + kind).
+def _resolve_persisted_target(binding, resource):
+    """Resolve and validate the target from PERSISTED rows (§16.1 step 9).
 
-    Only persisted model instances of the expected kind are accepted; the
-    resolver never trusts client-supplied identifiers (§16.1 step 9). R1
-    callers that cannot resolve a target simply pass None and receive
-    SCOPE_DENIED for target-bound operations.
+    The passed ``resource`` is only a server-side seam carrying the target
+    identity: the resolver re-fetches the row (and any declared required
+    parents) fresh from the database, so unsaved instances, fabricated
+    pks, deleted rows, wrong types, and unresolvable required parents are
+    all invalid. Client-supplied identifiers/booleans are never authority.
+    Returns the persisted instance, or None when the target chain does
+    not resolve (the gate then denies with SCOPE_DENIED).
     """
     if resource is None:
         return None
-    if binding.target_kind == BINDING_TARGET_WAREHOUSE:
-        from warehouses.models import Warehouse
-
-        if isinstance(resource, Warehouse) and resource.pk is not None:
-            return resource
+    try:
+        model = _binding_target_model(binding.target_kind)
+    except LookupError:
         return None
-    if binding.target_kind == BINDING_TARGET_SELF_USER:
-        from django.contrib.auth import get_user_model
-
-        user_model = get_user_model()
-        if isinstance(resource, user_model) and resource.pk is not None:
-            return resource
+    if not isinstance(resource, model) or resource.pk is None:
         return None
-    return None
+    try:
+        manager = model._default_manager
+        if binding.required_parent_paths:
+            manager = manager.select_related(*binding.required_parent_paths)
+        persisted = manager.get(pk=resource.pk)
+    except Exception:
+        # DoesNotExist (or any lookup failure) — the target chain does not
+        # resolve from persisted rows. Fail closed.
+        return None
+    for parent_path in binding.required_parent_paths:
+        attr = persisted
+        for part in parent_path.split("__"):
+            attr = getattr(attr, part, None)
+            if attr is None:
+                return None
+    return persisted
 
 
 def _derive_trusted_scope(resolved_target, scope_policy):
@@ -423,13 +623,20 @@ def resolve(user, permission_key, *, auth_context, resource=None, at=None) -> Pe
             trace.append("9:SCOPE_DENIED:no-registry-metadata")
             return PermissionDecision(False, DENY_SCOPE_DENIED, None, tuple(trace))
 
-        binding = _server_defined_resource_binding(permission.key, scope_policy)
+        binding = _server_defined_resource_binding(permission.key)
         if binding.is_target_bound:
-            resolved_target = _resolve_target(binding, resource)
+            # Target validation runs REGARDLESS of the key's scope_policy
+            # (§16.1 step 9, §15A): NONE waives warehouse/object
+            # authorization restrictions, never target resolution.
+            resolved_target = _resolve_persisted_target(binding, resource)
             if resolved_target is None:
                 trace.append("9:SCOPE_DENIED:target-resolution")
                 return PermissionDecision(False, DENY_SCOPE_DENIED, None, tuple(trace))
         else:
+            # Collection/undeclared operation: no target object is defined
+            # (§16.2 pseudocode overwrites the resource parameter). The
+            # target-binding contract for undeclared NONE operations is
+            # declared by the owning API batch before wiring (W0-2B).
             resolved_target = None
 
         trusted_scope = _derive_trusted_scope(resolved_target, scope_policy)
