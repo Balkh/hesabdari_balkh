@@ -6,6 +6,10 @@ contracts are outside R1's diff, and the frozen security test modules still
 pin their mechanisms. The full-suite green run is the behavioral proof;
 these structural assertions make the frozen surface explicit.
 """
+import ast
+from pathlib import Path
+
+from django.apps import apps
 from django.test import TestCase
 
 from security import test_security_batch2, test_security_batch3
@@ -58,6 +62,38 @@ class FrozenSecurityPinPresenceTests(TestCase):
         source = inspect.getsource(authorization_module)
         self.assertNotIn("BaseAuthentication", source)
         self.assertNotIn("authenticate_header", source)
+
+    def test_no_first_party_view_module_imports_dormant_resolver(self):
+        """R1 must not create a production request path to the dormant resolver."""
+        backend_root = Path(__file__).resolve().parents[1]
+        offenders = []
+        for app_config in apps.get_app_configs():
+            app_path = Path(app_config.path).resolve()
+            if not app_path.is_relative_to(backend_root):
+                continue
+            for source_path in app_path.rglob("*.py"):
+                relative = source_path.relative_to(app_path)
+                is_view_module = (
+                    source_path.name == "views.py"
+                    or source_path.name == "viewsets.py"
+                    or source_path.stem.endswith("_views")
+                    or "views" in relative.parts[:-1]
+                )
+                if not is_view_module:
+                    continue
+                tree = ast.parse(source_path.read_text(encoding="utf-8"))
+                for node in ast.walk(tree):
+                    if isinstance(node, ast.Import):
+                        if any(alias.name == "security.authorization" for alias in node.names):
+                            offenders.append(str(source_path.relative_to(backend_root)))
+                    elif isinstance(node, ast.ImportFrom):
+                        if node.module == "security.authorization":
+                            offenders.append(str(source_path.relative_to(backend_root)))
+                        elif node.module == "security" and any(
+                            alias.name == "authorization" for alias in node.names
+                        ):
+                            offenders.append(str(source_path.relative_to(backend_root)))
+        self.assertEqual(offenders, [])
 
     def test_r1_does_not_touch_accounting_contracts(self):
         """The resolver and models must not import or mutate accounting
