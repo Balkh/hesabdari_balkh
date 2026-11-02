@@ -76,6 +76,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Optional
 
+from django.core.exceptions import ObjectDoesNotExist
 from django.utils import timezone
 
 from security.models import (
@@ -437,21 +438,25 @@ def _resolve_persisted_target(binding, resource):
         return None
     if not isinstance(resource, model) or resource.pk is None:
         return None
+    manager = model._default_manager
+    if binding.required_parent_paths:
+        manager = manager.select_related(*binding.required_parent_paths)
     try:
-        manager = model._default_manager
-        if binding.required_parent_paths:
-            manager = manager.select_related(*binding.required_parent_paths)
         persisted = manager.get(pk=resource.pk)
-    except Exception:
-        # DoesNotExist (or any lookup failure) — the target chain does not
-        # resolve from persisted rows. Fail closed.
+    except ObjectDoesNotExist:
+        # A genuinely missing target is an expected binding denial.
         return None
     for parent_path in binding.required_parent_paths:
         attr = persisted
-        for part in parent_path.split("__"):
-            attr = getattr(attr, part, None)
-            if attr is None:
-                return None
+        try:
+            for part in parent_path.split("__"):
+                attr = getattr(attr, part)
+                if attr is None:
+                    return None
+        except ObjectDoesNotExist:
+            # A declared required relation exists in the model contract but
+            # has no persisted related row.
+            return None
     return persisted
 
 
