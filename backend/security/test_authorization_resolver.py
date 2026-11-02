@@ -19,6 +19,9 @@ from security import authorization
 from security.authorization import (
     AuthContext,
     PermissionDecision,
+    _ResourceBinding,
+    register_operation_binding,
+    unregister_operation_binding,
     resolve,
 )
 from security.models import (
@@ -101,6 +104,13 @@ class ResolverTestBase(TestCase):
             session_user_id=None if basic else user.pk,
             session_expiry=None,
         )
+
+    def declare_collection(self, permission_key):
+        """Declare a test-scoped collection; NONE alone never implies one."""
+        register_operation_binding(
+            permission_key, _ResourceBinding(is_target_bound=False)
+        )
+        self.addCleanup(unregister_operation_binding, permission_key)
 
     def resolve(self, user, key, resource=None, ctx=None, at=None):
         # at=None lets resolve() use timezone.now(); window fixtures below
@@ -272,6 +282,7 @@ class ProtectedGmAuthorityTests(ResolverTestBase):
 
 class CandidateAndDenyPrecedenceTests(ResolverTestBase):
     def test_role_grant_allows(self):
+        self.declare_collection("fiscal.period.view")
         user = User.objects.create_user(username="acc-user")
         grant_role(user, "ACCOUNTANT")
         link("ACCOUNTANT", "fiscal.period.view")
@@ -316,6 +327,7 @@ class CandidateAndDenyPrecedenceTests(ResolverTestBase):
         self.assertEqual(decision.reason, "USER_DENY")
 
     def test_user_allow_grants_permission_absent_from_roles(self):
+        self.declare_collection("cash.cashaccount.view")
         user = User.objects.create_user(username="allow-only")
         allow_override(user, "cash.cashaccount.view")
         decision = self.resolve(user, "cash.cashaccount.view")
@@ -323,6 +335,7 @@ class CandidateAndDenyPrecedenceTests(ResolverTestBase):
         self.assertEqual(decision.reason, "USER_ALLOW")
 
     def test_multiple_roles_union(self):
+        self.declare_collection("parties.party.create")
         user = User.objects.create_user(username="union-user")
         grant_role(user, "ACCOUNTANT")
         grant_role(user, "WAREHOUSE_KEEPER")
@@ -353,6 +366,7 @@ class CandidateAndDenyPrecedenceTests(ResolverTestBase):
     def test_r17_after_settlement_regrant_succeeds(self):
         """Simulated settlement (production service = W0-2B, §14.3): close
         the expired row, then a new live row grants again."""
+        self.declare_collection("fiscal.period.view")
         user = User.objects.create_user(username="settlement-user")
         assignment = grant_role(user, "ACCOUNTANT")
         link("ACCOUNTANT", "fiscal.period.view")
@@ -437,6 +451,7 @@ class ScopeGateTests(ResolverTestBase):
         self.assertEqual(decision.reason, "ROLE_GRANT")
 
     def test_r24_none_policy_needs_no_scope(self):
+        self.declare_collection("fiscal.period.view")
         user = User.objects.create_user(username="none-policy")
         grant_role(user, "ACCOUNTANT")
         link("ACCOUNTANT", "fiscal.period.view")
