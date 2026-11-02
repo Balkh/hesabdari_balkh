@@ -12,7 +12,13 @@ from django.db import connections, transaction
 from accounting.coa import CANONICAL_COA, seed_chart_of_accounts
 from accounting.models import Account
 from currencies.models import Currency
-from security.models import AuditAction, AuditEvent
+from security.models import (
+    AuditAction,
+    AuditEvent,
+    Permission as RbacPermission,
+    Role as RbacRole,
+    RolePermission as RbacRolePermission,
+)
 from security.services import record_audit_event
 
 
@@ -28,6 +34,19 @@ BOOTSTRAP_AUDIT_REFERENCE = "fresh-database-v1"
 # Django creates these reference rows automatically during migrate/post_migrate.
 # They are framework metadata, not user-created ERP setup or business data.
 FRAMEWORK_GENERATED_MODELS = {ContentType, Permission}
+
+# W0-2A §24.5: the RBAC seed migration (security.0003) writes canonical
+# reference rows into exactly these three models on every migrated database.
+# They are system reference data, not operator-entered ERP data, so a
+# genuinely fresh migrated database must still be bootstrappable. The
+# user-specific authorization models (security.UserRoleAssignment,
+# security.UserPermissionOverride, security.UserWarehouseScope) are NOT
+# exempt: their presence keeps blocking first-time bootstrap. This set is
+# used by the populated-data guard only — the schema-completeness preflight
+# continues to require the tables themselves to exist.
+RBAC_SEEDED_REFERENCE_MODELS = frozenset(
+    {RbacRole, RbacPermission, RbacRolePermission}
+)
 
 
 def _find_missing_application_tables(using="default"):
@@ -55,15 +74,21 @@ def _find_existing_application_data(using="default"):
     """Return installed, managed application models that contain rows.
 
     Schema completeness is checked separately before any ORM query. Only
-    Django's automatically generated ContentType and Permission rows are
-    exempt; all other application data blocks first-time bootstrap.
+    Django's automatically generated ContentType and Permission rows and
+    the three W0-2A RBAC seeded reference models (security.Role,
+    security.Permission, security.RolePermission — §24.5) are exempt; all
+    other application data blocks first-time bootstrap, including the
+    user-specific authorization models.
     """
     populated_models = []
 
     for model in apps.get_models(include_auto_created=False):
         if model._meta.proxy or not model._meta.managed:
             continue
-        if model in FRAMEWORK_GENERATED_MODELS:
+        if (
+            model in FRAMEWORK_GENERATED_MODELS
+            or model in RBAC_SEEDED_REFERENCE_MODELS
+        ):
             continue
 
         if model._default_manager.using(using).exists():
