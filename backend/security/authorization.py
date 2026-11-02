@@ -58,9 +58,10 @@ Known R1 limitations (documented, fail-closed, tested):
   validation for a target-bound operation (§15A classification
   framework). The §15A ``resolver_context`` column defers each NONE
   operation's executable binding to the owning API batch (W0-2B), which
-  declares them through ``register_operation_binding``; undeclared keys
-  resolve as non-target-bound with an explicit UNDECLARED status and are
-  unreachable in production while the resolver is dormant (§24.2).
+  declares them through ``register_operation_binding``. An undeclared
+  key retains an explicit UNDECLARED status and is denied at the shared
+  gate; only an explicitly registered non-target-bound operation is a
+  collection operation (§24.2).
 - Target resolution always re-resolves from persisted rows (fresh fetch
   by pk plus any declared required parents): unsaved instances,
   fabricated pks, deleted rows, wrong types, and unresolvable required
@@ -399,9 +400,9 @@ def _server_defined_resource_binding(permission_key):
     """Server-owned per-operation binding contract (§16.1 step 9, §16.2).
 
     A function of the operation's key ONLY — never of scope_policy.
-    Undeclared keys return the UNDECLARED sentinel (non-target-bound,
-    explicit status); unknown catalog metadata never reaches the gate
-    because the resolver fails closed before consulting a binding.
+    Undeclared keys return the UNDECLARED sentinel. The resolver must
+    reject that status; non-target-bound means collection ONLY when an
+    operation was explicitly registered as such.
     """
     return _OPERATION_RESOURCE_BINDINGS.get(permission_key, _BINDING_STATUS_UNDECLARED)
 
@@ -624,6 +625,13 @@ def resolve(user, permission_key, *, auth_context, resource=None, at=None) -> Pe
             return PermissionDecision(False, DENY_SCOPE_DENIED, None, tuple(trace))
 
         binding = _server_defined_resource_binding(permission.key)
+        if binding.binding_status != BINDING_STATUS_DECLARED:
+            # UNDECLARED is a contract/configuration failure, NOT a
+            # collection declaration. Fail closed for every candidate
+            # grant, including explicit user ALLOW.
+            trace.append("9:SCOPE_DENIED:binding-undeclared")
+            return PermissionDecision(False, DENY_SCOPE_DENIED, None, tuple(trace))
+
         if binding.is_target_bound:
             # Target validation runs REGARDLESS of the key's scope_policy
             # (§16.1 step 9, §15A): NONE waives warehouse/object
@@ -633,10 +641,9 @@ def resolve(user, permission_key, *, auth_context, resource=None, at=None) -> Pe
                 trace.append("9:SCOPE_DENIED:target-resolution")
                 return PermissionDecision(False, DENY_SCOPE_DENIED, None, tuple(trace))
         else:
-            # Collection/undeclared operation: no target object is defined
-            # (§16.2 pseudocode overwrites the resource parameter). The
-            # target-binding contract for undeclared NONE operations is
-            # declared by the owning API batch before wiring (W0-2B).
+            # No target is required ONLY because this operation has an
+            # explicit server-owned non-target-bound (collection)
+            # declaration. UNDECLARED was rejected immediately above.
             resolved_target = None
 
         trusted_scope = _derive_trusted_scope(resolved_target, scope_policy)
