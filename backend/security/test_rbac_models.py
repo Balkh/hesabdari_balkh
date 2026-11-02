@@ -25,8 +25,13 @@ from warehouses.models import Warehouse
 
 User = get_user_model()
 
+# NOTE: migrated test databases contain the canonical 0003 seed rows
+# (roles GM/ACCOUNTANT/WAREHOUSE_KEEPER and the 162-key catalog). These
+# model tests therefore use non-seeded identifiers so they exercise the
+# schema contract itself, independent of the seed state.
 
-def make_permission(key="inventory.movement.view", **overrides):
+
+def make_permission(key="testmodels.probe.view", **overrides):
     domain, resource, action = key.split(".")
     fields = {
         "key": key,
@@ -41,25 +46,25 @@ def make_permission(key="inventory.movement.view", **overrides):
 
 class RoleModelTests(TestCase):
     def test_required_fields_and_defaults(self):
-        role = Role.objects.create(code="GM", name="General Manager")
+        role = Role.objects.create(code="TEST_ROLE", name="Test Role")
         self.assertTrue(role.is_active)
         self.assertFalse(role.is_system)
         self.assertIsNotNone(role.created_at)
         self.assertIsNotNone(role.updated_at)
 
     def test_code_is_unique_case_sensitively(self):
-        Role.objects.create(code="GM", name="General Manager")
+        Role.objects.create(code="TESTUP", name="upper identity")
         # Same code, different case: distinct under default case-sensitive
         # collation of both supported engines.
-        role2 = Role.objects.create(code="gm", name="lowercase identity")
-        self.assertEqual(Role.objects.count(), 2)
-        self.assertNotEqual(role2.code, "GM")
+        role2 = Role.objects.create(code="testup", name="lowercase identity")
+        self.assertEqual(Role.objects.count(), 5)  # 3 seeded + 2 here
+        self.assertNotEqual(role2.code, "TESTUP")
 
     def test_duplicate_code_rejected(self):
-        Role.objects.create(code="GM", name="General Manager")
+        Role.objects.create(code="TESTDUP", name="first")
         with self.assertRaises(IntegrityError):
             with transaction.atomic():
-                Role.objects.create(code="GM", name="duplicate")
+                Role.objects.create(code="TESTDUP", name="duplicate")
 
     def test_full_clean_requires_code_and_name(self):
         role = Role(code="", name="")
@@ -69,18 +74,18 @@ class RoleModelTests(TestCase):
 
 class PermissionModelTests(TestCase):
     def test_field_decomposition_and_defaults(self):
-        perm = make_permission("purchases.landedcost.reverse")
-        self.assertEqual(perm.domain, "purchases")
-        self.assertEqual(perm.resource, "landedcost")
+        perm = make_permission("testmodels.decompose.reverse")
+        self.assertEqual(perm.domain, "testmodels")
+        self.assertEqual(perm.resource, "decompose")
         self.assertEqual(perm.action, "reverse")
         self.assertFalse(perm.is_sensitive)
         self.assertTrue(perm.is_active)
 
     def test_key_is_unique(self):
-        make_permission("cash.cashaccount.view")
+        make_permission("testmodels.unique.view")
         with self.assertRaises(IntegrityError):
             with transaction.atomic():
-                make_permission("cash.cashaccount.view")
+                make_permission("testmodels.unique.view")
 
     def test_distinct_from_django_auth_permission(self):
         """security.Permission is the RBAC catalog row, not auth.Permission."""
@@ -89,7 +94,7 @@ class PermissionModelTests(TestCase):
         self.assertNotEqual(Permission._meta.db_table, AuthPermission._meta.db_table)
 
     def test_deactivation_instead_of_deletion_is_representable(self):
-        perm = make_permission("audit.report.view")
+        perm = make_permission("testmodels.deactivate.view")
         perm.is_active = False
         perm.save(update_fields=["is_active"])
         perm.refresh_from_db()
@@ -98,8 +103,12 @@ class PermissionModelTests(TestCase):
 
 class RolePermissionModelTests(TestCase):
     def setUp(self):
-        self.role = Role.objects.create(code="ACCOUNTANT", name="Accountant")
-        self.perm = make_permission("accounting.report.view")
+        # Non-seeded identifiers: the seeded ACCOUNTANT role already holds
+        # its approved links, so structural tests must not touch them.
+        self.role, _ = Role.objects.get_or_create(
+            code="TEST_RP_ROLE", defaults={"name": "Test RP Role"}
+        )
+        self.perm = make_permission("testmodels.rplink.view")
 
     def test_unique_role_permission(self):
         RolePermission.objects.create(role=self.role, permission=self.perm)
@@ -113,10 +122,17 @@ class RolePermissionModelTests(TestCase):
             self.perm.delete()
 
     def test_role_cascade_removes_only_structural_grant_rows(self):
-        """§14.8: M3 role deletion CASCADEs grant rows; catalog rows survive."""
+        """§14.8: M3 role deletion CASCADEs its grant rows; catalog rows
+        and the seeded links of other roles are untouched."""
         RolePermission.objects.create(role=self.role, permission=self.perm)
+        seeded_links = RolePermission.objects.exclude(role=self.role).count()
+        self.assertGreater(seeded_links, 0)
+        role_pk = self.role.pk
         self.role.delete()
-        self.assertFalse(RolePermission.objects.exists())
+        self.assertFalse(RolePermission.objects.filter(role_id=role_pk).exists())
+        self.assertEqual(
+            RolePermission.objects.exclude(role_id=role_pk).count(), seeded_links
+        )
         self.assertTrue(Permission.objects.filter(pk=self.perm.pk).exists())
 
 
