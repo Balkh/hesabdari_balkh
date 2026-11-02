@@ -23,6 +23,8 @@ set is modified by these tests; seam registrations are test-scoped and
 always cleaned up.
 """
 from django.contrib.auth import get_user_model
+from django.db import OperationalError
+from unittest.mock import patch
 from django.test import TestCase
 from django.utils import timezone
 
@@ -30,6 +32,7 @@ from security.authorization import (
     BINDING_TARGET_SELF_USER,
     BINDING_TARGET_WAREHOUSE,
     _ResourceBinding,
+    _resolve_persisted_target,
     register_binding_target_kind,
     register_operation_binding,
     unregister_binding_target_kind,
@@ -154,6 +157,32 @@ class ResourceBindingContractTests(ResolverTestBase):
         )  # required parent resolves from persisted rows
         decision = self.resolve(self.actor, NONE_KEY, resource=attributed)
         self.assertTrue(decision.allowed, decision)
+
+    def test_database_failure_during_target_resolution_is_fail_closed(self):
+        self.grant(NONE_KEY)
+        binding = self.declare_target_bound_none(NONE_KEY)
+
+        # A missing row is an expected SCOPE_DENIED; an operational database
+        # failure is unexpected and must reach the resolver's FAIL_CLOSED
+        # exception boundary rather than being mislabeled as a missing row.
+        with patch.object(
+            Warehouse._default_manager,
+            "get",
+            side_effect=OperationalError("simulated database outage"),
+        ):
+            with self.assertRaises(OperationalError):
+                _resolve_persisted_target(binding, self.warehouse)
+
+        with patch(
+            "security.authorization._resolve_persisted_target",
+            side_effect=OperationalError("simulated database outage"),
+        ):
+            with self.assertLogs("security.authorization", level="ERROR"):
+                decision = self.resolve(
+                    self.actor, NONE_KEY, resource=self.warehouse
+                )
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.reason, "FAIL_CLOSED")
 
     # ------------------------------------------------------------------
     # 4) valid persisted target for NONE passes with NO warehouse
