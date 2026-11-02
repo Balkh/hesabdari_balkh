@@ -30,8 +30,8 @@ The approved domain contract identifies AFN as the base currency and USD as the 
 
 - This is an explicit management command. It is not run by migrations, app startup, WSGI, or ASGI.
 - Before first-time writes, the command inspects every installed, managed, concrete Django model table in the configured database.
-- The only exempt rows are Django-generated `contenttypes.ContentType` and `auth.Permission` reference metadata created by migrations/post_migrate. They are framework metadata, not operator-entered ERP setup.
-- Existing rows in all other models block bootstrap. This includes users, groups, admin history, sessions, audit events, idempotency records, accounts, currencies, exchange rates, fiscal periods, categories, products, parties, warehouses, inventory, purchases, sales, payments, allocations, and other installed ERP-domain records.
+- The only exempt rows are Django-generated `contenttypes.ContentType` and `auth.Permission` reference metadata created by migrations/post_migrate, plus the three W0-2A RBAC seeded reference models `security.Role`, `security.Permission`, and `security.RolePermission` (canonical `GM`/`ACCOUNTANT`/`WAREHOUSE_KEEPER` roles, the 162-key permission catalog, and the approved role-permission links written by migration `security.0003`). All three are system reference data produced by migrations, not operator-entered ERP setup. As with the Django-generated exemptions, this is model-level granularity (approved W0-2A §24.5): rows beyond the canonical seed within these three models are treated as reference data and do not block bootstrap, while any row in a user-specific authorization model always blocks.
+- Existing rows in all other models block bootstrap. This includes users, groups, admin history, sessions, audit events, idempotency records, accounts, currencies, exchange rates, fiscal periods, categories, products, parties, warehouses, inventory, purchases, sales, payments, allocations, and other installed ERP-domain records. The user-specific RBAC authorization models `security.UserRoleAssignment`, `security.UserPermissionOverride`, and `security.UserWarehouseScope` are deliberately NOT exempt: any user-specific authorization assignment blocks first-time bootstrap.
 - Before its first ORM query against Account, Currency, or AuditEvent, the command performs a schema-only preflight across all installed, managed application models, including automatically created many-to-many intermediary tables. Missing model tables block bootstrap with a clear error; apply all migrations before retrying. The command does not create schema.
 - On a genuinely fresh migrated database, creation of the canonical COA, AFN/USD, and the audit event occurs in one database transaction.
 - A sequential rerun verifies every canonical account and required currency, confirms exactly one matching CREATE audit event, and exits without changing rows.
@@ -43,10 +43,12 @@ The approved domain contract identifies AFN as the base currency and USD as the 
 
 ## Explicitly out of scope
 
-The command does not create users, roles, fiscal periods, warehouses, products, parties, opening balances, exchange rates, or business transactions. Those require their own approved setup workflows.
+The command does not create users, roles, fiscal periods, warehouses, products, parties, opening balances, exchange rates, or business transactions. Those require their own approved setup workflows. (RBAC roles and the permission catalog are created by the `security.0003` migration itself, not by this command.)
 
 ## Evidence and review
 
 The automated tests in `accounting/test_bootstrap.py` cover fresh initialization, AFN/USD configuration, audit recording, sequential idempotency, missing/duplicate/orphaned audit refusal, transaction rollback on audit failure, refusal on partial setup, preservation of accountant edits, refusal when non-accounting ERP records already exist, and refusal when a user already exists.
+
+The automated tests in `accounting/test_bootstrap_rbac.py` cover the W0-2A compatibility contract: a freshly migrated database containing only the seeded RBAC reference rows still bootstraps; a rerun stays idempotent; each user-specific authorization model (`security.UserRoleAssignment`, `security.UserPermissionOverride`, `security.UserWarehouseScope`) blocks first-time bootstrap; a non-canonical security row (e.g., an extra role) still blocks; existing operator-entered ERP data (categories) still blocks; and an audit failure still rolls back every bootstrap-created accounting row while leaving the seeded RBAC reference rows untouched.
 
 A successful command is evidence that this bootstrap operation completed for the selected database; it is not a claim that the ERP is production-ready or that other operational setup is complete.
