@@ -91,3 +91,21 @@ class OperationSpecValidationTests(SimpleTestCase):
             OPERATION_SPECS["test.mutable"] = object()
         with self.assertRaises(TypeError):
             current_user.cls.erp_operation_specs["GET"] = object()
+
+
+    def test_every_declared_get_operation_exposes_head(self):
+        from security.views import current_user
+        from fiscal_periods.views import period_collection
+        from purchases.landed_cost_views import (
+            landed_cost_collection,
+            landed_cost_detail,
+        )
+
+        for callback in (
+            current_user,
+            period_collection,
+            landed_cost_collection,
+            landed_cost_detail,
+        ):
+            self.assertIn("head", callback.cls.__dict__)
+            self.assertIn("GET", callback.cls.erp_operation_specs)

@@ -210,6 +210,11 @@ def check_operation_registry(app_configs=None, **kwargs):
                 for method in ("get", "post", "put", "patch", "delete")
                 if method in view_class.__dict__
             }
+            if "GET" in operation_map and "head" not in view_class.__dict__:
+                errors.append(checks.Error(
+                    f"GET route {route!r} must explicitly expose HEAD, which reuses its GET operation.",
+                    id=OPERATION_REGISTRY_CHECK_ID,
+                ))
             declared_methods = set(operation_map)
             if declared_methods != declared_handlers:
                 errors.append(checks.Error(
