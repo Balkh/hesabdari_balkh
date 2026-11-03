@@ -140,6 +140,33 @@ def check_permission_catalog_sync(app_configs=None, **kwargs):
 
 
 OPERATION_REGISTRY_CHECK_ID = "security.E003"
+EXPECTED_PUBLIC_API_ROUTES = frozenset(
+    {
+        "api/v1/",
+        "api/v1/health/",
+        "api/v1/health/missing/",
+    }
+)
+
+
+def _public_route_allowlist_errors(public_routes):
+    """Require the exact approved public API paths, not merely a matching count."""
+    actual = set(public_routes)
+    if (
+        actual == EXPECTED_PUBLIC_API_ROUTES
+        and len(public_routes) == len(EXPECTED_PUBLIC_API_ROUTES)
+    ):
+        return []
+    unexpected = sorted(actual - EXPECTED_PUBLIC_API_ROUTES)
+    missing = sorted(EXPECTED_PUBLIC_API_ROUTES - actual)
+    return [
+        checks.Error(
+            "Public API allowlist mismatch: "
+            f"unexpected={unexpected}, missing={missing}. "
+            "Only api-root, health-check, and missing-resource may use AllowAny.",
+            id=OPERATION_REGISTRY_CHECK_ID,
+        )
+    ]
 
 
 @register()
@@ -233,12 +260,7 @@ def check_operation_registry(app_configs=None, **kwargs):
             id=OPERATION_REGISTRY_CHECK_ID,
         )]
 
-    if len(public_routes) != 3:
-        errors.append(checks.Error(
-            f"Expected exactly 3 intentional public Core API routes; found {len(public_routes)}.",
-            hint="Only api-root, health-check, and missing-resource are intentionally public.",
-            id=OPERATION_REGISTRY_CHECK_ID,
-        ))
+    errors.extend(_public_route_allowlist_errors(public_routes))
 
     if len(mounted_ids) != len(set(mounted_ids)):
         errors.append(checks.Error(

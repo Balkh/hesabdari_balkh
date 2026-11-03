@@ -18,6 +18,11 @@ from security.operation_registry import (
     erp_operations,
 )
 
+from security.checks import (
+    EXPECTED_PUBLIC_API_ROUTES,
+    _public_route_allowlist_errors,
+)
+
 
 class OperationSpecValidationTests(SimpleTestCase):
     def test_collection_rejects_any_target_metadata(self):
@@ -112,6 +117,33 @@ class OperationSpecValidationTests(SimpleTestCase):
         with self.assertRaises(TypeError):
             current_user.cls.erp_operation_specs["GET"] = object()
 
+
+    def test_public_allowlist_is_exact_not_count_only(self):
+        self.assertEqual(
+            EXPECTED_PUBLIC_API_ROUTES,
+            {
+                "api/v1/",
+                "api/v1/health/",
+                "api/v1/health/missing/",
+            },
+        )
+        # Three entries remain, but replacing the missing-resource route
+        # with an arbitrary business route must fail the exact allowlist.
+        swapped_routes = [
+            "api/v1/",
+            "api/v1/health/",
+            "api/v1/purchases/private-export/",
+        ]
+        errors = _public_route_allowlist_errors(swapped_routes)
+        self.assertEqual(len(errors), 1)
+        self.assertIn("api/v1/purchases/private-export/", errors[0].msg)
+        self.assertIn("api/v1/health/missing/", errors[0].msg)
+
+    def test_public_allowlist_accepts_only_the_three_expected_routes(self):
+        self.assertEqual(
+            _public_route_allowlist_errors(sorted(EXPECTED_PUBLIC_API_ROUTES)),
+            [],
+        )
 
     def test_every_declared_get_operation_exposes_head(self):
         from security.views import current_user
