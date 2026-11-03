@@ -82,3 +82,12 @@ class OperationSpecValidationTests(SimpleTestCase):
         self.assertEqual(collection.binding_kind, COLLECTION)
         self.assertEqual(detail.binding_kind, OBJECT)
         self.assertEqual(detail.target_source, TARGET_URL_KWARG)
+
+
+    def test_operation_registry_and_view_method_maps_are_immutable(self):
+        from security.views import current_user
+
+        with self.assertRaises(TypeError):
+            OPERATION_SPECS["test.mutable"] = object()
+        with self.assertRaises(TypeError):
+            current_user.cls.erp_operation_specs["GET"] = object()

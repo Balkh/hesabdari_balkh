@@ -1,6 +1,7 @@
 """Server-owned W0-2B operation declarations for protected DRF API methods."""
 
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Optional
 
 from security.authorization import (
@@ -79,7 +80,8 @@ class OperationSpec:
         return TargetReference(target_kind=self.target_kind, pk=pk)
 
 
-OPERATION_SPECS = {}
+_OPERATION_SPECS = {}
+OPERATION_SPECS = MappingProxyType(_OPERATION_SPECS)
 _METHOD_SPECS_ATTRIBUTE = "erp_operation_specs"
 
 
@@ -115,11 +117,15 @@ def erp_operations(**method_specs):
                 f"operation methods {sorted(normalized)} do not match DRF handlers {sorted(handlers)}"
             )
         for spec in normalized.values():
-            current = OPERATION_SPECS.get(spec.operation_id)
+            current = _OPERATION_SPECS.get(spec.operation_id)
             if current is not None and current != spec:
                 raise ValueError(f"duplicate operation_id: {spec.operation_id}")
-            OPERATION_SPECS[spec.operation_id] = spec
-        setattr(view_class, _METHOD_SPECS_ATTRIBUTE, dict(normalized))
+            _OPERATION_SPECS[spec.operation_id] = spec
+        setattr(
+            view_class,
+            _METHOD_SPECS_ATTRIBUTE,
+            MappingProxyType(dict(normalized)),
+        )
         return callback
 
     return decorate
