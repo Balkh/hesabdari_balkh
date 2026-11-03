@@ -167,6 +167,8 @@ payload = {
     "SECURE_HSTS_PRELOAD": settings.SECURE_HSTS_PRELOAD,
     "DEBUG": settings.DEBUG,
     "DB_ENGINE": settings.DATABASES["default"]["ENGINE"],
+    "ERP_RBAC_ENFORCEMENT": settings.ERP_RBAC_ENFORCEMENT,
+    "ERP_RBAC_ALLOW_AUTHENTICATED_ONLY": settings.ERP_RBAC_ALLOW_AUTHENTICATED_ONLY,
 }
 print(json.dumps(payload))
 """
@@ -220,6 +222,8 @@ class ProductionSettingsHardeningTests(SimpleTestCase):
         # Fail-fast guards from the pre-existing production contract hold.
         self.assertFalse(flags["DEBUG"])
         self.assertEqual(flags["DB_ENGINE"], "django.db.backends.postgresql")
+        self.assertFalse(flags["ERP_RBAC_ENFORCEMENT"])
+        self.assertFalse(flags["ERP_RBAC_ALLOW_AUTHENTICATED_ONLY"])
 
     def test_non_production_profiles_do_not_inherit_hardening(self):
         # Django 5.2 exposes global_settings defaults on the settings object,
@@ -232,3 +236,4 @@ class ProductionSettingsHardeningTests(SimpleTestCase):
         self.assertEqual(settings.SESSION_COOKIE_SECURE, global_settings.SESSION_COOKIE_SECURE)
         self.assertEqual(settings.CSRF_COOKIE_SECURE, global_settings.CSRF_COOKIE_SECURE)
         self.assertEqual(settings.SECURE_HSTS_SECONDS, global_settings.SECURE_HSTS_SECONDS)
+        self.assertIs(settings.ERP_RBAC_ALLOW_AUTHENTICATED_ONLY, True)

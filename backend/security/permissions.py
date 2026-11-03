@@ -27,8 +27,18 @@ class HasErpOperation(BasePermission):
 
         enforcement = getattr(settings, "ERP_RBAC_ENFORCEMENT", None)
         if enforcement is False:
-            # Development/test compatibility only: authentication still ran first.
-            return True
+            # Authentication-only compatibility is an explicit development/test
+            # opt-in. Production settings must keep this disabled so an
+            # unfinished/misconfigured RBAC deployment fails closed.
+            auth_only_bypass = getattr(
+                settings, "ERP_RBAC_ALLOW_AUTHENTICATED_ONLY", False
+            )
+            if auth_only_bypass is True:
+                return True
+            logger.error(
+                "ERP_RBAC_ENFORCEMENT is disabled and authenticated-only bypass is not enabled"
+            )
+            return False
         if enforcement is not True:
             logger.error("ERP_RBAC_ENFORCEMENT must be a strict Boolean")
             return False

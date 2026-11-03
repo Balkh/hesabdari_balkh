@@ -2,6 +2,10 @@ import os
 
 from .base import *
 
+# Production never falls back to authentication-only access while the R2
+# operation catalog or enforcement switch is incomplete.
+ERP_RBAC_ALLOW_AUTHENTICATED_ONLY = False
+
 if SECRET_KEY == "development-only-insecure-key":
     raise RuntimeError("DJANGO_SECRET_KEY must be set in production")
 if len(SECRET_KEY) < 50:

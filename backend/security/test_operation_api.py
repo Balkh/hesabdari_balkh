@@ -46,6 +46,18 @@ class OperationApiEnforcementTests(TestCase):
         self.assertEqual(anonymous.get("/api/v1/fiscal-periods/").status_code, 403)
         self.assertEqual(AuditEvent.objects.count(), before)
 
+    @override_settings(
+        ERP_RBAC_ENFORCEMENT=False,
+        ERP_RBAC_ALLOW_AUTHENTICATED_ONLY=False,
+    )
+    def test_disabled_rbac_without_explicit_bypass_fails_closed(self):
+        user = User.objects.create_user(
+            username="r2-production-style-deny", password="strong-test-password"
+        )
+        client = self.logged_in_client(user)
+
+        self.assertEqual(client.get("/api/v1/fiscal-periods/").status_code, 403)
+
     @override_settings(ERP_RBAC_ENFORCEMENT=True)
     def test_accountant_can_list_fiscal_periods_and_landed_costs(self):
         user = self.make_user_with_role("r2-accountant", "ACCOUNTANT")
