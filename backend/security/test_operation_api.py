@@ -72,7 +72,11 @@ class OperationApiEnforcementTests(TestCase):
     def test_head_uses_get_operation_and_options_stays_authenticated(self):
         user = self.make_user_with_role("r2-head-accountant", "ACCOUNTANT")
         client = self.logged_in_client(user)
+        from fiscal_periods.models import FiscalPeriod
+
+        before = FiscalPeriod.objects.count()
         self.assertEqual(client.head("/api/v1/fiscal-periods/").status_code, 200)
+        self.assertEqual(FiscalPeriod.objects.count(), before)
         self.assertEqual(client.options("/api/v1/fiscal-periods/").status_code, 200)
 
         anonymous = APIClient()

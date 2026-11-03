@@ -56,11 +56,11 @@ def _document_queryset():
         binding_kind="COLLECTION",
     ),
 )
-@api_view(["GET", "POST"])
+@api_view(["GET", "POST", "HEAD"])
 @authentication_classes(_AUTH_CLASSES)
 @permission_classes([IsAuthenticatedForERP, HasErpOperation])
 def landed_cost_collection(request):
-    if request.method == "GET":
+    if request.method in {"GET", "HEAD"}:
         return Response(LandedCostDocumentReadSerializer(
             _document_queryset(), many=True,
         ).data)
@@ -94,7 +94,7 @@ def landed_cost_collection(request):
         target_kwarg="pk",
     )
 )
-@api_view(["GET"])
+@api_view(["GET", "HEAD"])
 @authentication_classes(_AUTH_CLASSES)
 @permission_classes([IsAuthenticatedForERP, HasErpOperation])
 def landed_cost_detail(request, pk):

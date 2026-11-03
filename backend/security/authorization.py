@@ -1,4 +1,9 @@
-"""W0-2A / R1 — dormant RBAC authorization resolver (§16).
+"""W0-2A / R1 RBAC policy core, extended by the W0-2B/R2 operation entry point.
+
+The legacy key-only `resolve()` remains a compatibility wrapper with its
+R1 evaluation order. Mounted R2 API views call `resolve_operation()` through
+`HasErpOperation`; the operation-aware path binds a server-declared view
+method and typed target while reusing the same policy core.
 
 Binding contract: W0-2A_RBAC_OFFLINE_SECURITY_DESIGN_DRAFT.md §16.1 (the
 ten-step evaluation sequence), §16.2 (pseudocode), §9A Item 2, as approved

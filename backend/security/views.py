@@ -14,7 +14,7 @@ from .permissions import HasErpOperation, IsAuthenticatedForERP
         target_source=TARGET_REQUEST_USER,
     )
 )
-@api_view(["GET"])
+@api_view(["GET", "HEAD"])
 @authentication_classes([SessionAuthentication, BasicAuthentication])
 @permission_classes([IsAuthenticatedForERP, HasErpOperation])
 def current_user(request):

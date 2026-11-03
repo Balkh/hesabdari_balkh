@@ -63,12 +63,12 @@ def _domain_error(exc):
         binding_kind="COLLECTION",
     ),
 )
-@api_view(["GET", "POST"])
+@api_view(["GET", "POST", "HEAD"])
 @authentication_classes(_AUTH_CLASSES)
 @permission_classes([IsAuthenticatedForERP, HasErpOperation])
 def period_collection(request):
     """GET: list periods (authoritative order). POST: create via service."""
-    if request.method == "GET":
+    if request.method in {"GET", "HEAD"}:
         periods = FiscalPeriod.objects.all()
         return Response(FiscalPeriodSerializer(periods, many=True).data)
     serializer = PeriodCreateSerializer(data=request.data)
