@@ -2,6 +2,11 @@
 
 from django.test import SimpleTestCase
 
+# Import the mounted views so their server-owned declarations are registered.
+import security.views
+import fiscal_periods.views
+import purchases.landed_cost_views
+
 from security.operation_registry import (
     COLLECTION,
     OBJECT,
