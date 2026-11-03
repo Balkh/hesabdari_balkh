@@ -22,7 +22,8 @@ from rest_framework.decorators import (
 )
 from rest_framework.response import Response
 
-from security.permissions import IsAuthenticatedForERP
+from security.operation_registry import OperationSpec, TARGET_URL_KWARG, erp_operations
+from security.permissions import HasErpOperation, IsAuthenticatedForERP
 
 from .models import FiscalPeriod
 from .serializers import (
@@ -50,9 +51,21 @@ def _domain_error(exc):
     )
 
 
+@erp_operations(
+    GET=OperationSpec(
+        operation_id="fiscal.period.collection.list",
+        permission_key="fiscal.period.view",
+        binding_kind="COLLECTION",
+    ),
+    POST=OperationSpec(
+        operation_id="fiscal.period.collection.create",
+        permission_key="fiscal.period.create",
+        binding_kind="COLLECTION",
+    ),
+)
 @api_view(["GET", "POST"])
 @authentication_classes(_AUTH_CLASSES)
-@permission_classes([IsAuthenticatedForERP])
+@permission_classes([IsAuthenticatedForERP, HasErpOperation])
 def period_collection(request):
     """GET: list periods (authoritative order). POST: create via service."""
     if request.method == "GET":
@@ -88,33 +101,73 @@ def _lifecycle(request, pk, service):
     return Response(FiscalPeriodSerializer(updated).data)
 
 
+@erp_operations(
+    POST=OperationSpec(
+        operation_id="fiscal.period.object.close",
+        permission_key="fiscal.period.close",
+        binding_kind="OBJECT",
+        target_kind="FISCAL_PERIOD",
+        target_source=TARGET_URL_KWARG,
+        target_kwarg="pk",
+    )
+)
 @api_view(["POST"])
 @authentication_classes(_AUTH_CLASSES)
-@permission_classes([IsAuthenticatedForERP])
+@permission_classes([IsAuthenticatedForERP, HasErpOperation])
 def period_close(request, pk):
     """OPEN → CLOSED via ``close_period()`` (reason optional)."""
     return _lifecycle(request, pk, close_period)
 
 
+@erp_operations(
+    POST=OperationSpec(
+        operation_id="fiscal.period.object.reopen",
+        permission_key="fiscal.period.reopen",
+        binding_kind="OBJECT",
+        target_kind="FISCAL_PERIOD",
+        target_source=TARGET_URL_KWARG,
+        target_kwarg="pk",
+    )
+)
 @api_view(["POST"])
 @authentication_classes(_AUTH_CLASSES)
-@permission_classes([IsAuthenticatedForERP])
+@permission_classes([IsAuthenticatedForERP, HasErpOperation])
 def period_reopen(request, pk):
     """CLOSED → OPEN via ``reopen_period()`` (reason required by service)."""
     return _lifecycle(request, pk, reopen_period)
 
 
+@erp_operations(
+    POST=OperationSpec(
+        operation_id="fiscal.period.object.lock",
+        permission_key="fiscal.period.lock",
+        binding_kind="OBJECT",
+        target_kind="FISCAL_PERIOD",
+        target_source=TARGET_URL_KWARG,
+        target_kwarg="pk",
+    )
+)
 @api_view(["POST"])
 @authentication_classes(_AUTH_CLASSES)
-@permission_classes([IsAuthenticatedForERP])
+@permission_classes([IsAuthenticatedForERP, HasErpOperation])
 def period_lock(request, pk):
     """OPEN → LOCKED via ``lock_period()`` (reason optional)."""
     return _lifecycle(request, pk, lock_period)
 
 
+@erp_operations(
+    POST=OperationSpec(
+        operation_id="fiscal.period.object.unlock",
+        permission_key="fiscal.period.unlock",
+        binding_kind="OBJECT",
+        target_kind="FISCAL_PERIOD",
+        target_source=TARGET_URL_KWARG,
+        target_kwarg="pk",
+    )
+)
 @api_view(["POST"])
 @authentication_classes(_AUTH_CLASSES)
-@permission_classes([IsAuthenticatedForERP])
+@permission_classes([IsAuthenticatedForERP, HasErpOperation])
 def period_unlock(request, pk):
     """LOCKED → OPEN via ``unlock_period()`` (reason required by service)."""
     return _lifecycle(request, pk, unlock_period)

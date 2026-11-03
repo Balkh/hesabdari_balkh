@@ -11,7 +11,8 @@ from rest_framework.response import Response
 
 from currencies.models import Currency
 from parties.models import Party
-from security.permissions import IsAuthenticatedForERP
+from security.operation_registry import OperationSpec, TARGET_URL_KWARG, erp_operations
+from security.permissions import HasErpOperation, IsAuthenticatedForERP
 
 from .models import LandedCostDocument, LandedCostReversal
 from .landed_cost_serializers import LandedCostDocumentReadSerializer, LandedCostDraftCreateSerializer
@@ -43,9 +44,21 @@ def _document_queryset():
     ).order_by("cost_date", "document_number")
 
 
+@erp_operations(
+    GET=OperationSpec(
+        operation_id="purchases.landedcost.collection.list",
+        permission_key="purchases.landedcost.view",
+        binding_kind="COLLECTION",
+    ),
+    POST=OperationSpec(
+        operation_id="purchases.landedcost.collection.create",
+        permission_key="purchases.landedcost.create",
+        binding_kind="COLLECTION",
+    ),
+)
 @api_view(["GET", "POST"])
 @authentication_classes(_AUTH_CLASSES)
-@permission_classes([IsAuthenticatedForERP])
+@permission_classes([IsAuthenticatedForERP, HasErpOperation])
 def landed_cost_collection(request):
     if request.method == "GET":
         return Response(LandedCostDocumentReadSerializer(
@@ -71,17 +84,37 @@ def landed_cost_collection(request):
     )
 
 
+@erp_operations(
+    GET=OperationSpec(
+        operation_id="purchases.landedcost.object.retrieve",
+        permission_key="purchases.landedcost.view",
+        binding_kind="OBJECT",
+        target_kind="LANDED_COST_DOCUMENT",
+        target_source=TARGET_URL_KWARG,
+        target_kwarg="pk",
+    )
+)
 @api_view(["GET"])
 @authentication_classes(_AUTH_CLASSES)
-@permission_classes([IsAuthenticatedForERP])
+@permission_classes([IsAuthenticatedForERP, HasErpOperation])
 def landed_cost_detail(request, pk):
     document = get_object_or_404(_document_queryset(), pk=pk)
     return Response(LandedCostDocumentReadSerializer(document).data)
 
 
+@erp_operations(
+    POST=OperationSpec(
+        operation_id="purchases.landedcost.object.post",
+        permission_key="purchases.landedcost.post",
+        binding_kind="OBJECT",
+        target_kind="LANDED_COST_DOCUMENT",
+        target_source=TARGET_URL_KWARG,
+        target_kwarg="pk",
+    )
+)
 @api_view(["POST"])
 @authentication_classes(_AUTH_CLASSES)
-@permission_classes([IsAuthenticatedForERP])
+@permission_classes([IsAuthenticatedForERP, HasErpOperation])
 def landed_cost_post(request, pk):
     document = get_object_or_404(LandedCostDocument, pk=pk)
     try:
@@ -92,9 +125,19 @@ def landed_cost_post(request, pk):
 
 
 
+@erp_operations(
+    POST=OperationSpec(
+        operation_id="purchases.landedcost.object.reverse",
+        permission_key="purchases.landedcost.reverse",
+        binding_kind="OBJECT",
+        target_kind="LANDED_COST_DOCUMENT",
+        target_source=TARGET_URL_KWARG,
+        target_kwarg="pk",
+    )
+)
 @api_view(["POST"])
 @authentication_classes(_AUTH_CLASSES)
-@permission_classes([IsAuthenticatedForERP])
+@permission_classes([IsAuthenticatedForERP, HasErpOperation])
 def landed_cost_reverse(request, pk):
     document = get_object_or_404(LandedCostDocument, pk=pk)
     serializer = LandedCostReversalCreateSerializer(data=request.data)
