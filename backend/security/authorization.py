@@ -9,13 +9,20 @@ Binding contract: W0-2A_RBAC_OFFLINE_SECURITY_DESIGN_DRAFT.md §16.1 (the
 ten-step evaluation sequence), §16.2 (pseudocode), §9A Item 2, as approved
 at commit e0d7db4505b7c04b1093c07e953aa4b1a3944f1d.
 
-DORMANCY (§24.2): this module is CODE, DORMANT in W0-2A/R1 — zero view
-wiring, zero settings changes, and zero importers among view modules. A
-structural regression test (security.test_r1_regression) asserts that no
-installed application's view modules import this module, and that the DRF
-default permission/authentication settings are untouched. Nothing in the
-production request path may call ``resolve`` until a later owner-approved
-batch wires it.
+Historical R1 boundary and current R2 wiring:
+- In W0-2A/R1, the key-only resolver was dormant and no first-party view
+  imported it directly. The R1 regression test continues to pin that direct
+  import boundary and the frozen DRF authentication defaults.
+- W0-2B/R2 now wires only explicitly declared API methods through
+  HasErpOperation, OperationSpec, and resolve_operation(). The operation
+  registry imports the typed TargetReference; view modules do not call the
+  legacy resolve() entry point.
+- Both entry points use the same _resolve() policy core. The legacy
+  key-only resolve() retains its R1 evaluation behavior; the operation
+  entry point supplies a method-specific server-owned resource binding.
+- ERP_RBAC_ENFORCEMENT currently defaults to False in base settings. The
+  Production startup guard is not implemented in this branch yet, so this
+  draft must not be merged or deployed.
 
 Evaluation order (§16.1 — never reordered, never short-circuited into an
 allow path):
@@ -53,20 +60,21 @@ Known R1 limitations (documented, fail-closed, tested):
   and pinned by tests, so BasicAuthentication can never satisfy an
   MFA-protected operation later (§6, R27).
 - Per-operation resource binding is SERVER-OWNED operation metadata,
-  independent of the permission's ``scope_policy`` (§16.1 step 9, §16.2:
-  ``server_defined_resource_binding(permission_key)``). The shipped R1
-  registry declares the only architecture-unambiguous bindings: the ten
-  WAREHOUSE_REQUIRED keys bind the persisted ``warehouses.Warehouse``
-  target and the two OBJECT_REQUIRED keys bind the persisted target user
-  (self-scope). ``scope_policy=NONE`` means no warehouse/object
-  authorization restriction — it NEVER waives target resolution or
-  validation for a target-bound operation (§15A classification
-  framework). The §15A ``resolver_context`` column defers each NONE
-  operation's executable binding to the owning API batch (W0-2B), which
-  declares them through ``register_operation_binding``. An undeclared
-  key retains an explicit UNDECLARED status and is denied at the shared
-  gate; only an explicitly registered non-target-bound operation is a
-  collection operation (§24.2).
+  independent of the permission's scope_policy (§16.1 step 9, §16.2).
+  The legacy R1 key-only entry point uses the shipped binding registry and
+  its register_operation_binding seam. The R2 API entry point obtains
+  immutable per-method declarations from security.operation_registry:
+  OperationSpec states COLLECTION or OBJECT, permission key, target kind,
+  and server-owned target source. resolve_operation() converts that
+  declaration into the shared resolver's binding override; this allows
+  collection and object methods to share a permission key without sharing
+  a target rule.
+  The shipped R1 registry still declares the ten WAREHOUSE_REQUIRED keys
+  and two OBJECT_REQUIRED self-user keys. scope_policy=NONE means no
+  warehouse/object authorization restriction — it NEVER waives target
+  resolution or validation for a target-bound operation (§15A). Missing
+  operation declarations fail closed; a collection exists only when
+  explicitly declared as COLLECTION.
 - Target resolution always re-resolves from persisted rows (fresh fetch
   by pk plus any declared required parents): unsaved instances,
   fabricated pks, deleted rows, wrong types, and unresolvable required
