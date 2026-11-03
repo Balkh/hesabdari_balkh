@@ -43,6 +43,18 @@ class OperationSpec:
         scope_policy = CATALOG_BY_KEY[self.permission_key]["scope_policy"]
         if scope_policy not in {"NONE", "WAREHOUSE_REQUIRED", "OBJECT_REQUIRED"}:
             raise ValueError(f"permission key is not executable: {self.permission_key}")
+        if scope_policy == "OBJECT_REQUIRED" and not (
+            self.binding_kind == OBJECT
+            and self.target_kind == BINDING_TARGET_SELF_USER
+            and self.target_source == TARGET_REQUEST_USER
+        ):
+            raise ValueError(
+                "OBJECT_REQUIRED catalog operations must bind the authenticated SELF_USER"
+            )
+        if scope_policy == "WAREHOUSE_REQUIRED":
+            raise ValueError(
+                "R2 operation registry has no warehouse-target API operation"
+            )
         if self.binding_kind == COLLECTION:
             if self.target_kind is not None or self.target_source != TARGET_NONE or self.target_kwarg is not None:
                 raise ValueError("Collection operations cannot declare target metadata")
@@ -59,10 +71,6 @@ class OperationSpec:
                 raise ValueError("REQUEST_USER source is limited to SELF_USER")
             if self.target_source == TARGET_URL_KWARG and self.target_kind == BINDING_TARGET_SELF_USER:
                 raise ValueError("SELF_USER targets must come from request.user")
-            if scope_policy == "OBJECT_REQUIRED" and self.target_kind != BINDING_TARGET_SELF_USER:
-                raise ValueError("OBJECT_REQUIRED catalog operations require SELF_USER binding")
-            if scope_policy == "WAREHOUSE_REQUIRED":
-                raise ValueError("R2 operation registry has no warehouse-target API operation")
         else:
             raise ValueError(f"invalid binding_kind: {self.binding_kind}")
 

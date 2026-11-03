@@ -47,6 +47,26 @@ class OperationSpecValidationTests(SimpleTestCase):
                 binding_kind=COLLECTION,
             )
 
+    def test_object_required_permission_cannot_be_a_collection(self):
+        with self.assertRaisesMessage(
+            ValueError, "OBJECT_REQUIRED catalog operations must bind"
+        ):
+            OperationSpec(
+                operation_id="test.security.me.collection",
+                permission_key="security.account.view_own",
+                binding_kind=COLLECTION,
+            )
+
+    def test_warehouse_required_permission_is_rejected_until_target_binding_exists(self):
+        with self.assertRaisesMessage(
+            ValueError, "no warehouse-target API operation"
+        ):
+            OperationSpec(
+                operation_id="test.inventory.view.collection",
+                permission_key="inventory.movement.view",
+                binding_kind=COLLECTION,
+            )
+
     def test_request_user_cannot_choose_another_model(self):
         with self.assertRaises(ValueError):
             OperationSpec(
