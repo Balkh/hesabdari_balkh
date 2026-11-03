@@ -39,7 +39,7 @@ The R2 branch currently implements:
 5. **Typed, server-derived targets.** Object PKs are read from the declared URL kwarg or authenticated `request.user`. The server-declared target kind chooses the model; a client cannot submit a model name or binding kind.
 6. **GM target validation.** In the operation-aware path, a persisted object target is re-resolved and type-checked before a GM protected allow. The legacy R1 key-only GM behavior and R1 regression tests remain unchanged.
 7. **Fail-closed behavior.** Missing declarations, incompatible bindings, missing targets, resolver exceptions, and a production configuration without an explicit authentication-only bypass all deny. Client responses do not expose internal scope-denial diagnostics.
-8. **URL drift check.** `security.E003` checks mounted protected DRF API operations against the server-owned registry, verifies authentication-first ordering, rejects undeclared/mismatched methods and duplicate IDs, and requires GET routes to expose the HEAD alias.
+8. **URL drift check.** `security.E003` checks mounted protected DRF API operations against the server-owned registry, verifies authentication-first ordering, rejects undeclared/mismatched methods and duplicate IDs, requires GET routes to expose the HEAD alias, and allows `AllowAny` only on the exact three approved Core routes.
 9. **Production bypass boundary.** The base development/test profile explicitly opts into authenticated-only compatibility while R2 is being built. Production overrides `ERP_RBAC_ALLOW_AUTHENTICATED_ONLY=False`; therefore `ERP_RBAC_ENFORCEMENT=False` in Production does **not** become an authenticated-only allow. Protected API requests fail closed while enforcement remains disabled.
 
 The branch does **not** currently persist permission-denial AuditEvents. The best-effort audit failure behavior below describes the required behavior if denial auditing is implemented after its control policy is settled; it is not a claim that denial auditing is already active.
@@ -68,12 +68,13 @@ Collection request-body identifiers such as landed-cost payee/currency IDs remai
 ### Completed exact-head CI runs
 
 - **CI run #524**, SHA `5fbb46a12c257484cda7149a5c17e9eece94c40f`: all four jobs succeeded (Backend, PostgreSQL 17.11, Frontend, Tauri). Backend: **309 tests, 1 skipped**. PostgreSQL: **309 tests, no skips reported**. Django system checks reported no issues.
+- **CI run #525**, SHA `87fda0f77c9cc28bf38807ec967e43bfadb9087b`: all four jobs succeeded. Backend: **311 tests, 1 skipped**. PostgreSQL 17.11: **311 tests, no skips reported**. This run includes the two negative tests for incompatible `OperationSpec` scope declarations.
 - Earlier full CI run #522 at SHA `be50c64389403d324f86d2e66090fa377aecd1a2` also passed all four jobs with 308 tests on SQLite and PostgreSQL 17.11.
 - The first R2 CI run failed on an incorrect test expectation that HEAD was automatically exposed. R2 explicitly added HEAD handlers and a follow-up passed. The initial failure is retained in CI history; the subsequent successful run is the relevant corrected evidence.
 
 ### Current candidate revision
 
-The current candidate additionally rejects invalid `OperationSpec` combinations: an `OBJECT_REQUIRED` permission cannot be declared as a collection; warehouse-required permissions cannot be wired until a warehouse-target API declaration exists. Two negative tests were added for these cases. CI run #526 is attached to the current candidate SHA `87fda0f77c9cc28bf38807ec967e43bfadb9087b`; its completion and test counts must be checked before accepting that latest revision. Do not infer test success from earlier SHA results.
+The candidate at SHA `737ef5ad0ca1d745e741ef513ee388e0e88fe18d` adds an exact public-route allowlist to `security.E003`: only `api/v1/`, `api/v1/health/`, and `api/v1/health/missing/` may use `AllowAny`. Two tests cover the exact allowlist and prove that replacing one approved public route with a different route fails even when the total count remains three. CI run #527 is attached to that exact SHA and must complete successfully before the current candidate can be accepted. Do not infer test success from earlier SHA results.
 
 No local container test was run in this session because the repository could not be cloned from the container network. Test evidence above is from GitHub Actions logs for the exact listed SHAs.
 
