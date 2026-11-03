@@ -136,3 +136,117 @@ def check_permission_catalog_sync(app_configs=None, **kwargs):
     for alias in kwargs.get("databases") or []:
         errors.extend(_drift_errors_for_alias(alias))
     return errors
+
+
+
+OPERATION_REGISTRY_CHECK_ID = "security.E003"
+
+
+@register()
+def check_operation_registry(app_configs=None, **kwargs):
+    """Validate that every protected first-party DRF operation is declared exactly once."""
+    from django.urls import URLPattern, URLResolver, get_resolver
+    from rest_framework.permissions import AllowAny
+
+    from security.operation_registry import OPERATION_SPECS
+    from security.permissions import HasErpOperation, IsAuthenticatedForERP
+
+    errors = []
+    mounted_ids = []
+    public_routes = []
+
+    def visit(patterns, prefix=""):
+        for item in patterns:
+            route = prefix + str(item.pattern)
+            if isinstance(item, URLResolver):
+                visit(item.url_patterns, route)
+                continue
+            if not isinstance(item, URLPattern):
+                continue
+            callback = item.callback
+            view_class = getattr(callback, "cls", None)
+            if view_class is None:
+                continue
+            permissions = tuple(getattr(view_class, "permission_classes", ()))
+            operation_map = getattr(view_class, "erp_operation_specs", None)
+
+            if AllowAny in permissions:
+                public_routes.append(route)
+                if operation_map:
+                    errors.append(checks.Error(
+                        f"Public route {route!r} must not carry ERP operation metadata.",
+                        id=OPERATION_REGISTRY_CHECK_ID,
+                    ))
+                continue
+
+            if IsAuthenticatedForERP not in permissions:
+                if route.startswith("api/v1/"):
+                    errors.append(checks.Error(
+                        f"API route {route!r} has no IsAuthenticatedForERP first-party guard.",
+                        id=OPERATION_REGISTRY_CHECK_ID,
+                    ))
+                continue
+
+            if not permissions or permissions[0] is not IsAuthenticatedForERP:
+                errors.append(checks.Error(
+                    f"API route {route!r} must evaluate IsAuthenticatedForERP first.",
+                    id=OPERATION_REGISTRY_CHECK_ID,
+                ))
+            if HasErpOperation not in permissions:
+                errors.append(checks.Error(
+                    f"Protected API route {route!r} has no HasErpOperation guard.",
+                    id=OPERATION_REGISTRY_CHECK_ID,
+                ))
+                continue
+            if not operation_map:
+                errors.append(checks.Error(
+                    f"Protected API route {route!r} has no operation declaration.",
+                    id=OPERATION_REGISTRY_CHECK_ID,
+                ))
+                continue
+
+            declared_handlers = {
+                method.upper()
+                for method in ("get", "post", "put", "patch", "delete")
+                if method in view_class.__dict__
+            }
+            declared_methods = set(operation_map)
+            if declared_methods != declared_handlers:
+                errors.append(checks.Error(
+                    f"Route {route!r} handler/declaration mismatch: "
+                    f"handlers={sorted(declared_handlers)}, declarations={sorted(declared_methods)}.",
+                    id=OPERATION_REGISTRY_CHECK_ID,
+                ))
+            for method, operation in operation_map.items():
+                mounted_ids.append(operation.operation_id)
+
+    try:
+        visit(get_resolver().url_patterns)
+    except Exception as exc:
+        return [checks.Error(
+            f"Could not inspect the mounted URL operation registry: {exc}",
+            id=OPERATION_REGISTRY_CHECK_ID,
+        )]
+
+    if len(public_routes) != 3:
+        errors.append(checks.Error(
+            f"Expected exactly 3 intentional public Core API routes; found {len(public_routes)}.",
+            hint="Only api-root, health-check, and missing-resource are intentionally public.",
+            id=OPERATION_REGISTRY_CHECK_ID,
+        ))
+
+    if len(mounted_ids) != len(set(mounted_ids)):
+        errors.append(checks.Error(
+            "An operation ID is mounted more than once.",
+            id=OPERATION_REGISTRY_CHECK_ID,
+        ))
+    registered_ids = set(OPERATION_SPECS)
+    mounted_set = set(mounted_ids)
+    if registered_ids != mounted_set:
+        errors.append(checks.Error(
+            "Operation registry/mounted URL mismatch: "
+            f"unmounted={sorted(registered_ids - mounted_set)}, "
+            f"unregistered={sorted(mounted_set - registered_ids)}.",
+            id=OPERATION_REGISTRY_CHECK_ID,
+        ))
+    return errors

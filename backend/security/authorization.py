@@ -113,10 +113,20 @@ DENY_FAIL_CLOSED = "FAIL_CLOSED"
 # Target kinds for the R1 resource-binding registry (§16.1 step 9).
 BINDING_TARGET_WAREHOUSE = "WAREHOUSE"
 BINDING_TARGET_SELF_USER = "SELF_USER"
+BINDING_TARGET_FISCAL_PERIOD = "FISCAL_PERIOD"
+BINDING_TARGET_LANDED_COST_DOCUMENT = "LANDED_COST_DOCUMENT"
 
 # Binding status vocabulary (server-owned operation metadata).
 BINDING_STATUS_DECLARED = "DECLARED"
 BINDING_STATUS_UNDECLARED = "UNDECLARED_W0_2B"  # owning API batch must declare
+
+
+@dataclass(frozen=True)
+class TargetReference:
+    """Server-created reference to a persisted object; never built from client model metadata."""
+
+    target_kind: str
+    pk: object
 
 
 @dataclass(frozen=True)
@@ -318,6 +328,14 @@ def _binding_target_model(kind):
         from django.contrib.auth import get_user_model
 
         return get_user_model()
+    if kind == BINDING_TARGET_FISCAL_PERIOD:
+        from fiscal_periods.models import FiscalPeriod
+
+        return FiscalPeriod
+    if kind == BINDING_TARGET_LANDED_COST_DOCUMENT:
+        from purchases.models import LandedCostDocument
+
+        return LandedCostDocument
     model = _BINDING_TARGET_MODELS.get(kind)
     if model is None:
         raise LookupError(kind)
@@ -552,7 +570,85 @@ def _gm_capability_keys():
 
 
 def resolve(user, permission_key, *, auth_context, resource=None, at=None) -> PermissionDecision:
-    """Resolve one permission decision for one user (§16.1, dormant in R1)."""
+    """Legacy R1 key-only resolver. Its protected-GM sequence is intentionally unchanged."""
+    return _resolve(
+        user, permission_key, auth_context=auth_context,
+        resource=resource, at=at,
+    )
+
+
+def resolve_operation(user, operation, *, auth_context, target_reference=None, at=None) -> PermissionDecision:
+    """Resolve an R2 view+method operation through the shared R1 policy core.
+
+    Operation metadata is server-owned. R2 binds the permission decision to
+    the declared target kind and validates target existence/type before a
+    protected-GM allow. The legacy key-only R1 entry point is unchanged.
+    """
+    binding_kind = getattr(operation, "binding_kind", None)
+    if binding_kind not in ("COLLECTION", "OBJECT"):
+        return PermissionDecision(False, DENY_SCOPE_DENIED, None, ("operation:invalid-binding",))
+    target_kind = getattr(operation, "target_kind", None)
+    if binding_kind == "OBJECT" and not target_kind:
+        return PermissionDecision(False, DENY_SCOPE_DENIED, None, ("operation:missing-target-kind",))
+    if binding_kind == "COLLECTION" and target_kind is not None:
+        return PermissionDecision(False, DENY_SCOPE_DENIED, None, ("operation:collection-target-kind",))
+    binding = _ResourceBinding(
+        is_target_bound=(binding_kind == "OBJECT"),
+        target_kind=target_kind,
+    )
+    return _resolve(
+        user,
+        getattr(operation, "permission_key", None),
+        auth_context=auth_context,
+        at=at,
+        binding_override=binding,
+        target_reference=target_reference,
+        operation_aware=True,
+    )
+
+
+def _resolve_persisted_target_reference(binding, target_reference):
+    """Resolve a typed R2 target using only the operation's server-declared model kind."""
+    if not isinstance(target_reference, TargetReference):
+        return None
+    if target_reference.target_kind != binding.target_kind or target_reference.pk is None:
+        return None
+    if isinstance(target_reference.pk, bool) or not isinstance(target_reference.pk, (int, str)):
+        return None
+    if isinstance(target_reference.pk, str) and not target_reference.pk.strip():
+        return None
+    try:
+        model = _binding_target_model(binding.target_kind)
+    except LookupError:
+        return None
+    try:
+        persisted = model._default_manager.get(pk=target_reference.pk)
+    except ObjectDoesNotExist:
+        return None
+    for parent_path in binding.required_parent_paths:
+        attr = persisted
+        try:
+            for part in parent_path.split("__"):
+                attr = getattr(attr, part)
+                if attr is None:
+                    return None
+        except ObjectDoesNotExist:
+            return None
+    return persisted
+
+
+def _resolve(
+    user,
+    permission_key,
+    *,
+    auth_context,
+    resource=None,
+    at=None,
+    binding_override=None,
+    target_reference=None,
+    operation_aware=False,
+) -> PermissionDecision:
+    """Shared authorization policy core for legacy R1 and operation-aware R2."""
     at = at or timezone.now()
     trace = []
     try:
@@ -597,6 +693,23 @@ def resolve(user, permission_key, *, auth_context, resource=None, at=None) -> Pe
         if _has_active_role(user, GM_ROLE_CODE, at) and (
             permission.key in _gm_capability_keys()
         ):
+            if operation_aware:
+                # R2 API operations validate server-declared target identity
+                # before GM authority. This is deliberately not applied to
+                # the frozen legacy R1 key-only resolver.
+                if binding_override is None:
+                    trace.append("5:SCOPE_DENIED:operation-binding-missing")
+                    return PermissionDecision(False, DENY_SCOPE_DENIED, None, tuple(trace))
+                if binding_override.is_target_bound:
+                    gm_target = _resolve_persisted_target_reference(
+                        binding_override, target_reference
+                    )
+                    if gm_target is None:
+                        trace.append("5:SCOPE_DENIED:target-resolution")
+                        return PermissionDecision(False, DENY_SCOPE_DENIED, None, tuple(trace))
+                elif target_reference is not None:
+                    trace.append("5:SCOPE_DENIED:collection-has-target")
+                    return PermissionDecision(False, DENY_SCOPE_DENIED, None, tuple(trace))
             trace.append("5:GM_PROTECTED")
             return PermissionDecision(True, ALLOW_GM_PROTECTED, "GM", tuple(trace))
 
@@ -629,8 +742,12 @@ def resolve(user, permission_key, *, auth_context, resource=None, at=None) -> Pe
             trace.append("9:SCOPE_DENIED:no-registry-metadata")
             return PermissionDecision(False, DENY_SCOPE_DENIED, None, tuple(trace))
 
-        binding = _server_defined_resource_binding(permission.key)
-        if binding.binding_status != BINDING_STATUS_DECLARED:
+        binding = (
+            binding_override
+            if operation_aware
+            else _server_defined_resource_binding(permission.key)
+        )
+        if binding is None or binding.binding_status != BINDING_STATUS_DECLARED:
             # UNDECLARED is a contract/configuration failure, NOT a
             # collection declaration. Fail closed for every candidate
             # grant, including explicit user ALLOW.
@@ -638,17 +755,22 @@ def resolve(user, permission_key, *, auth_context, resource=None, at=None) -> Pe
             return PermissionDecision(False, DENY_SCOPE_DENIED, None, tuple(trace))
 
         if binding.is_target_bound:
-            # Target validation runs REGARDLESS of the key's scope_policy
-            # (§16.1 step 9, §15A): NONE waives warehouse/object
-            # authorization restrictions, never target resolution.
-            resolved_target = _resolve_persisted_target(binding, resource)
+            # Target validation runs REGARDLESS of the key's scope_policy.
+            # R2 resolves typed references through the operation's model kind;
+            # R1 continues to pass a server-side model instance.
+            resolved_target = (
+                _resolve_persisted_target_reference(binding, target_reference)
+                if operation_aware
+                else _resolve_persisted_target(binding, resource)
+            )
             if resolved_target is None:
                 trace.append("9:SCOPE_DENIED:target-resolution")
                 return PermissionDecision(False, DENY_SCOPE_DENIED, None, tuple(trace))
         else:
-            # No target is required ONLY because this operation has an
-            # explicit server-owned non-target-bound (collection)
-            # declaration. UNDECLARED was rejected immediately above.
+            # A collection binding is explicit; it cannot be supplied a target.
+            if operation_aware and target_reference is not None:
+                trace.append("9:SCOPE_DENIED:collection-has-target")
+                return PermissionDecision(False, DENY_SCOPE_DENIED, None, tuple(trace))
             resolved_target = None
 
         trusted_scope = _derive_trusted_scope(resolved_target, scope_policy)
