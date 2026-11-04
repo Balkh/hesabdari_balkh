@@ -20,7 +20,13 @@ class OperationApiEnforcementTests(TestCase):
     def make_user_with_role(self, username, role_code):
         user = User.objects.create_user(username=username, password="strong-test-password")
         role = Role.objects.get(code=role_code)
-        UserRoleAssignment.objects.create(user=user, role=role)
+        assignment = UserRoleAssignment.objects.create(user=user, role=role)
+        if role_code == "GM":
+            # W0-2B singleton GM (owner decision): GM authority exists only
+            # through the singleton slot; the fixture claims it.
+            from security.gm_slot import claim_gm_slot
+
+            claim_gm_slot(assignment)
         return user
 
     def logged_in_client(self, user):

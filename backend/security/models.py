@@ -349,3 +349,58 @@ class UserWarehouseScope(models.Model):
 
     def __str__(self):
         return f"{self.user_id}:{self.warehouse_id}"
+
+
+class GMRoleSlot(models.Model):
+    """W0-2B — authoritative singleton identity of the single GM holder.
+
+    Owner decision (additive, W0-2B/R2): **at most ONE user may hold the
+    active General Manager role in the entire ERP at any time.** Zero active
+    GM users are permitted during initial setup or a controlled recovery
+    interval; two active GM users are never permitted. The policy is global
+    — never per department, warehouse, device, or organization unit — and a
+    Django superuser or staff user never receives GM merely by being one.
+
+    The slot is a fixed-identity database singleton:
+
+    - ``code`` is unique and constrained to exactly ``"GM"``, so at most one
+      slot row can exist (unique + check constraint).
+    - ``assignment`` is a nullable OneToOne to the single GM
+      ``UserRoleAssignment``. NULL is a VALID state on a fresh system before
+      first-GM provisioning and during a controlled recovery interval.
+    - ``on_delete=PROTECT`` and the absence of any transfer/revoke service
+      in this batch mean the slot never silently overwrites, clears, or
+      transfers a holder. A second user must never be linked while the slot
+      is held; claiming is exclusively the atomic CAS helper
+      (``security.gm_slot.claim_gm_slot``).
+    - The OneToOne unique constraint prevents one assignment from being
+      linked more than once.
+
+    The resolver (``security/authorization.py``) recognizes GM ONLY through
+    this row's linked assignment; an ordinary unlinked
+    ``UserRoleAssignment(role=GM)`` grants no protected GM capability and no
+    GM permission keys. Historical ``UserRoleAssignment`` rows are never
+    rewritten, merged, or silently revoked by migration 0005.
+    """
+
+    code = models.CharField(max_length=20, unique=True)
+    assignment = models.OneToOneField(
+        UserRoleAssignment,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="gm_slot",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(code="GM"),
+                name="security_gm_slot_code_gm_only",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.code}:{self.assignment_id or '-'}"

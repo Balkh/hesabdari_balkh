@@ -25,7 +25,13 @@ class OperationAwareResolverTests(TestCase):
     def setUp(self):
         self.gm = User.objects.create_user(username="r2-gm")
         gm_role = Role.objects.get(code="GM")
-        UserRoleAssignment.objects.create(user=self.gm, role=gm_role)
+        gm_assignment = UserRoleAssignment.objects.create(user=self.gm, role=gm_role)
+        # W0-2B singleton GM (owner decision): GM authority exists only
+        # through the singleton slot; the fixture claims it for the single
+        # holder. R2 step-5 target validation semantics are unchanged.
+        from security.gm_slot import claim_gm_slot
+
+        claim_gm_slot(gm_assignment)
         self.ctx = AuthContext(session_user_id=self.gm.pk)
 
     def test_gm_object_operation_denies_missing_target(self):

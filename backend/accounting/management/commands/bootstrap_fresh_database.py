@@ -15,6 +15,7 @@ from currencies.models import Currency
 from security.models import (
     AuditAction,
     AuditEvent,
+    GMRoleSlot as RbacGMRoleSlot,
     Permission as RbacPermission,
     Role as RbacRole,
     RolePermission as RbacRolePermission,
@@ -44,8 +45,15 @@ FRAMEWORK_GENERATED_MODELS = {ContentType, Permission}
 # exempt: their presence keeps blocking first-time bootstrap. This set is
 # used by the populated-data guard only — the schema-completeness preflight
 # continues to require the tables themselves to exist.
+#
+# W0-2B/R2: security.GMRoleSlot joins the exempt reference models. The
+# singleton GM slot row is created with no holder by migration
+# security.0005 on every migrated database — the same migration-written,
+# operator-independent reference category as the 0003 rows (the owner
+# decision requires the slot row to exist before first-GM provisioning).
+# The user-specific assignment/override/scope models keep blocking.
 RBAC_SEEDED_REFERENCE_MODELS = frozenset(
-    {RbacRole, RbacPermission, RbacRolePermission}
+    {RbacRole, RbacPermission, RbacRolePermission, RbacGMRoleSlot}
 )
 
 

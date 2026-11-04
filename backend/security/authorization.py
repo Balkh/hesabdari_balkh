@@ -35,7 +35,12 @@ allow path):
                                unauthenticated callers learn nothing)
 5. Protected GM authority   -> ALLOW GM_PROTECTED (overrides never
                                consulted for GM; domain invariants still
-                               apply downstream of the resolver)
+                               apply downstream of the resolver).
+                               W0-2B owner decision: GM is recognized ONLY
+                               through the singleton GMRoleSlot row's linked
+                               assignment; an unlinked GM assignment grants
+                               no GM authority (identity, role, and ACTIVE
+                               predicate of the LINKED row are all required).
 6. Explicit user DENY       -> DENY USER_DENY (deny wins over everything
                                below)
 7. Explicit user ALLOW      -> candidate USER_ALLOW (never returned before
@@ -92,6 +97,7 @@ from typing import Optional
 from django.core.exceptions import ObjectDoesNotExist
 from django.utils import timezone
 
+from security.gm_slot import GM_SLOT_CODE, load_singleton_slot
 from security.models import (
     OverrideEffect,
     Permission,
@@ -524,11 +530,56 @@ def _active_window_q(model, at):
     return Q(end_at__isnull=True) | Q(end_at__gt=at)
 
 
-def _has_active_role(user, role_code, at) -> bool:
-    """ACTIVE role assignment (§14.2) for a live role."""
+def _singleton_gm_assignment_id(user) -> Optional[int]:
+    """Identity of the single GM holder's assignment, when it is this user's.
+
+    W0-2B owner decision (additive): at most ONE user may hold the active
+    GM role in the entire ERP at any time. The singleton ``GMRoleSlot`` row
+    is the authoritative identity of that one holder; the resolver
+    recognizes GM ONLY through it.
+
+    Fail-closed to ``None`` (not GM) for: a missing or malformed slot row,
+    the valid empty slot (no GM provisioned yet), a slot held by another
+    user, and a slot linking a missing/wrong/inactive-role assignment.
+    Database errors propagate to the resolver's fail-closed boundary —
+    they can never read as "not GM silently": the outer except converts
+    them into DENY FAIL_CLOSED.
+    """
+    slot = load_singleton_slot()
+    if slot is None:
+        logger.error(
+            "GM singleton slot row is missing or unreadable; GM authority "
+            "is disabled"
+        )
+        return None
+    assignment = slot.assignment
+    if assignment is None:
+        # Valid pre-provisioning / controlled-recovery state: no GM exists.
+        return None
+    if assignment.user_id != user.pk:
+        return None
+    role = getattr(assignment, "role", None)
+    if role is None or role.code != GM_ROLE_CODE or not role.is_active:
+        logger.error(
+            "GM singleton slot links a malformed or non-GM assignment; "
+            "GM authority is denied"
+        )
+        return None
+    return assignment.pk
+
+
+def _linked_gm_assignment_is_active(user, assignment_id, at) -> bool:
+    """ACTIVE predicate (§14.2) evaluated on the SLOT-LINKED row only.
+
+    Deliberately pinned to the linked assignment's pk: another live GM
+    assignment of the same user (an unlinked row) must never satisfy the
+    predicate, and the (user, role) live-slot uniqueness makes the linked
+    row the user's only possible live GM assignment anyway.
+    """
     return UserRoleAssignment.objects.filter(
+        pk=assignment_id,
         user=user,
-        role__code=role_code,
+        role__code=GM_ROLE_CODE,
         role__is_active=True,
         revoked_at__isnull=True,
         start_at__lte=at,
@@ -548,11 +599,19 @@ def _live_overrides(user, permission, at):
     return base
 
 
-def _union_of_active_role_permission_keys(user, at):
-    """Union of permission keys across all ACTIVE role grants (§14.5)."""
+def _union_of_active_role_permission_keys(user, at, *, include_gm=False):
+    """Union of permission keys across all ACTIVE role grants (§14.5).
+
+    W0-2B singleton-GM: the GM role's keys are granted ONLY through the
+    singleton slot. The GM role is therefore excluded from the ordinary
+    assignment join (an unlinked ``UserRoleAssignment(role=GM)`` grants no
+    GM permission keys) and ``_gm_capability_keys()`` is unioned only when
+    the caller proved the caller user holds the slot-linked ACTIVE GM
+    assignment. Non-GM role evaluation is unchanged.
+    """
     from django.db.models import Q
 
-    return set(
+    keys = set(
         RolePermission.objects.filter(
             role__is_active=True,
             permission__is_active=True,
@@ -562,8 +621,12 @@ def _union_of_active_role_permission_keys(user, at):
         ).filter(
             Q(role__user_assignments__end_at__isnull=True)
             | Q(role__user_assignments__end_at__gt=at)
-        ).values_list("permission__key", flat=True)
+        ).exclude(role__code=GM_SLOT_CODE)
+        .values_list("permission__key", flat=True)
     )
+    if include_gm:
+        keys |= _gm_capability_keys()
+    return keys
 
 
 def _gm_capability_keys():
@@ -703,9 +766,14 @@ def _resolve(
             return PermissionDecision(False, DENY_UNKNOWN_PERMISSION, None, tuple(trace))
 
         # Step 5 — protected GM authority (overrides never consulted).
-        if _has_active_role(user, GM_ROLE_CODE, at) and (
-            permission.key in _gm_capability_keys()
-        ):
+        # W0-2B singleton: identity comes from the GMRoleSlot row; the
+        # ACTIVE predicate is evaluated on the slot-LINKED assignment only.
+        gm_slot_assignment_id = _singleton_gm_assignment_id(user)
+        gm_is_linked_and_active = (
+            gm_slot_assignment_id is not None
+            and _linked_gm_assignment_is_active(user, gm_slot_assignment_id, at)
+        )
+        if gm_is_linked_and_active and permission.key in _gm_capability_keys():
             if operation_aware:
                 # R2 API operations validate server-declared target identity
                 # before GM authority. This is deliberately not applied to
@@ -737,7 +805,9 @@ def _resolve(
         # Steps 7/8 — discover BOTH candidate sources before the shared
         # scope gate. Neither becomes an ALLOW result here.
         user_allow = active_overrides.filter(effect=OverrideEffect.ALLOW).exists()
-        role_grant_keys = _union_of_active_role_permission_keys(user, at)
+        role_grant_keys = _union_of_active_role_permission_keys(
+            user, at, include_gm=gm_is_linked_and_active
+        )
         role_grant = permission.key in role_grant_keys
         if not (user_allow or role_grant):
             trace.append("10:NO_GRANT")

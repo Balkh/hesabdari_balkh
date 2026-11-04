@@ -321,7 +321,15 @@ class ResourceBindingContractTests(ResolverTestBase):
     def test_protected_gm_authority_unchanged(self):
         gm = User.objects.create_user(username="binding_gm", password="x")
         gm_role, _ = Role.objects.get_or_create(code="GM", defaults={"name": "GM"})
-        UserRoleAssignment.objects.create(user=gm, role=gm_role)
+        gm_assignment = UserRoleAssignment.objects.create(user=gm, role=gm_role)
+        # W0-2B singleton GM (owner decision): the fixture represents the
+        # approved single holder by claiming the authoritative slot. The
+        # pinned semantics are unchanged: GM capability applies at step 5 —
+        # BEFORE the resource-binding gate — and target validation for
+        # operation-aware calls still runs before a protected-GM allow.
+        from security.gm_slot import claim_gm_slot
+
+        claim_gm_slot(gm_assignment)
         # GM capability set is the seeded role grant union (0003): the WR key
         # is inside it, so GM authority applies at step 5 — BEFORE the
         # resource-binding gate — and is unchanged by this correction.

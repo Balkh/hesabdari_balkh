@@ -277,3 +277,92 @@ def check_operation_registry(app_configs=None, **kwargs):
             id=OPERATION_REGISTRY_CHECK_ID,
         ))
     return errors
+
+
+GM_SINGLETON_CHECK_ID = "security.E004"
+GM_SLOT_MIGRATION_LABEL = ("security", "0005_gmroleslot")
+
+
+def _gm_slot_table_exists(alias):
+    from django.db import connections
+
+    connection = connections[alias]
+    table_names = set(connection.introspection.table_names())
+    from security.models import GMRoleSlot
+
+    return GMRoleSlot._meta.db_table in table_names
+
+
+def _gm_slot_migration_applied(alias):
+    """True when migration security.0005 is recorded on this alias."""
+    from django.db import connections
+    from django.db.migrations.recorder import MigrationRecorder
+
+    connection = connections[alias]
+    if "django_migrations" not in set(connection.introspection.table_names()):
+        return False
+    applied = MigrationRecorder(connection).applied_migrations()
+    return GM_SLOT_MIGRATION_LABEL in applied
+
+
+def _gm_singleton_errors_for_alias(alias):
+    """E004 — singleton GM slot consistency for one database alias.
+
+    Detects (finding codes from security.gm_slot, the single source of
+    truth shared with the gm_slot_preflight command):
+    - missing singleton GM slot row (migration security.0005 not applied);
+    - invalid slot identity / duplicated slot rows;
+    - a slot linking an assignment whose role is not the active GM role;
+    - a slot linking a revoked assignment;
+    - any non-closed GM assignment not represented by the singleton slot.
+
+    A valid EMPTY slot on a fresh database with no GM provisioned is NOT an
+    error: the system must be able to start safely before first-GM
+    provisioning (zero active GM holders is an approved state). Messages
+    carry row identifiers and counts only — never passwords, credentials,
+    TOTP secrets, recovery material, or usernames.
+
+    A database on which migration security.0005 is not yet applied is
+    SKIPPED entirely — that is unmigrated state, not a post-migration
+    inconsistency (the same rule the catalog drift check applies, §15.1).
+    The pending migration owns the pre-migration reconciliation: it links a
+    single non-closed GM candidate automatically and refuses multiple
+    candidates with an actionable error, so the check must not pre-block
+    it. After 0005 is applied, every finding below is enforced.
+    """
+    from django.db import router
+    from security.gm_slot import inspect_slot_consistency
+    from security.models import GMRoleSlot
+
+    if not router.allow_migrate_model(alias, GMRoleSlot):
+        return []
+    if not _gm_slot_table_exists(alias):
+        return []
+    if not _gm_slot_migration_applied(alias):
+        return []
+
+    findings = inspect_slot_consistency(using=alias)
+    return [
+        checks.Error(
+            f"Singleton GM slot state is inconsistent on database alias "
+            f"{alias!r} ({code}): {message}. Run `python manage.py "
+            f"gm_slot_preflight --database {alias}` for the read-only "
+            f"report and reconcile manually; GM authority fails closed "
+            f"until the state is consistent.",
+            id=GM_SINGLETON_CHECK_ID,
+        )
+        for code, message in findings
+    ]
+
+
+def check_gm_singleton_slot_for_alias(alias):
+    """Direct, deterministic entry point for the test suite."""
+    return _gm_singleton_errors_for_alias(alias)
+
+
+@register(Tags.database)
+def check_gm_singleton_slot(app_configs=None, **kwargs):
+    errors = []
+    for alias in kwargs.get("databases") or []:
+        errors.extend(_gm_singleton_errors_for_alias(alias))
+    return errors
