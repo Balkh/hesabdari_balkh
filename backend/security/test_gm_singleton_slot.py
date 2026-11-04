@@ -521,6 +521,11 @@ class SingletonSlotMigrationTests(TransactionTestCase):
             end_at=timezone.now() - timezone.timedelta(days=1),
         )
 
+        preflight_output = io.StringIO()
+        call_command("gm_slot_preflight", stdout=preflight_output)
+        self.assertIn("Currently ACTIVE GM assignments found: 0", preflight_output.getvalue())
+        self.assertIn("can proceed automatically: YES", preflight_output.getvalue())
+
         self._apply_all()
 
         self.assertIsNone(GMRoleSlot.objects.get().assignment_id)
