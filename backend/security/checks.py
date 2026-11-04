@@ -170,6 +170,26 @@ def _public_route_allowlist_errors(public_routes):
 
 
 @register()
+def _unclassified_api_callback_errors(route, view_class):
+    """Reject API-namespace callbacks that are not inspectable DRF views.
+
+    A normal Django callback has no DRF ``.cls`` metadata, so the operation
+    registry cannot inspect its authentication/permission declarations.
+    Treating that callback as outside the check would create an E003 blind
+    spot under the protected API namespace.
+    """
+    if route.startswith("api/v1/") and view_class is None:
+        return [
+            checks.Error(
+                f"API route {route!r} is not a DRF callback and cannot be "
+                "verified by the ERP operation registry. Convert it to a "
+                "DRF view with explicit permission declarations.",
+                id=OPERATION_REGISTRY_CHECK_ID,
+            )
+        ]
+    return []
+
+
 def check_operation_registry(app_configs=None, **kwargs):
     """Validate that every protected first-party DRF operation is declared exactly once."""
     from django.urls import URLPattern, URLResolver, get_resolver
@@ -193,6 +213,7 @@ def check_operation_registry(app_configs=None, **kwargs):
             callback = item.callback
             view_class = getattr(callback, "cls", None)
             if view_class is None:
+                errors.extend(_unclassified_api_callback_errors(route, view_class))
                 continue
             permissions = tuple(getattr(view_class, "permission_classes", ()))
             operation_map = getattr(view_class, "erp_operation_specs", None)
