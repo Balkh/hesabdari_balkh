@@ -21,6 +21,7 @@ from security.operation_registry import (
 from security.checks import (
     EXPECTED_PUBLIC_API_ROUTES,
     _public_route_allowlist_errors,
+    _unclassified_api_callback_errors,
 )
 
 
@@ -142,6 +143,18 @@ class OperationSpecValidationTests(SimpleTestCase):
     def test_public_allowlist_accepts_only_the_three_expected_routes(self):
         self.assertEqual(
             _public_route_allowlist_errors(sorted(EXPECTED_PUBLIC_API_ROUTES)),
+            [],
+        )
+
+    def test_non_drf_callback_under_api_namespace_is_rejected(self):
+        errors = _unclassified_api_callback_errors("api/v1/untracked/", None)
+        self.assertEqual(len(errors), 1)
+        self.assertEqual(errors[0].id, "security.E003")
+        self.assertIn("not a DRF callback", errors[0].msg)
+
+    def test_non_api_non_drf_callback_is_not_rejected_by_api_guard(self):
+        self.assertEqual(
+            _unclassified_api_callback_errors("admin/login/", None),
             [],
         )
 
