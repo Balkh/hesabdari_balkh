@@ -302,7 +302,7 @@ def inspect_slot_consistency(using=None):
         findings.append(
             (
                 FINDING_UNLINKED_GM_ASSIGNMENT,
-                f"{len(unlinked_ids)} non-closed GM role assignment(s) are "
+                f"{len(unlinked_ids)} currently ACTIVE GM role assignment(s) are "
                 "not represented by the singleton GM slot (assignment pks="
                 f"{unlinked_ids}); the resolver grants them no GM authority",
             )
