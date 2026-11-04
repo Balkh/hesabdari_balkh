@@ -318,6 +318,23 @@ class SlotClaimCardinalityTests(TestCase):
         )
         self.assertEqual(GMRoleSlot.objects.get().assignment_id, first.pk)
 
+    def test_caught_claim_error_only_rolls_back_helper_savepoint(self):
+        first = self._candidate("savepoint-winner")
+        claim_gm_slot(first)
+        other = User.objects.create_user(username="savepoint-loser")
+
+        with transaction.atomic():
+            stray = UserRoleAssignment.objects.create(user=other, role=_gm_role())
+            try:
+                claim_gm_slot(stray)
+            except GMSlotClaimError:
+                # Catching inside the outer atomic block deliberately allows
+                # work created before the helper's nested savepoint to commit.
+                pass
+
+        self.assertTrue(UserRoleAssignment.objects.filter(pk=stray.pk).exists())
+        self.assertEqual(GMRoleSlot.objects.get().assignment_id, first.pk)
+
 
 # ---------------------------------------------------------------------------
 # Concurrency — two real competing claims (separate connections/threads)
@@ -639,6 +656,35 @@ class SingletonSlotSystemCheckTests(TestCase):
             [e.msg for e in errors],
         )
 
+    def test_slot_linking_expired_or_future_assignment_is_reported(self):
+        windows = (
+            (
+                "check-expired-window",
+                {
+                    "start_at": timezone.now() - timezone.timedelta(days=2),
+                    "end_at": timezone.now() - timezone.timedelta(days=1),
+                },
+            ),
+            (
+                "check-future-window",
+                {"start_at": timezone.now() + timezone.timedelta(days=1)},
+            ),
+        )
+        for username, window in windows:
+            with self.subTest(username=username):
+                user = User.objects.create_user(username=username)
+                assignment = _unlinked_gm_assignment(user)
+                UserRoleAssignment.objects.filter(pk=assignment.pk).update(**window)
+                GMRoleSlot.objects.update(assignment=assignment)
+
+                errors = self._errors()
+
+                self.assertTrue(
+                    any("GM_SLOT_LINK_NOT_ACTIVE" in e.msg for e in errors),
+                    [e.msg for e in errors],
+                )
+                GMRoleSlot.objects.update(assignment=None)
+
     def test_unlinked_gm_assignment_is_reported_and_cleared_by_claim(self):
         user = User.objects.create_user(username="check-unlinked")
         assignment = _unlinked_gm_assignment(user)
@@ -704,6 +750,21 @@ class PreflightCommandTests(TestCase):
         GMRoleSlot.objects.all().delete()
         output, error = self._run()
         self.assertIn("CONSISTENCY FINDING GM_SLOT_MISSING", output)
+        self.assertIsNotNone(error)
+        self.assertIn("inconsistent after migration", str(error).lower())
+
+    def test_post_migration_temporally_inactive_link_is_nonzero(self):
+        user = User.objects.create_user(username="preflight-expired-holder")
+        assignment = _unlinked_gm_assignment(user)
+        UserRoleAssignment.objects.filter(pk=assignment.pk).update(
+            start_at=timezone.now() - timezone.timedelta(days=2),
+            end_at=timezone.now() - timezone.timedelta(days=1),
+        )
+        GMRoleSlot.objects.update(assignment=assignment)
+
+        output, error = self._run()
+
+        self.assertIn("CONSISTENCY FINDING GM_SLOT_LINK_NOT_ACTIVE", output)
         self.assertIsNotNone(error)
         self.assertIn("inconsistent after migration", str(error).lower())
 
