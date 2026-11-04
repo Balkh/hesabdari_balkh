@@ -48,6 +48,7 @@ FINDING_SLOT_DUPLICATE = "GM_SLOT_DUPLICATE"
 FINDING_SLOT_INVALID_IDENTITY = "GM_SLOT_INVALID_IDENTITY"
 FINDING_LINK_NOT_GM_ROLE = "GM_SLOT_LINK_NOT_GM_ROLE"
 FINDING_LINK_REVOKED = "GM_SLOT_LINK_REVOKED"
+FINDING_LINK_NOT_ACTIVE = "GM_SLOT_LINK_NOT_ACTIVE"
 FINDING_UNLINKED_GM_ASSIGNMENT = "GM_ASSIGNMENT_UNLINKED"
 
 
@@ -55,9 +56,12 @@ class GMSlotClaimError(Exception):
     """Domain error raised when the singleton GM slot cannot be claimed.
 
     Safe by construction: the message carries no account identifiers or
-    secret material. Raised inside a caller's ``transaction.atomic()`` it
-    rolls that transaction back, so a conflicting claim can never leave a
-    half-created assignment behind.
+    secret material. The helper's nested ``transaction.atomic()`` rolls
+    back its own savepoint on failure. It cannot force an enclosing
+    transaction to roll back if the caller catches this exception inside
+    that outer block. Callers that create an assignment and require the
+    creation to roll back on claim failure must let this exception escape
+    the outer transaction (or explicitly roll back there).
     """
 
 
@@ -107,8 +111,12 @@ def claim_gm_slot(assignment):
 
     Contract (owner decision, W0-2B):
 
-    - Runs inside ``transaction.atomic()`` (this helper opens its own
-      nested block; a raised error also rolls back the caller's transaction).
+    - Opens its own ``transaction.atomic()`` block. When called inside a
+      caller-owned transaction this is a savepoint: a raised error rolls
+      back the helper's work, but rolls back the caller's work only when
+      the exception is allowed to propagate out of the caller's outer
+      atomic block. Do not catch-and-suppress a claim error inside that
+      outer block when assignment creation must be atomic with the claim.
     - Verifies the assignment is a persisted, non-closed, temporally ACTIVE
       assignment of the ACTIVE ``GM`` role (fresh re-read, never the
       caller's possibly-stale instance).
@@ -262,6 +270,14 @@ def inspect_slot_consistency(using=None):
                     FINDING_LINK_REVOKED,
                     f"GM slot (pk={slot.pk}) links a revoked assignment "
                     f"(assignment pk={assignment.pk})",
+                )
+            )
+        elif not _temporally_active(assignment, timezone.now()):
+            findings.append(
+                (
+                    FINDING_LINK_NOT_ACTIVE,
+                    f"GM slot (pk={slot.pk}) links an assignment outside "
+                    f"its temporal ACTIVE window (assignment pk={assignment.pk})",
                 )
             )
 
