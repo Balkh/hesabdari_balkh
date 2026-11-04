@@ -4,13 +4,14 @@ Reports, without modifying anything:
 - whether the ``GMRoleSlot`` singleton structure exists (migration
   ``security.0005`` applied or not);
 - the current slot holder, if any (assignment pk and user id only);
-- every non-closed GM role assignment candidate (``role__code="GM"``,
-  ``revoked_at IS NULL``) with user IDs and safe account status fields
-  needed for manual reconciliation (is_active / is_staff / is_superuser,
-  temporal window, grant reason);
+- every non-closed GM role assignment (``role__code="GM"``,
+  ``revoked_at IS NULL``) with user IDs and safe account status fields;
+- the separate count of currently ACTIVE candidates (active GM role,
+  not revoked, start time reached, and end time absent or in the future)
+  used by migration ``security.0005``;
 - whether migration ``security.0005`` can proceed automatically (zero or
-  one candidate) or will refuse to run (multiple candidates — the owner
-  decision forbids choosing an account automatically).
+  one currently ACTIVE candidate) or will refuse to run (multiple ACTIVE
+  candidates — the owner decision forbids choosing an account automatically).
 
 The command never modifies accounts or grants and never prints passwords,
 tokens, TOTP secrets, recovery codes, or other personal secrets — user
@@ -41,7 +42,7 @@ def _table_exists(alias, model):
 class Command(BaseCommand):
     help = (
         "Read-only singleton GM slot preflight: reports GM slot state and "
-        "non-closed GM assignment candidates for manual reconciliation. "
+        "non-closed GM assignments plus the currently ACTIVE candidate count. "
         "Modifies nothing; prints no secret material."
     )
 
