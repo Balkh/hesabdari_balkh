@@ -284,8 +284,16 @@ def inspect_slot_consistency(using=None):
     # Any non-closed GM assignment not represented by the slot makes GM
     # resolution ambiguous, even though the resolver itself fails closed.
     linked_ids = {row.assignment_id for row in rows if row.assignment_id}
+    from django.db.models import Q
+
+    at = timezone.now()
     unlinked = UserRoleAssignment.objects.filter(
-        role__code=GM_SLOT_CODE, revoked_at__isnull=True
+        role__code=GM_SLOT_CODE,
+        role__is_active=True,
+        revoked_at__isnull=True,
+        start_at__lte=at,
+    ).filter(
+        Q(end_at__isnull=True) | Q(end_at__gt=at)
     ).exclude(pk__in=linked_ids)
     if using:
         unlinked = unlinked.using(using)
