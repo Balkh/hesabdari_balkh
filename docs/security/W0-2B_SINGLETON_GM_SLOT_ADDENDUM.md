@@ -36,10 +36,10 @@ Role rows alone cannot express "exactly one holder": `UserRoleAssignment` is a t
 `security/migrations/0005_gmroleslot.py`:
 
 1. Creates the singleton slot row with no assignment.
-2. Inspects all non-closed GM assignments (`role__code="GM"`, `revoked_at IS NULL`) left by history.
-3. Zero candidates → slot stays empty (expected before provisioning).
+2. Preserves every historical GM assignment. Only assignments with the active GM role, no revocation, a reached `start_at`, and no elapsed `end_at` are current candidates for the singleton slot. Expired and future assignments stay unchanged as history and do not reserve the slot.
+3. Zero currently ACTIVE candidates → slot stays empty (expected before provisioning or when only expired/future grants exist).
 4. Exactly one currently ACTIVE candidate → linked through a CAS update that only fires while the slot is empty.
-5. More than one candidate → the migration STOPS with an actionable error (run `manage.py gm_slot_preflight`). It never picks the lowest ID, earliest account, or first superuser; the atomic migration rolls everything back.
+5. More than one currently ACTIVE candidate → the migration STOPS with an actionable error (run `manage.py gm_slot_preflight`). It never picks the lowest ID, earliest account, or first superuser; the atomic migration rolls everything back.
 6. No historical `UserRoleAssignment` row is deleted, rewritten, merged, or silently revoked. Reverse removes only the slot structure/record and preserves all assignment rows.
 
 Read-only operator preflight: `manage.py gm_slot_preflight [--database alias]` reports all non-closed legacy assignments and separately counts currently ACTIVE candidates used for migration readiness, plus per-candidate user IDs and safe account status fields (`is_active` / `is_staff` / `is_superuser`, temporal window, grant reason) and whether migration can proceed automatically. It never prints passwords, tokens, TOTP secrets, recovery codes, usernames, or e-mails, and exits non-zero when manual reconciliation is required.
