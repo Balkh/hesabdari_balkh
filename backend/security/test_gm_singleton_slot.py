@@ -595,6 +595,24 @@ class SingletonSlotSystemCheckTests(TestCase):
         self.assertEqual([e.id for e in errors], ["security.E004"])
         self.assertIn("GM_SLOT_MISSING", errors[0].msg)
 
+    def test_missing_slot_table_after_migration_is_reported(self):
+        table_names = set(connection.introspection.table_names())
+        self.assertIn("django_migrations", table_names)
+        self.assertIn(GMRoleSlot._meta.db_table, table_names)
+        table_names.remove(GMRoleSlot._meta.db_table)
+
+        # Simulate a dropped slot table while preserving the real applied
+        # migration record. E004 must not mistake this for pre-migration.
+        with patch.object(
+            connection.introspection,
+            "table_names",
+            return_value=sorted(table_names),
+        ):
+            errors = self._errors()
+
+        self.assertEqual([e.id for e in errors], ["security.E004"])
+        self.assertIn("GM_SLOT_MISSING", errors[0].msg)
+
     def test_slot_linking_non_gm_role_is_reported(self):
         corrupt_role = Role.objects.create(code="NOTGM_ROLE", name="Not GM")
         user = User.objects.create_user(username="check-corrupt")
@@ -664,7 +682,8 @@ class PreflightCommandTests(TestCase):
             is_superuser=True,
             is_staff=True,
         )
-        _unlinked_gm_assignment(user)
+        assignment = _unlinked_gm_assignment(user)
+        claim_gm_slot(assignment)
         output, error = self._run()
         self.assertIn("Non-closed GM assignments found: 1", output)
         self.assertIn(f"user id={user.pk}", output)
@@ -672,6 +691,21 @@ class PreflightCommandTests(TestCase):
         self.assertIn("is_staff=True", output)
         self.assertNotIn("preflight-hidden-name", output)
         self.assertIsNone(error)
+
+    def test_post_migration_unlinked_assignment_is_nonzero(self):
+        user = User.objects.create_user(username="preflight-orphan")
+        _unlinked_gm_assignment(user)
+        output, error = self._run()
+        self.assertIn("CONSISTENCY FINDING GM_ASSIGNMENT_UNLINKED", output)
+        self.assertIsNotNone(error)
+        self.assertIn("inconsistent after migration", str(error).lower())
+
+    def test_post_migration_missing_slot_row_is_nonzero(self):
+        GMRoleSlot.objects.all().delete()
+        output, error = self._run()
+        self.assertIn("CONSISTENCY FINDING GM_SLOT_MISSING", output)
+        self.assertIsNotNone(error)
+        self.assertIn("inconsistent after migration", str(error).lower())
 
     def test_multiple_candidates_report_manual_reconciliation(self):
         for index in range(2):
