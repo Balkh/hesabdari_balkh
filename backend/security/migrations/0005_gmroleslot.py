@@ -19,9 +19,11 @@ Schema (additive only):
 
 Data reconciliation (never chooses an account):
 1. The singleton slot row is created with NO assignment.
-2. Every non-closed GM assignment left by the historical migrations and
-   the live database is inspected (``role__code="GM"``, ``revoked_at IS
-   NULL``).
+2. All legacy assignments remain preserved. Only a currently ACTIVE GM
+   assignment (active GM role, not revoked, ``start_at <= now``, and
+   ``end_at IS NULL OR end_at > now``) is a candidate to occupy the slot.
+   Expired and future assignments remain unchanged history and do not
+   reserve the current GM slot.
 3. Zero candidates  -> the slot stays empty (expected before first-GM
    provisioning).
 4. Exactly one candidate -> that candidate is linked through a
@@ -42,6 +44,8 @@ assignments; it reports candidate user IDs and safe account status fields
 only — never passwords, tokens, TOTP secrets, or recovery material.
 """
 from django.db import migrations, models
+from django.db.models import Q
+from django.utils import timezone
 import django.db.models.deletion
 
 GM_SLOT_CODE = "GM"
@@ -65,10 +69,17 @@ def seed_slot_and_reconcile(apps, schema_editor):
         # clear, or transfer it.
         return
 
-    # 2) Non-closed GM assignments left by history and the live database.
+    # 2) Only a GM assignment that is ACTIVE now can occupy the singleton.
+    # Expired/future rows remain unchanged history and do not reserve the slot.
+    at = timezone.now()
     candidates = list(
         UserRoleAssignment.objects.using(db_alias).filter(
-            role__code=GM_SLOT_CODE, revoked_at__isnull=True
+            role__code=GM_SLOT_CODE,
+            role__is_active=True,
+            revoked_at__isnull=True,
+            start_at__lte=at,
+        ).filter(
+            Q(end_at__isnull=True) | Q(end_at__gt=at)
         ).order_by("pk")
     )
 
@@ -79,7 +90,7 @@ def seed_slot_and_reconcile(apps, schema_editor):
     # 5) Multiple candidates: the owner decision forbids automatic choice.
     if len(candidates) > 1:
         raise RuntimeError(
-            f"security.0005 refused to run: {len(candidates)} non-closed GM "
+            f"security.0005 refused to run: {len(candidates)} currently ACTIVE GM "
             "role assignments exist, but the W0-2B owner decision permits "
             "at most ONE active GM holder and this migration will never "
             "choose an account automatically (not the lowest ID, not the "
