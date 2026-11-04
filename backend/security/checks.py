@@ -336,8 +336,9 @@ def _gm_singleton_errors_for_alias(alias):
 
     if not router.allow_migrate_model(alias, GMRoleSlot):
         return []
-    if not _gm_slot_table_exists(alias):
-        return []
+    # A pending migration is a normal pre-migration state. Once 0005 is
+    # recorded, however, a missing slot table is corruption and must be
+    # reported by inspect_slot_consistency() as security.E004.
     if not _gm_slot_migration_applied(alias):
         return []
 
