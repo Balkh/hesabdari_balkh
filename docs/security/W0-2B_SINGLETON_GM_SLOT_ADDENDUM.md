@@ -44,7 +44,7 @@ Role rows alone cannot express "exactly one holder": `UserRoleAssignment` is a t
 
 Read-only operator preflight: `manage.py gm_slot_preflight [--database alias]` reports candidate count, per-candidate user IDs and safe account status fields (`is_active` / `is_staff` / `is_superuser`, temporal window, grant reason) and whether migration can proceed automatically. It never prints passwords, tokens, TOTP secrets, recovery codes, usernames, or e-mails, and exits non-zero when manual reconciliation is required.
 
-System check `security.E004` (registered with `Tags.database`) enforces post-migration slot consistency: missing slot row, invalid/duplicated identity, non-GM or revoked link, and any non-closed GM assignment not represented by the slot. A valid EMPTY slot on a database with no GM provisioned is NOT an error. A database on which `security.0005` is not yet applied is skipped entirely (unmigrated state — the pending migration owns the reconciliation), so the check never pre-blocks the linking migration.
+System check `security.E004` (registered with `Tags.database`) enforces post-migration slot consistency: missing slot row, invalid/duplicated identity, non-GM or revoked link, a linked assignment outside its temporal ACTIVE window (expired or not-yet-effective), and any non-closed GM assignment not represented by the slot. The same temporal-inactivity finding is emitted by `gm_slot_preflight`; it exits non-zero and requires manual reconciliation. Neither check modifies or clears the slot. A valid EMPTY slot on a database with no GM provisioned is NOT an error. A database on which `security.0005` is not yet applied is skipped entirely (unmigrated state — the pending migration owns the reconciliation), so the check never pre-blocks the linking migration.
 
 Bootstrap guard alignment: `security.GMRoleSlot` joins the §24.5 migration-seeded reference models in `bootstrap_fresh_database` (its row is written by 0005 on every migrated database, operator-independent). The user-specific assignment/override/scope models keep blocking first-time bootstrap.
 
@@ -54,7 +54,7 @@ Bootstrap guard alignment: `security.GMRoleSlot` joins the §24.5 migration-seed
 
 - Fresh re-read + validity verification (active GM role, non-closed, temporally ACTIVE).
 - Claim via a single conditional update — `UPDATE ... WHERE code='GM' AND assignment IS NULL` — a database-atomic compare-and-set. Exactly one competing claim succeeds; a repeated claim by the same assignment is idempotent; an existing holder is never overwritten.
-- Conflict raises the domain-specific `GMSlotClaimError` inside the caller's transaction (rolling it back). `select_for_update()` alone is deliberately NOT relied upon.
+- Conflict raises the domain-specific `GMSlotClaimError`. The helper owns a nested `transaction.atomic()` block/savepoint: it rolls back its own block. If the caller created the assignment inside an outer atomic block, that outer work is rolled back only when the exception propagates out of the outer block (or the caller explicitly rolls it back there). Catching and suppressing the exception inside the outer block allows work created before the helper savepoint to commit. A grant service must preserve propagation/rollback semantics and test them explicitly. `select_for_update()` alone is deliberately NOT relied upon.
 - Engine-neutral: on SQLite the write is serialized database-wide; on PostgreSQL the loser blocks on the winner's row lock and re-evaluates the predicate against committed state (READ COMMITTED) → clean domain conflict.
 - Evidence: threaded two-connection tests run on SQLite (invariant: never two holders) and — following the repo's concurrency-test convention — a `skipUnless(postgresql)` strict test asserting exactly one `claimed` + one `conflict` outcome, executed against real PostgreSQL (locally PostgreSQL 16.2 smoke; CI job = PostgreSQL 17.11).
 
@@ -62,7 +62,7 @@ Bootstrap guard alignment: `security.GMRoleSlot` joins the §24.5 migration-seed
 
 - First-run GM account creation / provisioning endpoint (none exists; the slot is created empty).
 - GM recovery, password reset, MFA/TOTP, sessions, recovery codes (W0-2C/W0-2D).
-- GM transfer/revocation/grant services; Django Admin activation (W0-2E and later).
+- GM transfer/revocation/grant services; Django Admin activation (W0-2E and later). Expired/future linked assignments are now detected as E004/preflight consistency failures, but no automatic slot clearing, recovery, or transfer is introduced by this diagnostic fix.
 - Permission-denial audit persistence; production enforcement activation (ERP_RBAC_ENFORCEMENT stays False; the production startup guard remains unimplemented on this branch).
 - Single-vs-multiple recovery operators, physical/OS-level recovery design — owner decisions still open.
 
