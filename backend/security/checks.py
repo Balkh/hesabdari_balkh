@@ -169,7 +169,6 @@ def _public_route_allowlist_errors(public_routes):
     ]
 
 
-@register()
 def _unclassified_api_callback_errors(route, view_class):
     """Reject API-namespace callbacks that are not inspectable DRF views.
 
@@ -190,6 +189,7 @@ def _unclassified_api_callback_errors(route, view_class):
     return []
 
 
+@register()
 def check_operation_registry(app_configs=None, **kwargs):
     """Validate that every protected first-party DRF operation is declared exactly once."""
     from django.urls import URLPattern, URLResolver, get_resolver
