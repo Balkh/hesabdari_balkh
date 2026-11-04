@@ -40,7 +40,7 @@ The R2 branch currently implements:
 6. **GM target validation.** In the operation-aware path, a persisted object target is re-resolved and type-checked before a GM protected allow. The legacy R1 key-only GM behavior and R1 regression tests remain unchanged.
 7. **Fail-closed behavior.** Missing declarations, incompatible bindings, missing targets, resolver exceptions, and a production configuration without an explicit authentication-only bypass all deny. Client responses do not expose internal scope-denial diagnostics.
 8. **URL drift check.** `security.E003` checks mounted protected DRF API operations against the server-owned registry, verifies authentication-first ordering, rejects undeclared/mismatched methods and duplicate IDs, requires GET routes to expose the HEAD alias, allows `AllowAny` only on the exact three approved Core routes, and rejects non-DRF callbacks mounted under `api/v1/` because their authorization cannot be inspected by this registry.
-9. **Singleton GM consistency.** Post-migration `security.E004` and `gm_slot_preflight` reject a linked GM assignment that is revoked, outside its temporal ACTIVE window, or otherwise inconsistent. They report this drift; they never clear the slot or transfer GM automatically. Controlled recovery remains a separate owner-approved service/workflow.
+9. **Singleton GM consistency.** Post-migration `security.E004` and `gm_slot_preflight` reject a linked GM assignment that is revoked, outside its temporal ACTIVE window, or otherwise inconsistent. They report this drift; they never clear the slot or transfer GM automatically. Migration `0005` links only currently ACTIVE legacy candidates; expired/future rows remain preserved history and do not reserve the slot. Preflight reports all non-closed rows but bases migration readiness on the count of currently ACTIVE candidates. Controlled recovery remains a separate owner-approved service/workflow.
 10. **Migration database routing.** Migration `0005` uses `schema_editor.connection.alias` for every data operation, including reversal, so it reconciles only the database currently being migrated.
 11. **Claim transaction boundary.** `claim_gm_slot` owns a nested atomic block/savepoint. A conflict rolls back its own block; if a caller creates an assignment in an outer transaction, that caller must let the claim error propagate out of the outer block (or explicitly roll back it). Catching the error inside the outer block does not undo work performed before the helper's savepoint.
 12. **Production bypass boundary.** The base development/test profile explicitly opts into authenticated-only compatibility while R2 is being built. Production overrides `ERP_RBAC_ALLOW_AUTHENTICATED_ONLY=False`; therefore `ERP_RBAC_ENFORCEMENT=False` in Production does **not** become an authenticated-only allow. Protected API requests fail closed while enforcement remains disabled.
@@ -84,9 +84,11 @@ Collection request-body identifiers such as landed-cost payee/currency IDs remai
 ### Corrective candidate evidence rule
 
 The corrective branch changes add regression tests for expired/future GM
-slot links, the nested-transaction savepoint boundary, and unclassified
-non-DRF callbacks under `api/v1/`. They also route migration data operations
-through the migration connection alias. The PR's Checks tab and description
+slot links, preservation of an expired legacy assignment without linking it,
+the nested-transaction savepoint boundary, and unclassified non-DRF callbacks
+under `api/v1/`. They route migration data operations through the active
+migration connection alias and base GM slot migration readiness on currently
+ACTIVE assignments. The PR's Checks tab and description
 must identify a completed run whose `head_sha` exactly equals the latest
 branch head. Never infer success from CI #531 or another earlier SHA.
 Backend, real PostgreSQL, Frontend, and Tauri jobs must all finish
