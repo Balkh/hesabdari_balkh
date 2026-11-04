@@ -96,9 +96,10 @@ def seed_slot_and_reconcile(apps, schema_editor):
             "choose an account automatically (not the lowest ID, not the "
             "earliest account, not a superuser). Run `python manage.py "
             "gm_slot_preflight` for the read-only candidate report (user "
-            "IDs and safe account status fields only), reconcile the GM "
-            "assignments manually so at most one non-closed GM assignment "
-            "remains, then re-apply this migration. No rows were changed."
+            "IDs and safe account status fields only), reconcile only the "
+            "currently ACTIVE GM assignments so at most one remains, preserve "
+            "expired/future history unchanged, then re-apply this migration. "
+            "No rows were changed."
         )
 
     # 4) Exactly one candidate: link it through a CAS update that fires
