@@ -1,6 +1,6 @@
 # W0-2B / R2 — Security Status and Reconciliation Addendum
 
-**Date:** 2026-11-03  
+**Date:** 2026-11-04  
 **Repository:** `Balkh/hesabdari_balkh`  
 **Main baseline:** `6498f37c3b37fd802676a11fd8012b98bad1c754`  
 **Branch:** `security/w0-2b-r2-enforcement`  
@@ -19,7 +19,7 @@ The legacy key-only `resolve()` entry point remains available with its R1 evalua
 - PR #56 is merged at the baseline. PR #57 is a separate Draft PR; it is not merged.
 - The branch `security/w0-2b-r2-enforcement` was created from that exact main SHA. All implementation commits are on this branch; `main` has not been changed.
 - At latest verification, the PR base remains the baseline SHA and the PR head is the branch's latest commit.
-- GitHub reports `main.protected=false` and no repository rulesets. Detailed classic branch-protection metadata was inaccessible through the current integration. Repository governance remains an owner-side action.
+- The live branch resource reports `main.protected=false`; the repository rulesets endpoint returned an empty list. Branch protection and required checks remain an owner-side governance action.
 - The CI workflow in this branch uses `postgres:17.11`. The pre-existing workflow on `main` still uses PostgreSQL 16 until this PR is reviewed and merged.
 
 ## 3. Corrected mounted API inventory
@@ -39,8 +39,11 @@ The R2 branch currently implements:
 5. **Typed, server-derived targets.** Object PKs are read from the declared URL kwarg or authenticated `request.user`. The server-declared target kind chooses the model; a client cannot submit a model name or binding kind.
 6. **GM target validation.** In the operation-aware path, a persisted object target is re-resolved and type-checked before a GM protected allow. The legacy R1 key-only GM behavior and R1 regression tests remain unchanged.
 7. **Fail-closed behavior.** Missing declarations, incompatible bindings, missing targets, resolver exceptions, and a production configuration without an explicit authentication-only bypass all deny. Client responses do not expose internal scope-denial diagnostics.
-8. **URL drift check.** `security.E003` checks mounted protected DRF API operations against the server-owned registry, verifies authentication-first ordering, rejects undeclared/mismatched methods and duplicate IDs, requires GET routes to expose the HEAD alias, and allows `AllowAny` only on the exact three approved Core routes.
-9. **Production bypass boundary.** The base development/test profile explicitly opts into authenticated-only compatibility while R2 is being built. Production overrides `ERP_RBAC_ALLOW_AUTHENTICATED_ONLY=False`; therefore `ERP_RBAC_ENFORCEMENT=False` in Production does **not** become an authenticated-only allow. Protected API requests fail closed while enforcement remains disabled.
+8. **URL drift check.** `security.E003` checks mounted protected DRF API operations against the server-owned registry, verifies authentication-first ordering, rejects undeclared/mismatched methods and duplicate IDs, requires GET routes to expose the HEAD alias, allows `AllowAny` only on the exact three approved Core routes, and rejects non-DRF callbacks mounted under `api/v1/` because their authorization cannot be inspected by this registry.
+9. **Singleton GM consistency.** Post-migration `security.E004` and `gm_slot_preflight` reject a linked GM assignment that is revoked, outside its temporal ACTIVE window, or otherwise inconsistent. They report this drift; they never clear the slot or transfer GM automatically. Controlled recovery remains a separate owner-approved service/workflow.
+10. **Migration database routing.** Migration `0005` uses `schema_editor.connection.alias` for every data operation, including reversal, so it reconciles only the database currently being migrated.
+11. **Claim transaction boundary.** `claim_gm_slot` owns a nested atomic block/savepoint. A conflict rolls back its own block; if a caller creates an assignment in an outer transaction, that caller must let the claim error propagate out of the outer block (or explicitly roll back it). Catching the error inside the outer block does not undo work performed before the helper's savepoint.
+12. **Production bypass boundary.** The base development/test profile explicitly opts into authenticated-only compatibility while R2 is being built. Production overrides `ERP_RBAC_ALLOW_AUTHENTICATED_ONLY=False`; therefore `ERP_RBAC_ENFORCEMENT=False` in Production does **not** become an authenticated-only allow. Protected API requests fail closed while enforcement remains disabled.
 
 The branch does **not** currently persist permission-denial AuditEvents. The best-effort audit failure behavior below describes the required behavior if denial auditing is implemented after its control policy is settled; it is not a claim that denial auditing is already active.
 
@@ -65,27 +68,42 @@ Collection request-body identifiers such as landed-cost payee/currency IDs remai
 
 ## 6. Verification evidence
 
-### Completed exact-head CI runs
+### Historical run before the corrective review changes
 
-- **CI run #524**, SHA `5fbb46a12c257484cda7149a5c17e9eece94c40f`: all four jobs succeeded (Backend, PostgreSQL 17.11, Frontend, Tauri). Backend: **309 tests, 1 skipped**. PostgreSQL: **309 tests, no skips reported**. Django system checks reported no issues.
-- **CI run #525**, SHA `87fda0f77c9cc28bf38807ec967e43bfadb9087b`: all four jobs succeeded. Backend: **311 tests, 1 skipped**. PostgreSQL 17.11: **311 tests, no skips reported**. This run includes the two negative tests for incompatible `OperationSpec` scope declarations.
-- Earlier full CI run #522 at SHA `be50c64389403d324f86d2e66090fa377aecd1a2` also passed all four jobs with 308 tests on SQLite and PostgreSQL 17.11.
-- The first R2 CI run failed on an incorrect test expectation that HEAD was automatically exposed. R2 explicitly added HEAD handlers and a follow-up passed. The initial failure is retained in CI history; the subsequent successful run is the relevant corrected evidence.
+- CI run **#531** completed successfully on the then-current PR head
+  `28395cd402109ed29ef0e24dec95a7cdc42dc402`: all four jobs succeeded
+  (Backend, PostgreSQL, Frontend, Tauri).
+- On that SHA, Backend Django reported **358 tests, 2 skipped** and pytest
+  reported **1269 passed, 10 skipped**.
+- PostgreSQL **17.11** reported **358 Django tests** and **1279 pytest
+  passed**, with no PostgreSQL pytest skips reported; the workflow ended
+  with `POSTGRESQL VERIFICATION: PASS`.
+- Those counts are historical evidence for SHA `28395cd4` only. They do
+  **not** verify the corrective changes described in this addendum.
 
-### Current candidate revision
+### Corrective candidate evidence rule
 
-The candidate at SHA `737ef5ad0ca1d745e741ef513ee388e0e88fe18d` adds an exact public-route allowlist to `security.E003`: only `api/v1/`, `api/v1/health/`, and `api/v1/health/missing/` may use `AllowAny`. Two tests cover the exact allowlist and prove that replacing one approved public route with a different route fails even when the total count remains three. CI run #527 is attached to that exact SHA and must complete successfully before the current candidate can be accepted. Do not infer test success from earlier SHA results.
+The corrective branch changes add regression tests for expired/future GM
+slot links, the nested-transaction savepoint boundary, and unclassified
+non-DRF callbacks under `api/v1/`. They also route migration data operations
+through the migration connection alias. The PR's Checks tab and description
+must identify a completed run whose `head_sha` exactly equals the latest
+branch head. Never infer success from CI #531 or another earlier SHA.
+Backend, real PostgreSQL, Frontend, and Tauri jobs must all finish
+successfully; report exact test/skip totals from those logs.
 
-No local container test was run in this session because the repository could not be cloned from the container network. Test evidence above is from GitHub Actions logs for the exact listed SHAs.
+No local container test was run in this session because the repository could
+not be cloned from the container network. Automated test evidence is from
+GitHub Actions logs associated with the stated exact commit SHAs.
 
 ## 7. Remaining blockers — do not merge or enable Production
 
 - **Django Admin GM gate is not implemented or activated.** The mounted `/admin/` currently retains Django's default AdminSite behavior. The approved design requires an active GM role in addition to `is_active` and `is_staff`, and explicitly forbids `is_superuser` as an authorization bypass.
-- **GM provisioning is unresolved.** Migration `security.0004` maps only superusers that exist when that migration runs. A user created later through `createsuperuser` is not automatically assigned GM. No first-run local GM provisioning/recovery mechanism has been implemented here. Do not auto-assign GM to future superusers as a shortcut.
+- **GM provisioning and recovery are unresolved.** Migration `security.0004` maps only superusers that exist when that migration runs. A user created later through `createsuperuser` is not automatically assigned GM. No first-run local GM provisioning/recovery mechanism or controlled transfer/release service has been implemented here. The corrective E004/preflight check now detects a slot link outside its temporal ACTIVE window, but it deliberately does not clear or transfer that slot. Do not auto-assign GM to future superusers or clear a slot as a shortcut.
 - **Account lockout is not effective yet.** `account_locked()` remains a no-op until W0-2D. The approved Admin contract also requires locked GM denial, so the final Admin gate depends on that capability or a separately reviewed equivalent.
 - **Denial-audit flood policy is unresolved.** DRF throttles execute after permission checks and do not bound denied-request audit writes. No rate/threshold has been invented. `PERMISSION_DENIED` persistence, per-request deduplication, migration, and failure tests remain unimplemented until the owner-approved rate/control is defined.
 - **Production enforcement is intentionally not enabled.** `ERP_RBAC_ENFORCEMENT` remains False by default. Production authenticated-only bypass is False, so protected API routes fail closed, but the explicit Production startup guard requiring enforcement=True has not been implemented. Do not deploy this candidate.
-- **PostgreSQL 17.11 evidence exists for CI #524**, but the latest candidate SHA still needs its own completed run.
+- **Corrective exact-head CI is required.** CI #531 proves only the pre-correction SHA documented above; the final corrective PR head must have its own completed dual-database / frontend / Tauri run.
 - **Repository protection remains owner-side.** GitHub reports `main.protected=false`; configure required checks and branch protection outside this implementation PR.
 - **Credential rotation remains owner-side.** Any previously exposed GitHub tokens must be revoked by the owner. Do not reproduce token values in code, logs, reports, or chat; revocation is not verified until owner confirmation.
 
@@ -94,12 +112,12 @@ No local container test was run in this session because the repository could not
 | Batch | State |
 |---|---|
 | R2.0 documentation / baseline reconciliation | Implemented |
-| R2.1 operation registry, immutable metadata, typed target resolver, shared policy path, system drift check | Implemented; latest two scope-validation tests pending exact-head CI |
+| R2.1 operation registry, immutable metadata, typed target resolver, shared policy path, system drift check | Implemented; corrective E003 coverage added; exact-head CI required |
 | R2.2 GM-only Django Admin site and deployment activation | Blocked by GM provisioning, account inventory, and W0-2D lockout gap |
 | R2.3 wiring the 12 current API operations and GET/HEAD behavior | Implemented; exact-head CI evidence recorded above |
 | R2.4 authenticated denial AuditEvent and bounded audit flood policy | Blocked pending owner-defined control threshold |
 | R2.5 Production startup guard requiring `ERP_RBAC_ENFORCEMENT=True` | Deferred until API/Admin/audit release gates are complete |
-| R2.6 final dual-database verification, exact PR-head CI, user review and approval | In progress; no merge/freeze |
+| R2.6 final dual-database verification, exact PR-head CI, user review and approval | In progress; corrective exact-head CI and user review remain; no merge/freeze |
 
 Do not claim PASS, VERIFIED, COMPLETE, GREEN, or FROZEN merely because code changes or a CI run exist. Report exact branch, commit SHA, test command/output, CI run, database version, skips, and outstanding caveats.
 
