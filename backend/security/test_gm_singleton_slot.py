@@ -512,6 +512,25 @@ class SingletonSlotMigrationTests(TransactionTestCase):
             ).exists()
         )
 
+    def test_expired_legacy_assignment_is_preserved_but_not_linked(self):
+        self._reverse_to_0004()
+        user = User.objects.create_user(username="legacy-expired-gm")
+        assignment = _unlinked_gm_assignment(user)
+        UserRoleAssignment.objects.filter(pk=assignment.pk).update(
+            start_at=timezone.now() - timezone.timedelta(days=2),
+            end_at=timezone.now() - timezone.timedelta(days=1),
+        )
+
+        self._apply_all()
+
+        self.assertIsNone(GMRoleSlot.objects.get().assignment_id)
+        self.assertTrue(
+            UserRoleAssignment.objects.filter(
+                pk=assignment.pk, revoked_at__isnull=True
+            ).exists()
+        )
+        self.assertEqual(check_gm_singleton_slot_for_alias("default"), [])
+
     def test_multiple_candidates_fail_closed_without_choosing(self):
         self._reverse_to_0004()
         u1 = User.objects.create_user(username="candidate-a", is_superuser=True)
