@@ -28,6 +28,7 @@ from django.utils import timezone
 
 from security.gm_slot import (
     GM_SLOT_CODE,
+    _temporally_active,
     inspect_slot_consistency,
 )
 
@@ -124,7 +125,15 @@ class Command(BaseCommand):
             .select_related("user", "role")
             .order_by("pk")
         )
+        active_candidates = [
+            assignment
+            for assignment in candidates
+            if assignment.role.is_active and _temporally_active(assignment, now)
+        ]
         out.write(f"- Non-closed GM assignments found: {len(candidates)}")
+        out.write(
+            f"- Currently ACTIVE GM assignments found: {len(active_candidates)}"
+        )
         for assignment in candidates:
             user = assignment.user
             window = (
@@ -148,7 +157,7 @@ class Command(BaseCommand):
                 f"are intentionally not printed)"
             )
 
-        can_proceed = len(candidates) <= 1
+        can_proceed = len(active_candidates) <= 1
         out.write(
             "- Migration security.0005 can proceed automatically: "
             + ("YES" if can_proceed else "NO")
@@ -156,9 +165,9 @@ class Command(BaseCommand):
 
         if not can_proceed:
             raise CommandError(
-                f"{len(candidates)} non-closed GM assignments exist; the "
-                "singleton GM policy permits at most ONE. Reconcile "
-                "manually (close/revoke all but the approved holder's "
+                f"{len(active_candidates)} currently ACTIVE GM assignments "
+                "exist; the singleton GM policy permits at most ONE. "
+                "Reconcile manually (close/revoke all but the approved holder's "
                 "assignment), then re-run this preflight. No rows were "
                 "changed by this command."
             )
