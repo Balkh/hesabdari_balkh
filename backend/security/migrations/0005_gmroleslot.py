@@ -50,9 +50,16 @@ GM_SLOT_CODE = "GM"
 def seed_slot_and_reconcile(apps, schema_editor):
     GMRoleSlot = apps.get_model("security", "GMRoleSlot")
     UserRoleAssignment = apps.get_model("security", "UserRoleAssignment")
+    db_alias = schema_editor.connection.alias
 
+    # RunPython historical models are not automatically pinned to the
+    # connection that invoked this migration. Every ORM operation must use
+    # schema_editor's database alias to avoid writing to "default" when a
+    # non-default database is migrated.
     # 1) The singleton row, with no assignment. Idempotent by identity.
-    slot, _created = GMRoleSlot.objects.get_or_create(code=GM_SLOT_CODE)
+    slot, _created = GMRoleSlot.objects.using(db_alias).get_or_create(
+        code=GM_SLOT_CODE
+    )
     if slot.assignment_id is not None:
         # Defensive: the slot already holds a holder. Never overwrite,
         # clear, or transfer it.
@@ -60,7 +67,7 @@ def seed_slot_and_reconcile(apps, schema_editor):
 
     # 2) Non-closed GM assignments left by history and the live database.
     candidates = list(
-        UserRoleAssignment.objects.filter(
+        UserRoleAssignment.objects.using(db_alias).filter(
             role__code=GM_SLOT_CODE, revoked_at__isnull=True
         ).order_by("pk")
     )
@@ -85,7 +92,7 @@ def seed_slot_and_reconcile(apps, schema_editor):
 
     # 4) Exactly one candidate: link it through a CAS update that fires
     #    only while the slot is empty (never overwrites a holder).
-    updated = GMRoleSlot.objects.filter(
+    updated = GMRoleSlot.objects.using(db_alias).filter(
         code=GM_SLOT_CODE, assignment__isnull=True
     ).update(assignment=candidates[0])
     if updated != 1:
@@ -105,7 +112,8 @@ def remove_singleton_slot(apps, schema_editor):
     rows here keeps the data operation explicit and order-independent.)
     """
     GMRoleSlot = apps.get_model("security", "GMRoleSlot")
-    GMRoleSlot.objects.all().delete()
+    db_alias = schema_editor.connection.alias
+    GMRoleSlot.objects.using(db_alias).all().delete()
 
 
 class Migration(migrations.Migration):
