@@ -23,6 +23,7 @@ report could not be produced.
 """
 from django.core.management.base import BaseCommand, CommandError
 from django.db import connections
+from django.db.migrations.recorder import MigrationRecorder
 from django.utils import timezone
 
 from security.gm_slot import (
@@ -57,6 +58,12 @@ class Command(BaseCommand):
         if alias not in connections:
             raise CommandError(f"unknown database alias: {alias!r}")
 
+        migration_applied = (
+            ("security", "0005_gmroleslot")
+            in MigrationRecorder(connections[alias]).applied_migrations()
+        )
+        slot_table_exists = _table_exists(alias, GMRoleSlot)
+
         out = self.stdout
         out.write(f"GM singleton slot preflight (database: {alias!r})")
         out.write(
@@ -65,17 +72,20 @@ class Command(BaseCommand):
             "account automatically."
         )
 
-        if not _table_exists(alias, GMRoleSlot):
+        out.write(
+            "- security.0005 migration: "
+            + ("applied" if migration_applied else "not applied (pre-migration)")
+        )
+        if not slot_table_exists:
             out.write(
-                "- GMRoleSlot table: MISSING (migration security.0005 not "
-                "applied yet). Candidate inspection below still works "
-                "against the pre-migration database."
+                "- GMRoleSlot table: MISSING. This is expected only before "
+                "security.0005; after an applied migration it is an error."
             )
         else:
             out.write("- GMRoleSlot table: present")
 
         # Slot state (only meaningful once the table exists).
-        if _table_exists(alias, GMRoleSlot):
+        if slot_table_exists:
             slot_qs = GMRoleSlot.objects.using(alias).order_by("pk")
             slot_rows = list(slot_qs)
             if not slot_rows:
@@ -144,20 +154,37 @@ class Command(BaseCommand):
             + ("YES" if can_proceed else "NO")
         )
 
-        # Post-migration consistency findings (empty list pre-migration
-        # when the slot table itself is absent).
-        for code, message in inspect_slot_consistency(using=alias):
-            out.write(f"- CONSISTENCY FINDING {code}: {message}")
-
         if not can_proceed:
             raise CommandError(
                 f"{len(candidates)} non-closed GM assignments exist; the "
                 "singleton GM policy permits at most ONE. Reconcile "
                 "manually (close/revoke all but the approved holder's "
-                "assignment), then re-run this preflight before applying "
-                "migration security.0005. No rows were changed by this "
-                "command."
+                "assignment), then re-run this preflight. No rows were "
+                "changed by this command."
             )
+
+        if migration_applied:
+            # After 0005, an orphan assignment, missing slot row/table, or
+            # any other consistency finding is a blocking error. Do not
+            # report success merely because the candidate count is <= 1.
+            findings = inspect_slot_consistency(using=alias)
+            for code, message in findings:
+                out.write(f"- CONSISTENCY FINDING {code}: {message}")
+            if findings:
+                raise CommandError(
+                    "Singleton GM slot is inconsistent after migration "
+                    "security.0005. Reconcile the reported findings and "
+                    "re-run this read-only preflight. No rows were changed."
+                )
+        elif slot_table_exists:
+            # A table without its migration record is not a clean
+            # pre-migration state; stop for manual inspection.
+            raise CommandError(
+                "GMRoleSlot table exists but migration security.0005 is "
+                "not recorded. Treat this as a partial migration state and "
+                "inspect it manually before proceeding. No rows were changed."
+            )
+
         out.write(
             "Preflight complete: no rows were changed and no secret "
             "material was read or printed."
