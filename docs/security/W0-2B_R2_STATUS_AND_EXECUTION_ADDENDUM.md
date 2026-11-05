@@ -100,7 +100,7 @@ GitHub Actions logs associated with the stated exact commit SHAs.
 
 ## 7. Remaining blockers — do not merge or enable Production
 
-- **Django Admin GM gate is not implemented or activated.** The mounted `/admin/` currently retains Django's default AdminSite behavior. The approved design requires an active GM role in addition to `is_active` and `is_staff`, and explicitly forbids `is_superuser` as an authorization bypass.
+- **Django Admin is now temporarily blocked for every caller.** The default `admin.site.urls` mount was removed and the entire `/admin` namespace returns 404 through `security.admin_guard.admin_temporarily_disabled`; tests cover anonymous, staff, and superuser requests, including nested model/login/logout paths. This is an interim fail-closed measure only: the approved GM-only AdminSite has NOT been implemented. Re-enable Admin only after the gate checks an active singleton-linked GM assignment, active account, mandatory MFA assurance, and account-lockout state on every request; `is_superuser` alone must never bypass that gate.
 - **GM provisioning and recovery are unresolved.** Migration `security.0004` maps only superusers that exist when that migration runs. A user created later through `createsuperuser` is not automatically assigned GM. No first-run local GM provisioning/recovery mechanism or controlled transfer/release service has been implemented here. The corrective E004/preflight check now detects a slot link outside its temporal ACTIVE window, but it deliberately does not clear or transfer that slot. Do not auto-assign GM to future superusers or clear a slot as a shortcut.
 - **Account lockout is not effective yet.** `account_locked()` remains a no-op until W0-2D. The approved Admin contract also requires locked GM denial, so the final Admin gate depends on that capability or a separately reviewed equivalent.
 - **Denial-audit flood policy is unresolved.** DRF throttles execute after permission checks and do not bound denied-request audit writes. No rate/threshold has been invented. `PERMISSION_DENIED` persistence, per-request deduplication, migration, and failure tests remain unimplemented until the owner-approved rate/control is defined.
@@ -115,7 +115,7 @@ GitHub Actions logs associated with the stated exact commit SHAs.
 |---|---|
 | R2.0 documentation / baseline reconciliation | Implemented |
 | R2.1 operation registry, immutable metadata, typed target resolver, shared policy path, system drift check | Implemented; corrective E003 coverage added; exact-head CI required |
-| R2.2 GM-only Django Admin site and deployment activation | Blocked by GM provisioning, account inventory, and W0-2D lockout gap |
+| R2.2 interim Django Admin deny-all route guard | Implemented; all `/admin` paths return 404 pending the complete GM+MFA+lockout gate |
 | R2.3 wiring the 12 current API operations and GET/HEAD behavior | Implemented; exact-head CI evidence recorded above |
 | R2.4 authenticated denial AuditEvent and bounded audit flood policy | Blocked pending owner-defined control threshold |
 | R2.5 Production startup guard requiring `ERP_RBAC_ENFORCEMENT=True` | Deferred until API/Admin/audit release gates are complete |
