@@ -536,6 +536,44 @@ class SingletonSlotMigrationTests(TransactionTestCase):
         )
         self.assertEqual(check_gm_singleton_slot_for_alias("default"), [])
 
+    def test_temporally_active_assignment_for_inactive_user_blocks_migration(self):
+        self._reverse_to_0004()
+        user = User.objects.create_user(
+            username="legacy-inactive-gm", is_active=False
+        )
+        assignment = _unlinked_gm_assignment(user)
+
+        preflight_output, preflight_error = io.StringIO(), None
+        try:
+            call_command("gm_slot_preflight", stdout=preflight_output)
+        except CommandError as exc:
+            preflight_error = exc
+        self.assertIn(
+            "Currently ACTIVE assignments belonging to inactive User accounts: 1",
+            preflight_output.getvalue(),
+        )
+        self.assertIn("can proceed automatically: NO", preflight_output.getvalue())
+        self.assertIsNotNone(preflight_error)
+        self.assertIn("inactive User account", str(preflight_error))
+
+        # The migration itself must independently enforce the same rule.
+        with self.assertRaisesRegex(RuntimeError, "inactive User account"):
+            self._apply_all()
+
+        # Atomic migration failure preserves both the absent slot structure
+        # and the historical assignment; it does not silently revoke/delete.
+        self.assertFalse(self._slot_table_exists())
+        self.assertTrue(UserRoleAssignment.objects.filter(pk=assignment.pk).exists())
+        user.refresh_from_db()
+        self.assertFalse(user.is_active)
+
+        # Only an explicit operator reconciliation makes the legacy account
+        # eligible; the migration then links the same preserved assignment.
+        user.is_active = True
+        user.save(update_fields=["is_active"])
+        self._apply_all()
+        self.assertEqual(GMRoleSlot.objects.get().assignment_id, assignment.pk)
+
     def test_multiple_candidates_fail_closed_without_choosing(self):
         self._reverse_to_0004()
         u1 = User.objects.create_user(username="candidate-a", is_superuser=True)
@@ -791,6 +829,56 @@ class PreflightCommandTests(TestCase):
         self.assertIn("CONSISTENCY FINDING GM_SLOT_LINK_NOT_ACTIVE", output)
         self.assertIsNotNone(error)
         self.assertIn("inconsistent after migration", str(error).lower())
+
+    def test_pre_migration_inactive_user_candidate_blocks_readiness(self):
+        # Simulate the pre-0005 state so the read-only report owns the
+        # decision before the migration is attempted.
+        call_command(
+            "migrate", "security", "0004", verbosity=0, interactive=False
+        )
+        user = User.objects.create_user(
+            username="preflight-inactive-gm", is_active=False
+        )
+        assignment = _unlinked_gm_assignment(user)
+
+        output, error = self._run()
+
+        self.assertIn(
+            "Currently ACTIVE assignments belonging to inactive User accounts: 1",
+            output,
+        )
+        self.assertIn(
+            f"(assignment/user ids=[({assignment.pk}, {user.pk})])",
+            output,
+        )
+        self.assertIn("can proceed automatically: NO", output)
+        self.assertIsNotNone(error)
+        self.assertIn("inactive User account", str(error))
+
+        # No preflight action changes the user or assignment.
+        user.refresh_from_db()
+        self.assertFalse(user.is_active)
+        self.assertTrue(UserRoleAssignment.objects.filter(pk=assignment.pk).exists())
+
+        # Restore the head schema after the read-only assertion.
+        user.is_active = True
+        user.save(update_fields=["is_active"])
+        call_command("migrate", "security", verbosity=0, interactive=False)
+
+    def test_post_migration_inactive_user_slot_holder_is_nonzero(self):
+        user = User.objects.create_user(username="preflight-inactive-holder")
+        assignment = _unlinked_gm_assignment(user)
+        claim_gm_slot(assignment)
+        user.is_active = False
+        user.save(update_fields=["is_active"])
+
+        output, error = self._run()
+
+        self.assertIn("CONSISTENCY FINDING GM_SLOT_USER_INACTIVE", output)
+        self.assertIsNotNone(error)
+        self.assertIn("inconsistent after migration", str(error).lower())
+        self.assertIn(str(user.pk), output)
+        self.assertIn(str(assignment.pk), output)
 
     def test_multiple_candidates_report_manual_reconciliation(self):
         for index in range(2):
