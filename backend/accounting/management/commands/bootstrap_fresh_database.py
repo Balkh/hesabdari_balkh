@@ -82,10 +82,11 @@ def _find_existing_application_data(using="default"):
     """Return installed, managed application models that contain rows.
 
     Schema completeness is checked separately before any ORM query. Only
-    Django's automatically generated ContentType and Permission rows and
-    the three W0-2A RBAC seeded reference models (security.Role,
-    security.Permission, security.RolePermission — §24.5) are exempt; all
-    other application data blocks first-time bootstrap, including the
+    Django's automatically generated ContentType and Permission rows, the
+    three W0-2A RBAC seeded reference models (security.Role,
+    security.Permission, security.RolePermission — §24.5), and the
+    migration-created W0-2B/R2 singleton security.GMRoleSlot row are exempt.
+    All other application data blocks first-time bootstrap, including the
     user-specific authorization models.
     """
     populated_models = []
