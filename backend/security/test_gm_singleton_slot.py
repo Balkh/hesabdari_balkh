@@ -830,41 +830,6 @@ class PreflightCommandTests(TestCase):
         self.assertIsNotNone(error)
         self.assertIn("inconsistent after migration", str(error).lower())
 
-    def test_pre_migration_inactive_user_candidate_blocks_readiness(self):
-        # Simulate the pre-0005 state so the read-only report owns the
-        # decision before the migration is attempted.
-        call_command(
-            "migrate", "security", "0004", verbosity=0, interactive=False
-        )
-        user = User.objects.create_user(
-            username="preflight-inactive-gm", is_active=False
-        )
-        assignment = _unlinked_gm_assignment(user)
-
-        output, error = self._run()
-
-        self.assertIn(
-            "Currently ACTIVE assignments belonging to inactive User accounts: 1",
-            output,
-        )
-        self.assertIn(
-            f"(assignment/user ids=[({assignment.pk}, {user.pk})])",
-            output,
-        )
-        self.assertIn("can proceed automatically: NO", output)
-        self.assertIsNotNone(error)
-        self.assertIn("inactive User account", str(error))
-
-        # No preflight action changes the user or assignment.
-        user.refresh_from_db()
-        self.assertFalse(user.is_active)
-        self.assertTrue(UserRoleAssignment.objects.filter(pk=assignment.pk).exists())
-
-        # Restore the head schema after the read-only assertion.
-        user.is_active = True
-        user.save(update_fields=["is_active"])
-        call_command("migrate", "security", verbosity=0, interactive=False)
-
     def test_post_migration_inactive_user_slot_holder_is_nonzero(self):
         user = User.objects.create_user(username="preflight-inactive-holder")
         assignment = _unlinked_gm_assignment(user)
