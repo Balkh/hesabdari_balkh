@@ -294,6 +294,20 @@ class SlotClaimCardinalityTests(TestCase):
             claim_gm_slot(assignment)
         self.assertIsNone(GMRoleSlot.objects.get().assignment_id)
 
+    def test_claim_rejects_inactive_user_account(self):
+        user = User.objects.create_user(
+            username="inactive-claim", is_active=False
+        )
+        assignment = _unlinked_gm_assignment(user)
+
+        with self.assertRaisesMessage(
+            GMSlotClaimError, "active User account"
+        ):
+            claim_gm_slot(assignment)
+
+        self.assertIsNone(GMRoleSlot.objects.get().assignment_id)
+        self.assertTrue(UserRoleAssignment.objects.filter(pk=assignment.pk).exists())
+
     def test_claim_rejects_revoked_assignment(self):
         assignment = self._candidate("revoked-claim")
         UserRoleAssignment.objects.filter(pk=assignment.pk).update(
