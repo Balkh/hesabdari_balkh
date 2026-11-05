@@ -718,6 +718,20 @@ class SingletonSlotSystemCheckTests(TestCase):
             [e.msg for e in errors],
         )
 
+    def test_slot_linking_inactive_user_account_is_reported(self):
+        user = User.objects.create_user(username="check-inactive-user")
+        assignment = _unlinked_gm_assignment(user)
+        claim_gm_slot(assignment)
+        user.is_active = False
+        user.save(update_fields=["is_active"])
+
+        errors = self._errors()
+
+        self.assertTrue(
+            any("GM_SLOT_USER_INACTIVE" in error.msg for error in errors),
+            [error.msg for error in errors],
+        )
+
     def test_slot_linking_expired_or_future_assignment_is_reported(self):
         windows = (
             (
@@ -839,9 +853,13 @@ class PreflightCommandTests(TestCase):
 
         output, error = self._run()
 
-        self.assertIn("CONSISTENCY FINDING GM_SLOT_USER_INACTIVE", output)
+        self.assertIn(
+            "Currently ACTIVE assignments belonging to inactive User accounts: 1",
+            output,
+        )
+        self.assertIn(f"(assignment/user ids=[({assignment.pk}, {user.pk})])", output)
         self.assertIsNotNone(error)
-        self.assertIn("inconsistent after migration", str(error).lower())
+        self.assertIn("inactive User account", str(error))
         self.assertIn(str(user.pk), output)
         self.assertIn(str(assignment.pk), output)
 
