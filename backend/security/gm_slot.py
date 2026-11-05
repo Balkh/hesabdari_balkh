@@ -120,9 +120,9 @@ def claim_gm_slot(assignment):
       the exception is allowed to propagate out of the caller's outer
       atomic block. Do not catch-and-suppress a claim error inside that
       outer block when assignment creation must be atomic with the claim.
-    - Verifies the assignment is a persisted, non-closed, temporally ACTIVE
-      assignment of the ACTIVE ``GM`` role (fresh re-read, never the
-      caller's possibly-stale instance).
+    - Verifies the assignment belongs to an active User account and is a
+      persisted, non-closed, temporally ACTIVE assignment of the ACTIVE
+      ``GM`` role (fresh re-read, never the caller's possibly-stale instance).
     - Requires the singleton slot row to exist (migration 0005 applied).
     - Claims with a database-atomic conditional update
       (``UPDATE ... WHERE code='GM' AND assignment IS NULL``): exactly one
@@ -145,7 +145,7 @@ def claim_gm_slot(assignment):
             )
         try:
             fresh = (
-                UserRoleAssignment.objects.select_related("role")
+                UserRoleAssignment.objects.select_related("role", "user")
                 .get(pk=assignment.pk)
             )
         except UserRoleAssignment.DoesNotExist:
@@ -158,6 +158,10 @@ def claim_gm_slot(assignment):
         if role is None or role.code != GM_SLOT_CODE or not role.is_active:
             raise GMSlotClaimError(
                 "GM slot can only be claimed by an assignment of the active GM role"
+            )
+        if not fresh.user.is_active:
+            raise GMSlotClaimError(
+                "GM slot can only be claimed for an active User account"
             )
         if not _temporally_active(fresh, at):
             raise GMSlotClaimError(
