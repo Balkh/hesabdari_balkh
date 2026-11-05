@@ -131,10 +131,33 @@ class Command(BaseCommand):
             for assignment in candidates
             if assignment.role.is_active and _temporally_active(assignment, now)
         ]
+        inactive_user_candidates = [
+            assignment for assignment in active_candidates
+            if not assignment.user.is_active
+        ]
+        eligible_candidates = [
+            assignment for assignment in active_candidates
+            if assignment.user.is_active
+        ]
         out.write(f"- Non-closed GM assignments found: {len(candidates)}")
         out.write(
             f"- Currently ACTIVE GM assignments found: {len(active_candidates)}"
         )
+        out.write(
+            f"- Currently ACTIVE assignments belonging to inactive User accounts: "
+            f"{len(inactive_user_candidates)}"
+        )
+        out.write(
+            f"- Eligible GM candidates (active User accounts): {len(eligible_candidates)}"
+        )
+        if inactive_user_candidates:
+            details = [
+                (assignment.pk, assignment.user_id)
+                for assignment in inactive_user_candidates
+            ]
+            out.write(
+                f"- INACTIVE-USER GM candidates (assignment/user ids): {details}"
+            )
         for assignment in candidates:
             user = assignment.user
             window = (
@@ -158,13 +181,30 @@ class Command(BaseCommand):
                 f"are intentionally not printed)"
             )
 
-        can_proceed = len(active_candidates) <= 1
+        can_proceed = (
+            len(active_candidates) <= 1 and not inactive_user_candidates
+        )
         out.write(
             "- Migration security.0005 can proceed automatically: "
             + ("YES" if can_proceed else "NO")
         )
 
-        if not can_proceed:
+        if inactive_user_candidates:
+            details = [
+                (assignment.pk, assignment.user_id)
+                for assignment in inactive_user_candidates
+            ]
+            raise CommandError(
+                f"{len(inactive_user_candidates)} currently ACTIVE GM "
+                "assignment(s) belong to inactive User account(s) "
+                f"(assignment/user ids={details}). Migration is blocked: "
+                "the slot must not be linked to an unusable account. Obtain "
+                "the owner's reconciliation decision and use the authorized "
+                "account/assignment procedure. This command never activates, "
+                "revokes, deletes, or transfers an account or GM assignment. "
+                "No rows were changed."
+            )
+        if len(active_candidates) > 1:
             raise CommandError(
                 f"{len(active_candidates)} currently ACTIVE GM assignments "
                 "exist; the singleton GM policy permits at most ONE. "
