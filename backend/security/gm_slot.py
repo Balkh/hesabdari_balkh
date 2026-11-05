@@ -24,8 +24,10 @@ W0-2B grant services:
   ``security.E004`` system check and the ``gm_slot_preflight`` command.
 
 Fail-closed rules: a missing or malformed slot, a missing/wrong linked
-assignment, a wrong or inactive role, and a revoked/expired/not-yet-effective
-link all read as "not GM" — never as GM. Unexpected database errors
+assignment, an inactive User account, a wrong or inactive role, and a
+revoked/expired/not-yet-effective link all read as "not GM" — never as GM.
+The read-only consistency inspector also reports an inactive User linked
+to the singleton slot as a blocking finding. Unexpected database errors
 propagate to the caller (the resolver boundary converts them into
 ``FAIL_CLOSED``). No function here reads or returns password, token, TOTP,
 recovery, or other secret material.
