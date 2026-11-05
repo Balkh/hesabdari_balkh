@@ -30,6 +30,12 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - run: npm ci
         working-directory: frontend
+      # Do not let a green build conceal high/critical dependency advisories.
+      # Keep npm's full advisory output in the job log so the exact package,
+      # dependency path, affected range, and available fix can be reviewed.
+      - name: Block high and critical npm vulnerabilities
+        run: npm audit --audit-level=high
+        working-directory: frontend
       - run: scripts/verify_frontend.sh
 
   postgresql:
