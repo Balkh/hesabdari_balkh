@@ -49,6 +49,7 @@ FINDING_SLOT_INVALID_IDENTITY = "GM_SLOT_INVALID_IDENTITY"
 FINDING_LINK_NOT_GM_ROLE = "GM_SLOT_LINK_NOT_GM_ROLE"
 FINDING_LINK_REVOKED = "GM_SLOT_LINK_REVOKED"
 FINDING_LINK_NOT_ACTIVE = "GM_SLOT_LINK_NOT_ACTIVE"
+FINDING_LINK_USER_INACTIVE = "GM_SLOT_USER_INACTIVE"
 FINDING_UNLINKED_GM_ASSIGNMENT = "GM_ASSIGNMENT_UNLINKED"
 
 
@@ -221,7 +222,9 @@ def inspect_slot_consistency(using=None):
         ]
 
     findings = []
-    queryset = GMRoleSlot.objects.select_related("assignment", "assignment__role")
+    queryset = GMRoleSlot.objects.select_related(
+        "assignment", "assignment__role", "assignment__user"
+    )
     if using:
         queryset = queryset.using(using)
     rows = list(queryset.order_by("pk"))
@@ -255,6 +258,15 @@ def inspect_slot_consistency(using=None):
 
     assignment = slot.assignment
     if assignment is not None:
+        if not assignment.user.is_active:
+            findings.append(
+                (
+                    FINDING_LINK_USER_INACTIVE,
+                    f"GM slot (pk={slot.pk}) links assignment pk="
+                    f"{assignment.pk} for inactive User account "
+                    f"(user id={assignment.user_id})",
+                )
+            )
         role = getattr(assignment, "role", None)
         if role is None or role.code != GM_SLOT_CODE or not role.is_active:
             findings.append(
