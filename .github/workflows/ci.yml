@@ -28,19 +28,15 @@ jobs:
           node-version: "22"
           cache: npm
           cache-dependency-path: frontend/package-lock.json
-      # Temporary lockfile refresh: the Vite 8.3.6 manifest pin requires a
-      # matching lockfile. The artifact is reviewed and committed separately;
-      # this generation step is removed once the lockfile is updated.
+      # Temporary one-run generation: update the manifest-matched lockfile,
+      # patch compatible vulnerable transitive packages, and emit a one-time
+      # base64 payload so the reviewed lockfile can be committed to this branch.
       - name: Generate patched npm lockfile
         run: |
           npm install --package-lock-only --ignore-scripts
           npm audit fix --package-lock-only --ignore-scripts
+          node -e "const fs=require('fs'); console.log('LOCKFILE_BASE64_BEGIN'); console.log(fs.readFileSync('package-lock.json','base64')); console.log('LOCKFILE_BASE64_END');"
         working-directory: frontend
-      - uses: actions/upload-artifact@v4
-        with:
-          name: frontend-package-lock-remediation
-          path: frontend/package-lock.json
-          retention-days: 1
       - run: npm ci
         working-directory: frontend
       # Do not let a green build conceal high/critical dependency advisories.
