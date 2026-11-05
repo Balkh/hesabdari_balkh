@@ -7,11 +7,15 @@ Reports, without modifying anything:
 - every non-closed GM role assignment (``role__code="GM"``,
   ``revoked_at IS NULL``) with user IDs and safe account status fields;
 - the separate count of currently ACTIVE candidates (active GM role,
-  not revoked, start time reached, and end time absent or in the future)
-  used by migration ``security.0005``;
+  not revoked, start time reached, and end time absent or in the future),
+  including a separate blocker count for candidates whose User account is
+  inactive; an inactive User candidate blocks migration rather than being
+  linked or silently ignored;
 - whether migration ``security.0005`` can proceed automatically (zero or
-  one currently ACTIVE candidate) or will refuse to run (multiple ACTIVE
-  candidates — the owner decision forbids choosing an account automatically).
+  one currently ACTIVE candidate attached to an active User account, with
+  no inactive-account candidate) or will refuse to run. Multiple ACTIVE
+  candidates or any ACTIVE assignment for an inactive User require manual
+  owner-authorized reconciliation; no account is chosen or altered here.
 
 The command never modifies accounts or grants and never prints passwords,
 tokens, TOTP secrets, recovery codes, or other personal secrets — user
