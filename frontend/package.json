@@ -9,15 +9,15 @@
     "test": "node --test tests/frontend.test.mjs"
   },
   "dependencies": {
-    "@vitejs/plugin-react": "latest",
-    "react": "latest",
-    "react-dom": "latest",
-    "react-router-dom": "^7.18.3",
-    "typescript": "latest",
+    "@vitejs/plugin-react": "6.1.1",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "react-router-dom": "7.18.3",
+    "typescript": "7.0.2",
     "vite": "8.3.6"
   },
   "devDependencies": {
-    "@types/react": "^19.2.18",
-    "@types/react-dom": "^19.2.7"
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.7"
   }
 }
