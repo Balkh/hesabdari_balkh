@@ -73,15 +73,44 @@ def seed_slot_and_reconcile(apps, schema_editor):
     # Expired/future rows remain unchanged history and do not reserve the slot.
     at = timezone.now()
     candidates = list(
-        UserRoleAssignment.objects.using(db_alias).filter(
+        UserRoleAssignment.objects.using(db_alias)
+        .select_related("user")
+        .select_for_update()
+        .filter(
             role__code=GM_SLOT_CODE,
             role__is_active=True,
             revoked_at__isnull=True,
             start_at__lte=at,
-        ).filter(
-            Q(end_at__isnull=True) | Q(end_at__gt=at)
-        ).order_by("pk")
+        )
+        .filter(Q(end_at__isnull=True) | Q(end_at__gt=at))
+        .order_by("pk")
     )
+
+    # An assignment can be temporally ACTIVE while its User is inactive.
+    # Such a row must not reserve the singleton slot: the resolver denies
+    # inactive accounts before GM authorization. Do not silently ignore it,
+    # however; require explicit operator reconciliation and preserve history.
+    inactive_user_candidates = [
+        candidate for candidate in candidates if not candidate.user.is_active
+    ]
+    if inactive_user_candidates:
+        details = [
+            (candidate.pk, candidate.user_id)
+            for candidate in inactive_user_candidates
+        ]
+        raise RuntimeError(
+            f"security.0005 refused to run: {len(inactive_user_candidates)} "
+            "currently ACTIVE GM assignment(s) belong to inactive User "
+            f"account(s) (assignment/user ids={details}). The migration will "
+            "not link an unusable GM identity or alter historical rows. "
+            "Run 'python manage.py gm_slot_preflight', obtain the owner's "
+            "reconciliation decision, correct the account/assignment state "
+            "through the authorized procedure, then re-apply this migration. "
+            "No rows were changed."
+        )
+
+    # Only assignments attached to active User accounts can occupy the slot.
+    candidates = [candidate for candidate in candidates if candidate.user.is_active]
 
     # 3) Zero candidates: a fresh system before provisioning — valid state.
     if not candidates:
