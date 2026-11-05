@@ -857,7 +857,11 @@ class PreflightCommandTests(TestCase):
             "Currently ACTIVE assignments belonging to inactive User accounts: 1",
             output,
         )
-        self.assertIn(f"(assignment/user ids=[({assignment.pk}, {user.pk})])", output)
+        self.assertIn(
+            "INACTIVE-USER GM candidates (assignment/user ids):",
+            output,
+        )
+        self.assertIn(f"[({assignment.pk}, {user.pk})]", output)
         self.assertIsNotNone(error)
         self.assertIn("inactive User account", str(error))
         self.assertIn(str(user.pk), output)
