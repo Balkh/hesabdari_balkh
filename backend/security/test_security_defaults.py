@@ -223,7 +223,7 @@ class ProductionSettingsHardeningTests(SimpleTestCase):
         # Fail-fast guards from the pre-existing production contract hold.
         self.assertFalse(flags["DEBUG"])
         self.assertEqual(flags["DB_ENGINE"], "django.db.backends.postgresql")
-        self.assertFalse(flags["ERP_RBAC_ENFORCEMENT"])
+        self.assertTrue(flags["ERP_RBAC_ENFORCEMENT"])
         self.assertFalse(flags["ERP_RBAC_ALLOW_AUTHENTICATED_ONLY"])
 
     def test_non_production_profiles_do_not_inherit_hardening(self):
