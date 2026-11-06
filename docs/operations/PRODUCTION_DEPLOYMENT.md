@@ -70,10 +70,17 @@ production deployment strategy.
 
 ## Admin access and throttling limits
 
-The current admin login has no application-level login throttling. Until a
-separate owner-approved control is implemented, restrict admin access at the
-network/proxy layer and use strong, unique staff passwords. Document the
-actual restriction in the deployment runbook.
+The entire Django Admin URL namespace is currently disabled: every
+`/admin` path returns 404 for anonymous, staff, and superuser callers through
+the W0-2B interim fail-closed guard. Do not expose or re-enable Admin until
+the approved singleton-linked GM-only gate, mandatory GM MFA, and effective
+account-lockout check are implemented and tested on every Admin request.
+This deny-all measure is temporary; it is not the final GM AdminSite.
+
+When Admin is eventually re-enabled, login throttling must be addressed as a
+separate reviewed control. No assumption should be made that a reverse-proxy
+restriction or a shared cache exists before it is verified in the real
+deployment.
 
 The configured DRF throttle uses Django's local-memory cache unless an
 environment explicitly configures another cache. Its counters are per
