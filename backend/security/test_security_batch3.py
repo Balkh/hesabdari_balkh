@@ -74,6 +74,7 @@ def _without(env, *names):
 
 VALID_PRODUCTION_ENV = {
     "DJANGO_SETTINGS_MODULE": "config.settings.production",
+    "ERP_RBAC_ENFORCEMENT": "true",
     # Deterministic, test-only values. The key satisfies the Batch 2
     # >= 50-character production guard and is never a real credential.
     "DJANGO_SECRET_KEY": "batch3-test-only-production-secret-key-0123456789abcdef",

@@ -6,6 +6,13 @@ SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "development-only-insecure-key")
 DEBUG = os.getenv("DJANGO_DEBUG", "false").lower() == "true"
 ALLOWED_HOSTS = [host.strip() for host in os.getenv("DJANGO_ALLOWED_HOSTS", "").split(",") if host.strip()]
 
+# R2 RBAC stays dormant by default in development/test until all route
+# declarations, Admin coverage, audit policy, and Production guard are proven.
+ERP_RBAC_ENFORCEMENT = False
+# Explicit authenticated-only compatibility is permitted only in the
+# development/test base profile. Production overrides this to False.
+ERP_RBAC_ALLOW_AUTHENTICATED_ONLY = True
+
 INSTALLED_APPS = [
     "django.contrib.admin", "django.contrib.auth", "django.contrib.contenttypes",
     "django.contrib.sessions", "django.contrib.messages", "django.contrib.staticfiles",

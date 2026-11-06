@@ -29,14 +29,20 @@ Production settings require all of the following:
   entry `*` is rejected at startup (enforced in
   `config/settings/production.py`; regression-tested in
   `security/test_security_batch3.py`)
+- `ERP_RBAC_ENFORCEMENT=true`: this must be explicitly set to the literal
+  Boolean string `true` (case-insensitive, surrounding whitespace allowed).
+  Missing, malformed, or false values abort settings import before any
+  request can be served. Production always keeps
+  `ERP_RBAC_ALLOW_AUTHENTICATED_ONLY=false`.
 - `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD`,
   `POSTGRES_HOST`, and `POSTGRES_PORT`
 
 Startup fails fast — before the application can serve any request —
-when a required variable is missing (`DJANGO_SECRET_KEY` or any
-`POSTGRES_*` value), the secret is empty, the development default, or
-shorter than 50 characters, `DJANGO_DEBUG=true`, or
-`DJANGO_ALLOWED_HOSTS` is empty or contains the wildcard entry `*`.
+when a required variable is missing (`DJANGO_SECRET_KEY`, any
+`POSTGRES_*` value, or `ERP_RBAC_ENFORCEMENT`), RBAC enforcement is not
+explicitly `true`, the secret is empty, the development default, or shorter
+than 50 characters, `DJANGO_DEBUG=true`, or `DJANGO_ALLOWED_HOSTS` is
+empty or contains the wildcard entry `*`.
 Error messages name the offending variable and never echo configured
 secret values.
 
@@ -64,10 +70,17 @@ production deployment strategy.
 
 ## Admin access and throttling limits
 
-The current admin login has no application-level login throttling. Until a
-separate owner-approved control is implemented, restrict admin access at the
-network/proxy layer and use strong, unique staff passwords. Document the
-actual restriction in the deployment runbook.
+The entire Django Admin URL namespace is currently disabled: every
+`/admin` path returns 404 for anonymous, staff, and superuser callers through
+the W0-2B interim fail-closed guard. Do not expose or re-enable Admin until
+the approved singleton-linked GM-only gate, mandatory GM MFA, and effective
+account-lockout check are implemented and tested on every Admin request.
+This deny-all measure is temporary; it is not the final GM AdminSite.
+
+When Admin is eventually re-enabled, login throttling must be addressed as a
+separate reviewed control. No assumption should be made that a reverse-proxy
+restriction or a shared cache exists before it is verified in the real
+deployment.
 
 The configured DRF throttle uses Django's local-memory cache unless an
 environment explicitly configures another cache. Its counters are per
@@ -101,6 +114,9 @@ Implemented in code and covered by regression tests:
   abort startup; explicit hostnames boot cleanly.
 - PostgreSQL-only production database configuration: each `POSTGRES_*`
   variable is required; a missing variable aborts startup.
+- Fail-fast production RBAC guard: `ERP_RBAC_ENFORCEMENT=true` is required
+  and authenticated-only bypass is disabled; invalid/missing values abort
+  startup before request handling.
 - `STATIC_ROOT` for `collectstatic`.
 - DRF authenticated-by-default permissions and per-process request
   throttles; a denied unauthorized write persists neither a domain row

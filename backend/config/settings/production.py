@@ -2,6 +2,18 @@ import os
 
 from .base import *
 
+from security.production_guard import require_rbac_enforcement_from_env
+
+# Production must never start with the R2 permission system disabled. The
+# explicit environment setting is parsed strictly and checked before
+# database configuration, so failure is immediate and unambiguous.
+ERP_RBAC_ENFORCEMENT = require_rbac_enforcement_from_env(
+    os.environ.get("ERP_RBAC_ENFORCEMENT")
+)
+
+# Production never falls back to authentication-only access.
+ERP_RBAC_ALLOW_AUTHENTICATED_ONLY = False
+
 if SECRET_KEY == "development-only-insecure-key":
     raise RuntimeError("DJANGO_SECRET_KEY must be set in production")
 if len(SECRET_KEY) < 50:

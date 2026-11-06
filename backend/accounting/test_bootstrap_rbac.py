@@ -129,13 +129,16 @@ class UserSpecificAuthorizationRowsBlockTests(TestCase):
             bootstrap()
 
     def test_security_reference_exemption_is_model_level_per_contract(self):
-        """§24.5 approves a MODEL-level exemption for exactly
-        security.Role / security.Permission / security.RolePermission (the
-        same granularity as the existing ContentType/auth.Permission
-        exemptions). Additional rows in those three models are therefore
-        reference-data rows and do not block bootstrap; user-specific
-        authorization rows always do (tests above). Stricter canonical-row
-        counting would be an invention beyond the approved contract."""
+        """§24.5 approves a MODEL-level exemption for the migration-seeded
+        security reference models — security.Role / security.Permission /
+        security.RolePermission, plus security.GMRoleSlot from W0-2B/R2
+        (its singleton row is written by migration security.0005 on every
+        migrated database; same reference-data category, owner decision:
+        the slot must exist before first-GM provisioning). Additional rows
+        in those models are therefore reference-data rows and do not block
+        bootstrap; user-specific authorization rows always do (tests
+        above). Stricter canonical-row counting would be an invention
+        beyond the approved contract."""
         Role.objects.create(code="SHIFT_SUPERVISOR", name="Shift Supervisor")
 
         output = bootstrap()
