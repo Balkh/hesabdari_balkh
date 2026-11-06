@@ -140,6 +140,7 @@ class PublicInfrastructureEndpointsTests(TestCase):
 
 
 PRODUCTION_ENV = {
+    "ERP_RBAC_ENFORCEMENT": "true",
     # Deterministic, test-only value. The Batch 2 guard requires >= 50
     # characters for production secrets, so this positive-path fixture
     # must stay above that minimum (never a real credential).
