@@ -81,22 +81,35 @@ Collection request-body identifiers such as landed-cost payee/currency IDs remai
 - Those counts are historical evidence for SHA `28395cd4` only. They do
   **not** verify the corrective changes described in this addendum.
 
-### Corrective candidate evidence rule
+### Latest exact-head corrective verification — CI #578
 
-The corrective branch changes add regression tests for expired/future GM
-slot links, preservation of an expired legacy assignment without linking it,
-the nested-transaction savepoint boundary, and unclassified non-DRF callbacks
-under `api/v1/`. They route migration data operations through the active
-migration connection alias and base GM slot migration readiness on currently
-ACTIVE assignments. The PR's Checks tab and description
-must identify a completed run whose `head_sha` exactly equals the latest
-branch head. Never infer success from CI #531 or another earlier SHA.
-Backend, real PostgreSQL, Frontend, and Tauri jobs must all finish
-successfully; report exact test/skip totals from those logs.
+**All four GitHub Actions jobs succeeded** on the exact PR head:
+`a680abd4d3b5eb3134704f30b1de0f931f82192c`.
+
+Run: https://github.com/Balkh/hesabdari_balkh/actions/runs/42265296131
+
+- Backend Django test runner: **374 tests**, 2 skipped; Django system
+  checks reported no issues.
+- Backend pytest: **1285 passed, 10 skipped**.
+- PostgreSQL 17.11 Django test runner: **374 tests**, 2 skipped; Django
+  system checks reported no issues.
+- PostgreSQL pytest: **1295 passed**, no skips reported; the job ended
+  with `POSTGRESQL VERIFICATION: PASS`.
+- Frontend: **4 passed, 0 failed**; production build used Vite **8.3.6**;
+  npm audit reported **0 vulnerabilities**.
+- Tauri job succeeded, including frontend build and `cargo check`.
+  This is compile-level evidence only, not a packaged desktop runtime test.
+
+The new production startup guard is covered by direct environment-value
+tests and actual production-settings import/WSGI/ASGI regression tests.
+The positive production fixtures now explicitly set
+`ERP_RBAC_ENFORCEMENT=true`; negative fixtures still verify failure for
+missing/false/malformed flags and preserve the earlier secret/host/PostgreSQL
+negative-path checks.
 
 No local container test was run in this session because the repository could
-not be cloned from the container network. Automated test evidence is from
-GitHub Actions logs associated with the stated exact commit SHAs.
+not be cloned from the container network. Automated test evidence above is
+from GitHub Actions logs associated with this exact commit SHA.
 
 ## 7. Remaining blockers — do not merge or enable Production
 
@@ -105,7 +118,7 @@ GitHub Actions logs associated with the stated exact commit SHAs.
 - **Account lockout is not effective yet.** `account_locked()` remains a no-op until W0-2D. The approved Admin contract also requires locked GM denial, so the final Admin gate depends on that capability or a separately reviewed equivalent.
 - **Denial-audit flood policy is unresolved.** DRF throttles execute after permission checks and do not bound denied-request audit writes. No rate/threshold has been invented. `PERMISSION_DENIED` persistence, per-request deduplication, migration, and failure tests remain unimplemented until the owner-approved rate/control is defined.
 - **Production startup now fails closed unless RBAC is explicitly enabled.** `config.settings.production` requires the environment variable `ERP_RBAC_ENFORCEMENT=true` (case-insensitive exact Boolean text); missing, malformed, or false values raise `RuntimeError` during settings import, before database configuration. `ERP_RBAC_ALLOW_AUTHENTICATED_ONLY` remains hard-set to False in Production. The base Development/Test profile remains enforcement-off by default. This guard only enforces the R2 RBAC switch; it does NOT complete MFA, lockout, denial audit, GM provisioning, or final Admin requirements. Do not deploy this candidate while those release blockers remain.
-- **Corrective exact-head CI is required.** CI #531 proves only the pre-correction SHA documented above; the final corrective PR head must have its own completed dual-database / frontend / Tauri run.
+- **Latest exact-head CI evidence is available.** CI #578 completed successfully on `a680abd4d3b5eb3134704f30b1de0f931f82192c` with Backend, PostgreSQL 17.11, Frontend, and Tauri jobs all successful (details in §6). Any subsequent branch-head change requires a new exact-head run.
 - **Repository protection remains owner-side.** GitHub reports `main.protected=false`; configure required checks and branch protection outside this implementation PR.
 - **Credential rotation remains owner-side.** Any previously exposed GitHub tokens must be revoked by the owner. Do not reproduce token values in code, logs, reports, or chat; revocation is not verified until owner confirmation.
 
@@ -114,12 +127,12 @@ GitHub Actions logs associated with the stated exact commit SHAs.
 | Batch | State |
 |---|---|
 | R2.0 documentation / baseline reconciliation | Implemented |
-| R2.1 operation registry, immutable metadata, typed target resolver, shared policy path, system drift check | Implemented; corrective E003 coverage added; exact-head CI required |
-| R2.2 interim Django Admin deny-all route guard | Implemented; all `/admin` paths return 404 pending the complete GM+MFA+lockout gate |
-| R2.3 wiring the 12 current API operations and GET/HEAD behavior | Implemented; exact-head CI evidence recorded above |
+| R2.1 operation registry, immutable metadata, typed target resolver, shared policy path, system drift check | Implemented; corrective E003 coverage and exact-head CI #578 successful |
+| R2.2 interim Django Admin deny-all route guard | Implemented; regression tests and exact-head CI #578 successful; all `/admin` paths remain 404 pending the complete GM+MFA+lockout gate |
+| R2.3 wiring the 12 current API operations and GET/HEAD behavior | Implemented; exact-head CI #578 successful |
 | R2.4 authenticated denial AuditEvent and bounded audit flood policy | Blocked pending owner-defined control threshold |
-| R2.5 fail-fast Production startup guard requiring explicit `ERP_RBAC_ENFORCEMENT=true` | Implemented; settings import refuses missing/false/malformed values; exact-head CI evidence required |
-| R2.6 final dual-database verification, exact PR-head CI, user review and approval | In progress; corrective exact-head CI and user review remain; no merge/freeze |
+| R2.5 fail-fast Production startup guard requiring explicit `ERP_RBAC_ENFORCEMENT=true` | Implemented; settings/WSGI/ASGI tests and exact-head CI #578 successful |
+| R2.6 final dual-database verification, exact PR-head CI, user review and approval | Exact-head CI #578 successful; owner review/approval remains; no merge/freeze |
 
 Do not claim PASS, VERIFIED, COMPLETE, GREEN, or FROZEN merely because code changes or a CI run exist. Report exact branch, commit SHA, test command/output, CI run, database version, skips, and outstanding caveats.
 
@@ -127,4 +140,4 @@ Do not claim PASS, VERIFIED, COMPLETE, GREEN, or FROZEN merely because code chan
 
 R2 does not change accounting posting, immutable posted records, reversal-only history, inventory movement/costing, fiscal-period lifecycle services, landed-cost posting/reversal, idempotency, or any other business rule. Authorization wraps the existing API/services; it does not replace domain validation.
 
-**Current status:** API authorization implementation is on Draft PR #57. The latest candidate requires exact-head CI completion and user review. No merge, production enablement, or freeze is authorized or implied.
+**Current status:** API authorization and the corrective production-startup guard are on Draft PR #57; exact-head CI #578 succeeded. Owner review and explicit approval remain required. No merge, Production deployment, or freeze is authorized or implied.
