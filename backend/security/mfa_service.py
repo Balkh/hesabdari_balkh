@@ -253,12 +253,14 @@ def consume_recovery_code(user, code: str, *, at=None) -> bool:
 
 
 def rotate_recovery_codes(user, *, password, totp_code=None, recovery_code=None, provider=None, at=None):
-    """Replace every recovery code after password-authenticated API reauthentication."""
+    """Replace recovery codes after password plus TOTP or one recovery code."""
     now = at or timezone.now()
     if bool(totp_code) == bool(recovery_code):
         raise MFAInvalidCode("exactly one MFA factor is required")
     with transaction.atomic():
-        type(user)._default_manager.select_for_update().get(pk=user.pk)
+        locked_user = type(user)._default_manager.select_for_update().get(pk=user.pk)
+        if not isinstance(password, str) or not locked_user.check_password(password):
+            raise MFAInvalidCode("MFA reauthentication failed")
         device = SecurityMFADevice.objects.select_for_update().filter(
             user=locked_user, status=MFADeviceStatus.ACTIVE
         ).order_by("-confirmed_at", "-pk").first()
@@ -266,10 +268,10 @@ def rotate_recovery_codes(user, *, password, totp_code=None, recovery_code=None,
             raise MFAEnrollmentRequired("no active MFA device exists")
         if totp_code:
             verified = provider is not None and verify_user_totp(
-                user, totp_code, provider=provider, at=now
+                locked_user, totp_code, provider=provider, at=now
             )
         else:
-            verified = consume_recovery_code(user, recovery_code, at=now)
+            verified = consume_recovery_code(locked_user, recovery_code, at=now)
         if not verified:
             raise MFAInvalidCode("MFA reauthentication failed")
         SecurityRecoveryCode.objects.filter(
@@ -284,7 +286,7 @@ def rotate_recovery_codes(user, *, password, totp_code=None, recovery_code=None,
             user=locked_user,
             action=AuditAction.UPDATE,
             entity="MFA_RECOVERY_CODES",
-            entity_id=str(user.pk),
+            entity_id=str(locked_user.pk),
             new_state={"active_code_count": 10},
         )
     return codes
