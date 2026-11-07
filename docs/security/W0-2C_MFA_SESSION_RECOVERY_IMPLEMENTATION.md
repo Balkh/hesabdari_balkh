@@ -96,3 +96,24 @@ Windows 10/11:
 
 ## 10. Delivery gates
 Work in small commits on this feature branch only. Each batch must include tests and exact commit CI evidence. Keep PR Draft until all W0-2C acceptance criteria pass. Do not merge, enable Production, un-draft, or freeze without explicit owner approval. A green CI job is not sufficient evidence for Windows key custody or packaged desktop behavior.
+
+
+## 11. Implementation progress (branch evidence; not release acceptance)
+
+Implemented in the current W0-2C branch:
+- `security.crypto`: AES-256-GCM envelope primitive; 12-byte nonce; version/key-id metadata; AAD binds purpose and user identity; missing/invalid key and authentication-tag failures deny closed. The provider is injectable only; no Windows provider has been selected.
+- `security.mfa`: CSPRNG Base32 TOTP secret generation; RFC 6238 SHA-1 profile; six-digit/30-second TOTP; ±1-step validation; matched counter helper; ten generated recovery codes and Django salted password hashes.
+- `security.mfa_models` plus migrations 0006/0007: encrypted MFA device metadata, one-way recovery-code rows, server-side session registry, TOTP replay counter and per-device failed-attempt lock state.
+- `security.mfa_service`: pending enrollment, encrypted secret persistence, confirmation, TOTP replay rejection, five-failure/five-minute enrollment throttle, and conditional one-time recovery-code consumption. Key provider must be supplied by the caller.
+
+Not yet implemented:
+- No OS-backed Windows key provider; services cannot be enabled in production until one is proven.
+- No HTTP/API enrollment or login integration; no GM/employee MFA policy enforcement has been wired into AuthContext or operation resolution.
+- No authenticated TOTP step-up flow, disable/rotation lifecycle, or recovery-code rotation.
+- No session creation/revocation/expiry enforcement; current session model is a registry schema only.
+- No local emergency owner-key utility or bootstrap token workflow.
+- No Windows packaged Tauri proof.
+
+Verification note:
+- Earlier exact-head CI exposed Django's 30-character index-name limit; the two names were shortened.
+- Subsequent runs before migration 0007 were expected to fail the repository's makemigrations --check because the model fields had been added before their migration. Verify the newest exact head after migration 0007 and service tests land; do not infer success from intermediate runs.
