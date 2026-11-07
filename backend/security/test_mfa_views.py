@@ -184,6 +184,24 @@ class EmployeeMFAApiTests(TestCase):
             MFADeviceStatus.ACTIVE,
         )
 
+    def test_gm_cannot_use_employee_recovery_rotation_route(self):
+        role, _ = Role.objects.get_or_create(
+            code="GM", defaults={"name": "General Manager", "is_active": True}
+        )
+        assignment = UserRoleAssignment.objects.create(user=self.user, role=role)
+        slot = GMRoleSlot.objects.get(code="GM")
+        slot.assignment = assignment
+        slot.save(update_fields=["assignment", "updated_at"])
+        response = self.client.post(
+            "/api/v1/security/mfa/recovery/rotate/",
+            {
+                "password": "Strong-test-password-123",
+                "totp_code": "000000",
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, 403)
+
     def test_gm_cannot_use_employee_self_enrollment_route(self):
         role, _ = Role.objects.get_or_create(
             code="GM", defaults={"name": "General Manager", "is_active": True}

@@ -6,8 +6,8 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 
 from security.gm_slot import GM_SLOT_CODE
-from security.mfa import totp_code
-from security.mfa_models import MFADeviceStatus, SecurityLoginSession
+from security.mfa import generate_recovery_codes, hash_recovery_code, totp_code
+from security.mfa_models import MFADeviceStatus, SecurityLoginSession, SecurityMFADevice, SecurityRecoveryCode
 from security.mfa_service import begin_mfa_enrollment, confirm_mfa_enrollment
 from security.models import AuditAction, AuditEvent, GMRoleSlot, Role, UserRoleAssignment
 from security.session_service import (
@@ -177,3 +177,40 @@ class SecurityLoginFlowTests(TestCase):
             HTTP_X_CSRFTOKEN=token,
         )
         self.assertEqual(allowed.status_code, 200, allowed.data)
+
+
+    def test_gm_recovery_code_login_is_blocked_and_code_remains_unused(self):
+        role, _ = Role.objects.get_or_create(
+            code="GM", defaults={"name": "General Manager", "is_active": True}
+        )
+        assignment = UserRoleAssignment.objects.create(user=self.user, role=role)
+        slot = GMRoleSlot.objects.get(code="GM")
+        slot.assignment = assignment
+        slot.save(update_fields=["assignment", "updated_at"])
+        SecurityMFADevice.objects.create(
+            user=self.user,
+            status=MFADeviceStatus.ACTIVE,
+            secret_format_version=1,
+            secret_key_id="test-login-key",
+            secret_nonce=b"N" * 12,
+            secret_ciphertext=b"C" * 16,
+            confirmed_at=timezone.now(),
+        )
+        raw_code = generate_recovery_codes()[0]
+        recovery = SecurityRecoveryCode.objects.create(
+            user=self.user, code_hash=hash_recovery_code(raw_code)
+        )
+        response = self.client.post(
+            "/api/v1/security/auth/login/",
+            {
+                "username": self.user.username,
+                "password": "Strong-test-password-123",
+                "recovery_code": raw_code,
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.data["error"], "gm_recovery_local_only")
+        recovery.refresh_from_db()
+        self.assertIsNone(recovery.used_at)
+        self.assertEqual(SecurityLoginSession.objects.filter(user=self.user).count(), 0)
