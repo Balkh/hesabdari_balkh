@@ -56,6 +56,32 @@ def totp_code(secret: str, *, timestamp: float | None = None) -> str:
     return str(binary % (10 ** TOTP_DIGITS)).zfill(TOTP_DIGITS)
 
 
+
+def matching_totp_counter(
+    secret: str,
+    code: str,
+    *,
+    timestamp: float | None = None,
+    valid_window: int = TOTP_VALID_WINDOW,
+) -> int | None:
+    """Return the matched moving factor, or None; supports replay prevention."""
+    if not isinstance(code, str) or not re.fullmatch(r"\\d{6}", code):
+        return None
+    if not isinstance(valid_window, int) or valid_window < 0 or valid_window > 1:
+        raise ValueError("only the approved TOTP verification window is supported")
+    instant = time.time() if timestamp is None else float(timestamp)
+    current_counter = int(instant // TOTP_PERIOD_SECONDS)
+    matched = []
+    for offset in range(-valid_window, valid_window + 1):
+        counter = current_counter + offset
+        if counter < 0:
+            continue
+        candidate = totp_code(secret, timestamp=counter * TOTP_PERIOD_SECONDS)
+        if hmac.compare_digest(candidate, code):
+            matched.append(counter)
+    return max(matched) if matched else None
+
+
 def verify_totp(
     secret: str,
     code: str,
