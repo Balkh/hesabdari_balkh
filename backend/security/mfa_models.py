@@ -159,3 +159,41 @@ class SecurityMFARequirement(models.Model):
         indexes = [
             models.Index(fields=["is_required", "updated_at"], name="sec_mfa_req_active_idx"),
         ]
+
+
+class SecurityBootstrapToken(models.Model):
+    """Hash-only, one-time token for the first local GM bootstrap only."""
+
+    INITIAL_GM = "INITIAL_GM"
+    PURPOSE_CHOICES = ((INITIAL_GM, "Initial GM bootstrap"),)
+
+    purpose = models.CharField(max_length=24, choices=PURPOSE_CHOICES, default=INITIAL_GM)
+    token_hash = models.CharField(max_length=64, unique=True)
+    issued_at = models.DateTimeField()
+    expires_at = models.DateTimeField()
+    consumed_at = models.DateTimeField(null=True, blank=True)
+    revoked_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        constraints = [
+            models.CheckConstraint(
+                condition=Q(expires_at__gt=F("issued_at")),
+                name="security_bootstrap_expiry_after_issue",
+            ),
+            models.CheckConstraint(
+                condition=Q(consumed_at__isnull=True) | Q(revoked_at__isnull=True),
+                name="security_bootstrap_one_terminal_state",
+            ),
+            models.UniqueConstraint(
+                fields=["purpose"],
+                condition=Q(consumed_at__isnull=True, revoked_at__isnull=True),
+                name="security_bootstrap_one_live_token",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["purpose", "expires_at"], name="sec_boot_purpose_exp_idx"),
+        ]
+
+    def __str__(self):
+        state = "consumed" if self.consumed_at else "revoked" if self.revoked_at else "live"
+        return f"{self.purpose}:{state}"
