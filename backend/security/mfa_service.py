@@ -252,7 +252,7 @@ def consume_recovery_code(user, code: str, *, at=None) -> bool:
     return False
 
 
-def rotate_recovery_codes(user, *, totp_code=None, recovery_code=None, provider=None, at=None):
+def rotate_recovery_codes(user, *, password, totp_code=None, recovery_code=None, provider=None, at=None):
     """Replace every recovery code after password-authenticated API reauthentication."""
     now = at or timezone.now()
     if bool(totp_code) == bool(recovery_code):
@@ -273,15 +273,15 @@ def rotate_recovery_codes(user, *, totp_code=None, recovery_code=None, provider=
         if not verified:
             raise MFAInvalidCode("MFA reauthentication failed")
         SecurityRecoveryCode.objects.filter(
-            user=user, used_at__isnull=True
+            user=locked_user, used_at__isnull=True
         ).update(used_at=now)
         codes = generate_recovery_codes()
         SecurityRecoveryCode.objects.bulk_create([
-            SecurityRecoveryCode(user=user, code_hash=hash_recovery_code(raw))
+            SecurityRecoveryCode(user=locked_user, code_hash=hash_recovery_code(raw))
             for raw in codes
         ])
         AuditEvent.objects.create(
-            user=user,
+            user=locked_user,
             action=AuditAction.UPDATE,
             entity="MFA_RECOVERY_CODES",
             entity_id=str(user.pk),
@@ -316,16 +316,16 @@ def disable_employee_mfa(
         if SecurityMFARequirement.objects.filter(user=locked_user, is_required=True).exists():
             raise MFAEnrollmentPolicyDenied("employee MFA is required by GM policy")
         device = SecurityMFADevice.objects.select_for_update().filter(
-            user=user, status=MFADeviceStatus.ACTIVE
+            user=locked_user, status=MFADeviceStatus.ACTIVE
         ).order_by("-confirmed_at", "-pk").first()
         if device is None:
             raise MFAEnrollmentRequired("no active MFA device exists")
         if totp_code:
             verified = provider is not None and verify_user_totp(
-                user, totp_code, provider=provider, at=now
+                locked_user, totp_code, provider=provider, at=now
             )
         else:
-            verified = consume_recovery_code(user, recovery_code, at=now)
+            verified = consume_recovery_code(locked_user, recovery_code, at=now)
         if not verified:
             raise MFAInvalidCode("MFA reauthentication failed")
 
@@ -333,9 +333,9 @@ def disable_employee_mfa(
         device.disabled_at = now
         device.save(update_fields=["status", "disabled_at"])
         SecurityRecoveryCode.objects.filter(
-            user=user, used_at__isnull=True
+            user=locked_user, used_at__isnull=True
         ).update(used_at=now)
-        revoked = revoke_all_login_sessions(user, reason="MFA_DISABLED", at=now)
+        revoked = revoke_all_login_sessions(locked_user, reason="MFA_DISABLED", at=now)
         AuditEvent.objects.create(
             user=locked_user,
             action=AuditAction.UPDATE,

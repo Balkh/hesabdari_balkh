@@ -168,8 +168,8 @@ def mfa_enrollment_confirm(request):
 def recovery_codes_rotate(request):
     """Rotate recovery codes after password plus TOTP or a single recovery code."""
     password = request.data.get("password")
-    if not isinstance(password, str) or not request.user.check_password(password):
-        return Response({"error": "invalid_credentials"}, status=status.HTTP_401_UNAUTHORIZED)
+    if not isinstance(password, str):
+        return Response({"error": "invalid_credentials"}, status=status.HTTP_400_BAD_REQUEST)
     provider = _key_provider()
     if request.data.get("totp_code") and provider is None:
         return Response({"error": "mfa_key_provider_unavailable"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
@@ -181,6 +181,7 @@ def recovery_codes_rotate(request):
         with transaction.atomic():
             codes = rotate_recovery_codes(
                 request.user,
+                password=password,
                 totp_code=request.data.get("totp_code"),
                 recovery_code=request.data.get("recovery_code"),
                 provider=provider,
