@@ -70,7 +70,7 @@ class Migration(migrations.Migration):
                     models.CheckConstraint(condition=Q(("absolute_expires_at__gt", F("created_at"))), name="security_session_absolute_after_created"),
                     models.CheckConstraint(condition=Q(("idle_expires_at__lte", F("absolute_expires_at"))), name="security_session_idle_before_absolute"),
                 ],
-                "indexes": [models.Index(fields=["user", "revoked_at", "idle_expires_at"], name="security_session_user_active_idx")],
+                "indexes": [models.Index(fields=["user", "revoked_at", "idle_expires_at"], name="sec_sess_usr_active_idx")],
             },
         ),
     ]
