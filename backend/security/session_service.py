@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import time
 from datetime import timedelta
 
 from django.db import DatabaseError, IntegrityError, transaction
@@ -25,7 +26,7 @@ def session_key_digest(session_key: str) -> str:
     return hashlib.sha256(session_key.encode("utf-8")).hexdigest()
 
 
-def register_login_session(user, session_key: str, *, mfa_verified_at=None, at=None):
+def _register_login_session_once(user, session_key: str, *, mfa_verified_at=None, at=None):
     """Register one authenticated Django session in one of two DB-enforced slots."""
     if user is None or getattr(user, "pk", None) is None or not getattr(user, "is_authenticated", False):
         raise ValueError("a persisted authenticated user is required")
@@ -92,10 +93,35 @@ def register_login_session(user, session_key: str, *, mfa_verified_at=None, at=N
             raise SessionAdmissionError("session has expired")
     except SessionAdmissionError:
         raise
-    except DatabaseError:
-        # A lock/busy/connection error must deny admission, never bypass the
-        # quota. The caller may safely ask the user to retry.
-        raise SessionAdmissionError("session registry is unavailable") from None
+
+
+def register_login_session(user, session_key: str, *, mfa_verified_at=None, at=None):
+    """Register with bounded SQLite lock retry; never bypass the DB slot cap."""
+    from django.db import connections
+
+    connection = connections["default"]
+    max_attempts = 5 if connection.vendor == "sqlite" else 1
+    for attempt in range(max_attempts):
+        try:
+            return _register_login_session_once(
+                user,
+                session_key,
+                mfa_verified_at=mfa_verified_at,
+                at=at,
+            )
+        except DatabaseError as exc:
+            message = str(exc).lower()
+            retryable_sqlite_lock = (
+                connection.vendor == "sqlite"
+                and ("locked" in message or "busy" in message)
+            )
+            if retryable_sqlite_lock and attempt + 1 < max_attempts:
+                # The failed atomic block has rolled back before this bounded
+                # backoff. A new transaction re-reads the occupied slots.
+                time.sleep(0.025 * (attempt + 1))
+                continue
+            raise SessionAdmissionError("session registry is unavailable") from None
+    raise SessionAdmissionError("session registry is unavailable")
 
 
 def touch_login_session(user, session_key: str, *, at=None):

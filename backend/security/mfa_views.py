@@ -1,4 +1,6 @@
 """GM-only employee MFA policy API."""
+import logging
+
 from django.contrib.auth import get_user_model, logout as django_logout
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.shortcuts import get_object_or_404
@@ -22,6 +24,9 @@ from security.mfa_service import (
     rotate_recovery_codes,
 )
 from security.operation_registry import OBJECT, TARGET_REQUEST_USER, OperationSpec, erp_operations
+logger = logging.getLogger("security.mfa_views")
+
+
 from security.permissions import (
     HasErpOperation,
     IsAuthenticatedForERP,
@@ -106,6 +111,7 @@ def mfa_enrollment_start(request):
     except MFAAlreadyEnrolled:
         return Response({"error": "mfa_already_enrolled"}, status=status.HTTP_409_CONFLICT)
     except Exception:
+        logger.exception("employee MFA enrollment start failed")
         return Response({"error": "mfa_enrollment_unavailable"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
     return Response(material, status=status.HTTP_201_CREATED)
 
@@ -148,6 +154,7 @@ def mfa_enrollment_confirm(request):
     except MFAInvalidCode:
         return Response({"error": "invalid_mfa_code"}, status=status.HTTP_400_BAD_REQUEST)
     except Exception:
+        logger.exception("employee MFA enrollment confirmation failed")
         return Response({"error": "mfa_enrollment_unavailable"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
     return Response({"status": "enrolled", "recovery_codes": codes})
 
@@ -193,6 +200,7 @@ def recovery_codes_rotate(request):
     except MFAInvalidCode:
         return Response({"error": "invalid_mfa_code"}, status=status.HTTP_401_UNAUTHORIZED)
     except Exception:
+        logger.exception("employee recovery-code rotation failed")
         return Response({"error": "recovery_rotation_unavailable"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
     return Response({"recovery_codes": codes})
 
@@ -230,6 +238,7 @@ def mfa_disable(request):
     except MFAInvalidCode:
         return Response({"error": "invalid_credentials"}, status=status.HTTP_401_UNAUTHORIZED)
     except Exception:
+        logger.exception("employee MFA disable failed")
         return Response({"error": "mfa_disable_unavailable"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
     django_logout(request._request)
     return Response({"status": "mfa_disabled", "sessions_revoked": True})
