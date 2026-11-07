@@ -36,6 +36,9 @@ class SecurityMFADevice(models.Model):
     confirmed_at = models.DateTimeField(null=True, blank=True)
     disabled_at = models.DateTimeField(null=True, blank=True)
     last_used_at = models.DateTimeField(null=True, blank=True)
+    last_accepted_counter = models.BigIntegerField(null=True, blank=True)
+    failed_attempts = models.PositiveSmallIntegerField(default=0)
+    locked_until = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         constraints = [
