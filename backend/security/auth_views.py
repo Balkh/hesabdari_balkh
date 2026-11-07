@@ -31,7 +31,12 @@ from security.mfa_service import (
     verify_user_totp,
 )
 from security.models import AuditAction, AuditEvent
-from security.permissions import IsAuthenticatedForERP
+from security.operation_registry import (
+    OperationSpec,
+    TARGET_REQUEST_USER,
+    erp_operations,
+)
+from security.permissions import HasErpOperation, IsAuthenticatedForERP
 from security.session_service import (
     SessionAdmissionError,
     register_login_session,
@@ -166,9 +171,18 @@ def login_view(request):
 
 
 @csrf_protect
+@erp_operations(
+    POST=OperationSpec(
+        operation_id="security.auth.logout_own",
+        permission_key="security.account.view_own",
+        binding_kind="OBJECT",
+        target_kind="SELF_USER",
+        target_source=TARGET_REQUEST_USER,
+    )
+)
 @api_view(["POST"])
 @authentication_classes([SessionAuthentication])
-@permission_classes([IsAuthenticatedForERP])
+@permission_classes([IsAuthenticatedForERP, HasErpOperation])
 def logout_view(request):
     """Revoke the registered session before clearing Django's session cookie."""
     user = request.user
