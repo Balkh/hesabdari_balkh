@@ -118,6 +118,6 @@ class SecurityLoginSession(models.Model):
         indexes = [
             models.Index(
                 fields=["user", "revoked_at", "idle_expires_at"],
-                name="security_session_user_active_idx",
+                name="sec_sess_usr_active_idx",
             ),
         ]
