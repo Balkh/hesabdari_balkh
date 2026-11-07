@@ -41,7 +41,7 @@ class InitialGMBootstrapCommandTests(TestCase):
         output = StringIO()
         with patch("security.management.commands.issue_gm_bootstrap_token._require_tty"):
             call_command("issue_gm_bootstrap_token", stdout=output)
-        marker = "ONE-TIME INITIAL GM BOOTSTRAP TOKEN (valid for 10 minutes):\\n"
+        marker = "ONE-TIME INITIAL GM BOOTSTRAP TOKEN (valid for 10 minutes):\n"
         self.assertIn(marker, output.getvalue())
         return output.getvalue().split(marker, 1)[1].splitlines()[0].strip()
 
