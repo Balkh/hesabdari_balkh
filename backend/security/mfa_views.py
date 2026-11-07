@@ -1,5 +1,5 @@
 """GM-only employee MFA policy API."""
-from django.contrib.auth import get_user_model
+from django.contrib.auth import get_user_model, logout as django_logout
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.shortcuts import get_object_or_404
 from django.views.decorators.csrf import csrf_protect
@@ -9,8 +9,25 @@ from rest_framework.decorators import api_view, authentication_classes, permissi
 from rest_framework.response import Response
 
 from security.mfa_policy import set_employee_mfa_requirement
+from security.mfa_models import SecurityLoginSession
+from security.mfa_service import (
+    MFAAlreadyEnrolled,
+    MFAEnrollmentLocked,
+    MFAEnrollmentPolicyDenied,
+    MFAEnrollmentRequired,
+    MFAInvalidCode,
+    begin_mfa_enrollment,
+    confirm_mfa_enrollment,
+    disable_employee_mfa,
+    rotate_recovery_codes,
+)
 from security.operation_registry import OperationSpec, erp_operations
-from security.permissions import HasErpOperation, IsAuthenticatedForERP, IsGMWithVerifiedMFA
+from security.permissions import (
+    HasErpOperation,
+    IsAuthenticatedForERP,
+    IsEmployeeMFAAccount,
+    IsGMWithVerifiedMFA,
+)
 
 
 @csrf_protect
@@ -44,3 +61,174 @@ def set_employee_mfa_policy(request, user_id):
         "mfa_required": policy.is_required,
         "updated_at": policy.updated_at.isoformat(),
     })
+
+
+def _key_provider():
+    from security.auth_views import _key_provider as get_provider
+    return get_provider()
+
+
+def _mark_session_mfa_verified(request, at):
+    from security.session_service import session_key_digest
+
+    session_key = getattr(request.session, "session_key", None)
+    if not session_key:
+        raise RuntimeError("authenticated session key is missing")
+    changed = SecurityLoginSession.objects.filter(
+        user=request.user,
+        session_key_hash=session_key_digest(session_key),
+        revoked_at__isnull=True,
+    ).update(mfa_verified_at=at)
+    if changed != 1:
+        raise RuntimeError("registered session is unavailable")
+
+
+@csrf_protect
+@erp_operations(
+    POST=OperationSpec(
+        operation_id="security.mfa.enroll.start_own",
+        permission_key="security.mfa.enroll_own",
+        binding_kind=OBJECT,
+        target_kind="SELF_USER",
+        target_source=TARGET_REQUEST_USER,
+    )
+)
+@api_view(["POST"])
+@authentication_classes([SessionAuthentication])
+@permission_classes([IsAuthenticatedForERP, HasErpOperation, IsEmployeeMFAAccount])
+def mfa_enrollment_start(request):
+    """Create a pending encrypted TOTP credential; return enrollment data once."""
+    provider = _key_provider()
+    if provider is None:
+        return Response({"error": "mfa_key_provider_unavailable"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+    try:
+        material = begin_mfa_enrollment(request.user, provider=provider)
+    except MFAAlreadyEnrolled:
+        return Response({"error": "mfa_already_enrolled"}, status=status.HTTP_409_CONFLICT)
+    except Exception:
+        return Response({"error": "mfa_enrollment_unavailable"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+    return Response(material, status=status.HTTP_201_CREATED)
+
+
+@csrf_protect
+@erp_operations(
+    POST=OperationSpec(
+        operation_id="security.mfa.enroll.confirm_own",
+        permission_key="security.mfa.enroll_own",
+        binding_kind=OBJECT,
+        target_kind="SELF_USER",
+        target_source=TARGET_REQUEST_USER,
+    )
+)
+@api_view(["POST"])
+@authentication_classes([SessionAuthentication])
+@permission_classes([IsAuthenticatedForERP, HasErpOperation, IsEmployeeMFAAccount])
+def mfa_enrollment_confirm(request):
+    """Confirm TOTP and return ten one-time recovery codes exactly once."""
+    code = request.data.get("totp_code")
+    if not isinstance(code, str):
+        return Response({"error": "invalid_mfa_code"}, status=status.HTTP_400_BAD_REQUEST)
+    provider = _key_provider()
+    if provider is None:
+        return Response({"error": "mfa_key_provider_unavailable"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+    from django.db import transaction
+    from django.utils import timezone
+
+    now = timezone.now()
+    try:
+        with transaction.atomic():
+            codes = confirm_mfa_enrollment(
+                request.user, code, provider=provider, at=now
+            )
+            _mark_session_mfa_verified(request, now)
+    except MFAEnrollmentRequired:
+        return Response({"error": "mfa_enrollment_not_started"}, status=status.HTTP_409_CONFLICT)
+    except MFAEnrollmentLocked:
+        return Response({"error": "mfa_enrollment_locked"}, status=status.HTTP_429_TOO_MANY_REQUESTS)
+    except MFAInvalidCode:
+        return Response({"error": "invalid_mfa_code"}, status=status.HTTP_400_BAD_REQUEST)
+    except Exception:
+        return Response({"error": "mfa_enrollment_unavailable"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+    return Response({"status": "enrolled", "recovery_codes": codes})
+
+
+@csrf_protect
+@erp_operations(
+    POST=OperationSpec(
+        operation_id="security.mfa.recovery.rotate_own",
+        permission_key="security.mfa.enroll_own",
+        binding_kind=OBJECT,
+        target_kind="SELF_USER",
+        target_source=TARGET_REQUEST_USER,
+    )
+)
+@api_view(["POST"])
+@authentication_classes([SessionAuthentication])
+@permission_classes([IsAuthenticatedForERP, HasErpOperation])
+def recovery_codes_rotate(request):
+    """Rotate recovery codes after password plus TOTP or a single recovery code."""
+    password = request.data.get("password")
+    if not isinstance(password, str) or not request.user.check_password(password):
+        return Response({"error": "invalid_credentials"}, status=status.HTTP_401_UNAUTHORIZED)
+    provider = _key_provider()
+    if request.data.get("totp_code") and provider is None:
+        return Response({"error": "mfa_key_provider_unavailable"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+    from django.db import transaction
+    from django.utils import timezone
+
+    now = timezone.now()
+    try:
+        with transaction.atomic():
+            codes = rotate_recovery_codes(
+                request.user,
+                totp_code=request.data.get("totp_code"),
+                recovery_code=request.data.get("recovery_code"),
+                provider=provider,
+                at=now,
+            )
+            _mark_session_mfa_verified(request, now)
+    except MFAEnrollmentRequired:
+        return Response({"error": "mfa_not_enrolled"}, status=status.HTTP_409_CONFLICT)
+    except MFAInvalidCode:
+        return Response({"error": "invalid_mfa_code"}, status=status.HTTP_401_UNAUTHORIZED)
+    except Exception:
+        return Response({"error": "recovery_rotation_unavailable"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+    return Response({"recovery_codes": codes})
+
+
+@csrf_protect
+@erp_operations(
+    POST=OperationSpec(
+        operation_id="security.mfa.disable_own",
+        permission_key="security.mfa.enroll_own",
+        binding_kind=OBJECT,
+        target_kind="SELF_USER",
+        target_source=TARGET_REQUEST_USER,
+    )
+)
+@api_view(["POST"])
+@authentication_classes([SessionAuthentication])
+@permission_classes([IsAuthenticatedForERP, HasErpOperation, IsEmployeeMFAAccount])
+def mfa_disable(request):
+    """Disable optional employee MFA after password and strong-factor proof."""
+    provider = _key_provider()
+    if request.data.get("totp_code") and provider is None:
+        return Response({"error": "mfa_key_provider_unavailable"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+    try:
+        disable_employee_mfa(
+            request.user,
+            password=request.data.get("password"),
+            totp_code=request.data.get("totp_code"),
+            recovery_code=request.data.get("recovery_code"),
+            provider=provider,
+        )
+    except MFAEnrollmentPolicyDenied:
+        return Response({"error": "mfa_disable_not_permitted"}, status=status.HTTP_403_FORBIDDEN)
+    except MFAEnrollmentRequired:
+        return Response({"error": "mfa_not_enrolled"}, status=status.HTTP_409_CONFLICT)
+    except MFAInvalidCode:
+        return Response({"error": "invalid_credentials"}, status=status.HTTP_401_UNAUTHORIZED)
+    except Exception:
+        return Response({"error": "mfa_disable_unavailable"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+    django_logout(request._request)
+    return Response({"status": "mfa_disabled", "sessions_revoked": True})

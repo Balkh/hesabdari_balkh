@@ -114,3 +114,19 @@ class IsGMWithVerifiedMFA(BasePermission):
             )
         except Exception:
             return False
+
+
+class IsEmployeeMFAAccount(BasePermission):
+    """Self-service enrollment and disable controls are not available to GM."""
+
+    message = "GM MFA setup is reserved for the local emergency workflow."
+
+    def has_permission(self, request, view):
+        user = getattr(request, "user", None)
+        if user is None or not getattr(user, "is_authenticated", False):
+            return False
+        try:
+            from security.mfa_policy import is_active_gm_holder
+            return not is_active_gm_holder(user)
+        except Exception:
+            return False

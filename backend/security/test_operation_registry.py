@@ -90,6 +90,10 @@ class OperationSpecValidationTests(SimpleTestCase):
             "security.me.retrieve",
             "security.auth.logout_own",
             "security.mfa.policy.update_employee",
+            "security.mfa.enroll.start_own",
+            "security.mfa.enroll.confirm_own",
+            "security.mfa.recovery.rotate_own",
+            "security.mfa.disable_own",
             "fiscal.period.collection.list",
             "fiscal.period.collection.create",
             "fiscal.period.object.close",
@@ -103,7 +107,7 @@ class OperationSpecValidationTests(SimpleTestCase):
             "purchases.landedcost.object.reverse",
         }
         self.assertEqual(set(OPERATION_SPECS), expected)
-        self.assertEqual(len(OPERATION_SPECS), 14)
+        self.assertEqual(len(OPERATION_SPECS), 18)
 
     def test_shared_permission_key_can_have_distinct_collection_and_object_operations(self):
         collection = OPERATION_SPECS["purchases.landedcost.collection.list"]
