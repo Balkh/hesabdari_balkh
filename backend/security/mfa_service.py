@@ -103,7 +103,6 @@ def begin_mfa_enrollment(user, *, provider: KeyProvider, issuer: str = "Hesabdar
             secret_nonce=envelope.nonce,
             secret_ciphertext=envelope.ciphertext,
         )
-    account = quote(user.get_username(), safe="")
     label = quote(f"{issuer}:{user.get_username()}", safe="")
     uri = (
         f"otpauth://totp/{label}?secret={secret}&issuer={quote(issuer, safe='')}"
