@@ -5,6 +5,7 @@ import hashlib
 import time
 from datetime import timedelta
 
+from django.contrib.auth import get_user_model
 from django.db import DatabaseError, IntegrityError, transaction
 from django.db.models import Q
 from django.utils import timezone
@@ -38,7 +39,7 @@ def _register_login_session_once(user, session_key: str, *, mfa_verified_at=None
 
     try:
         with transaction.atomic():
-            type(user)._default_manager.select_for_update().get(pk=user.pk)
+            get_user_model()._default_manager.select_for_update().get(pk=user.pk)
             existing = SecurityLoginSession.objects.select_for_update().filter(
                 session_key_hash=digest
             ).first()

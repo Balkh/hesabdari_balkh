@@ -1,6 +1,7 @@
 """GM-controlled employee MFA policy and trusted GM identity predicate."""
 from __future__ import annotations
 
+from django.contrib.auth import get_user_model
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.db import transaction
 from django.utils import timezone
@@ -60,7 +61,7 @@ def set_employee_mfa_requirement(actor, target, *, required: bool, reason: str, 
     ).exists():
         raise ValidationError("employee must complete MFA enrollment before it is required")
 
-    user_model = type(actor)
+    user_model = get_user_model()
     try:
         with transaction.atomic():
             locked_ids = sorted({actor.pk, target.pk})

@@ -9,6 +9,7 @@ from __future__ import annotations
 from datetime import timedelta
 from urllib.parse import quote
 
+from django.contrib.auth import get_user_model
 from django.db import transaction
 from django.utils import timezone
 
@@ -92,7 +93,7 @@ def begin_mfa_enrollment(user, *, provider: KeyProvider, issuer: str = "Hesabdar
     )
     with transaction.atomic():
         # Serialize enrollment against another enrollment/confirmation for this user.
-        type(user)._default_manager.select_for_update().get(pk=user.pk)
+        get_user_model()._default_manager.select_for_update().get(pk=user.pk)
         if SecurityMFADevice.objects.filter(
             user=user, status=MFADeviceStatus.ACTIVE
         ).exists():
@@ -136,7 +137,7 @@ def confirm_mfa_enrollment(
     error = None
     recovery_codes = None
     with transaction.atomic():
-        type(user)._default_manager.select_for_update().get(pk=user.pk)
+        get_user_model()._default_manager.select_for_update().get(pk=user.pk)
         device = (
             SecurityMFADevice.objects.select_for_update()
             .filter(user=user, status=MFADeviceStatus.PENDING)
@@ -198,7 +199,7 @@ def verify_user_totp(user, code: str, *, provider: KeyProvider, at=None) -> bool
     now = at or timezone.now()
     error_or_valid = False
     with transaction.atomic():
-        type(user)._default_manager.select_for_update().get(pk=user.pk)
+        get_user_model()._default_manager.select_for_update().get(pk=user.pk)
         device = (
             SecurityMFADevice.objects.select_for_update()
             .filter(user=user, status=MFADeviceStatus.ACTIVE)
@@ -235,7 +236,7 @@ def consume_recovery_code(user, code: str, *, at=None) -> bool:
         return False
     now = at or timezone.now()
     with transaction.atomic():
-        type(user)._default_manager.select_for_update().get(pk=user.pk)
+        get_user_model()._default_manager.select_for_update().get(pk=user.pk)
         candidates = (
             SecurityRecoveryCode.objects.select_for_update()
             .filter(user=user, used_at__isnull=True)
@@ -258,7 +259,7 @@ def rotate_recovery_codes(user, *, password, totp_code=None, recovery_code=None,
     if bool(totp_code) == bool(recovery_code):
         raise MFAInvalidCode("exactly one MFA factor is required")
     with transaction.atomic():
-        locked_user = type(user)._default_manager.select_for_update().get(pk=user.pk)
+        locked_user = get_user_model()._default_manager.select_for_update().get(pk=user.pk)
         if not isinstance(password, str) or not locked_user.check_password(password):
             raise MFAInvalidCode("MFA reauthentication failed")
         device = SecurityMFADevice.objects.select_for_update().filter(
@@ -310,7 +311,7 @@ def disable_employee_mfa(
         raise MFAInvalidCode("exactly one MFA factor is required")
 
     with transaction.atomic():
-        locked_user = type(user)._default_manager.select_for_update().get(pk=user.pk)
+        locked_user = get_user_model()._default_manager.select_for_update().get(pk=user.pk)
         if not isinstance(password, str) or not locked_user.check_password(password):
             raise MFAInvalidCode("MFA reauthentication failed")
         if is_active_gm_holder(locked_user, at=now):
