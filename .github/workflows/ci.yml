@@ -5,7 +5,7 @@ on:
     branches: [main]
   pull_request:
     # Include the Phase 11 dependency branch so stacked follow-up PRs receive exact-head CI.
-    branches: [main, phase/11-landed-cost-weight-allocation, phase/11-transit-final-unit-cost]
+    branches: [main, phase/11-landed-cost-weight-allocation, phase/11-transit-final-unit-cost, security/w0-2b-r2-enforcement]
 
 jobs:
   backend:
