@@ -404,3 +404,13 @@ class GMRoleSlot(models.Model):
 
     def __str__(self):
         return f"{self.code}:{self.assignment_id or '-'}"
+
+
+# W0-2C durable MFA and server-side session records.
+# Kept in a focused module; importing here registers the models with Django.
+from security.mfa_models import (  # noqa: E402,F401
+    MFADeviceStatus,
+    SecurityLoginSession,
+    SecurityMFADevice,
+    SecurityRecoveryCode,
+)
