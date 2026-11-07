@@ -42,6 +42,8 @@ class EmployeeMFAApiTests(TestCase):
             username="mfa-api-employee",
             password="Strong-test-password-123",
         )
+        accountant = Role.objects.get(code="ACCOUNTANT")
+        UserRoleAssignment.objects.create(user=self.user, role=accountant)
         self.client = APIClient()
         self.assertTrue(self.client.login(
             username=self.user.username, password="Strong-test-password-123"
