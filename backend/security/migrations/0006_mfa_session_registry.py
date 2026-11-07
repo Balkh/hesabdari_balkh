@@ -47,7 +47,7 @@ class Migration(migrations.Migration):
             ],
             options={
                 "constraints": [models.UniqueConstraint(fields=("user", "code_hash"), name="security_recovery_user_hash_unique")],
-                "indexes": [models.Index(fields=["user", "used_at"], name="security_recovery_user_used_idx")],
+                "indexes": [models.Index(fields=["user", "used_at"], name="sec_rec_usr_used_idx")],
             },
         ),
         migrations.CreateModel(
