@@ -228,11 +228,9 @@ class AuthContext:
             # Only the active assignment linked to the singleton GM slot is
             # treated as the GM identity. Staff/superuser flags and unlinked
             # GM assignments cannot activate this requirement.
-            assignment_id = _singleton_gm_assignment_id(user)
-            requires_mfa = bool(
-                assignment_id is not None
-                and _linked_gm_assignment_is_active(user, assignment_id, at)
-            )
+            from security.mfa_policy import user_requires_mfa
+
+            requires_mfa = user_requires_mfa(user, at=at)
 
             if session is not None:
                 raw_id = session.get("_auth_user_id")

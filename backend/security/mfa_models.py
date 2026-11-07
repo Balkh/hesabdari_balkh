@@ -135,3 +135,27 @@ class SecurityLoginSession(models.Model):
                 name="sec_sess_usr_active_idx",
             ),
         ]
+
+
+class SecurityMFARequirement(models.Model):
+    """GM-controlled employee MFA requirement; GM MFA itself is always mandatory."""
+
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name="security_mfa_requirement",
+    )
+    is_required = models.BooleanField(default=False)
+    updated_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name="mfa_requirements_updated",
+    )
+    reason = models.CharField(max_length=500)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["is_required", "updated_at"], name="sec_mfa_req_active_idx"),
+        ]

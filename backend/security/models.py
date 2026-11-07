@@ -413,4 +413,5 @@ from security.mfa_models import (  # noqa: E402,F401
     SecurityLoginSession,
     SecurityMFADevice,
     SecurityRecoveryCode,
+    SecurityMFARequirement,
 )
