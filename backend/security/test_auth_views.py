@@ -151,3 +151,29 @@ class SecurityLoginFlowTests(TestCase):
         record.refresh_from_db()
         self.assertIsNotNone(record.revoked_at)
         self.assertEqual(record.revoke_reason, "LOGOUT")
+
+
+    def test_anonymous_password_login_requires_csrf_cookie_and_header(self):
+        from rest_framework.test import APIClient
+
+        client = APIClient(enforce_csrf_checks=True)
+        payload = {
+            "username": self.user.username,
+            "password": "Strong-test-password-123",
+        }
+        blocked = client.post(
+            "/api/v1/security/auth/login/", payload, format="json"
+        )
+        self.assertEqual(blocked.status_code, 403)
+
+        csrf = client.get("/api/v1/security/csrf/")
+        self.assertEqual(csrf.status_code, 200)
+        self.assertIn("csrftoken", client.cookies)
+        token = client.cookies["csrftoken"].value
+        allowed = client.post(
+            "/api/v1/security/auth/login/",
+            payload,
+            format="json",
+            HTTP_X_CSRFTOKEN=token,
+        )
+        self.assertEqual(allowed.status_code, 200, allowed.data)

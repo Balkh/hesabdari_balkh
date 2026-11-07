@@ -7,10 +7,9 @@ import logging
 from django.conf import settings
 from django.contrib.auth import authenticate, login as django_login, logout as django_logout
 from django.db import DatabaseError, transaction
-from django.http import JsonResponse
 from django.utils import timezone
 from django.utils.module_loading import import_string
-from django.views.decorators.csrf import csrf_protect, ensure_csrf_cookie
+from django.middleware.csrf import get_token
 from rest_framework import status
 from rest_framework.authentication import SessionAuthentication
 from rest_framework.decorators import (
@@ -23,7 +22,6 @@ from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.throttling import AnonRateThrottle
 
-from security.mfa import verify_recovery_code
 from security.mfa_models import MFADeviceStatus, SecurityMFADevice
 from security.mfa_policy import user_requires_mfa
 from security.mfa_service import (
@@ -50,6 +48,14 @@ class LoginRateThrottle(AnonRateThrottle):
     scope = "security_login"
 
 
+class LoginCSRFAuthentication(SessionAuthentication):
+    """Enforce CSRF for anonymous password login despite DRF's csrf_exempt wrapper."""
+
+    def authenticate(self, request):
+        self.enforce_csrf(request)
+        return None
+
+
 def _key_provider():
     provider_path = getattr(settings, "ERP_MFA_KEY_PROVIDER", None)
     if not provider_path:
@@ -62,18 +68,17 @@ def _key_provider():
         return None
 
 
-@ensure_csrf_cookie
 @api_view(["GET"])
 @authentication_classes([])
 @permission_classes([AllowAny])
 def csrf_cookie(request):
-    """Issue the CSRF cookie required by browser-based password login."""
+    """Issue a CSRF cookie required by browser-based password login."""
+    get_token(request._request)
     return Response({"csrf": "cookie-set"})
 
 
-@csrf_protect
 @api_view(["POST"])
-@authentication_classes([])
+@authentication_classes([LoginCSRFAuthentication])
 @permission_classes([AllowAny])
 @throttle_classes([LoginRateThrottle])
 def login_view(request):
@@ -170,7 +175,6 @@ def login_view(request):
     })
 
 
-@csrf_protect
 @erp_operations(
     POST=OperationSpec(
         operation_id="security.auth.logout_own",

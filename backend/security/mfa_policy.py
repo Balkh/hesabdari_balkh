@@ -67,6 +67,10 @@ def set_employee_mfa_requirement(actor, target, *, required: bool, reason: str, 
             list(user_model._default_manager.select_for_update().filter(pk__in=locked_ids).order_by("pk"))
             if not is_active_gm_holder(actor, at=now) or is_active_gm_holder(target, at=now):
                 raise PermissionDenied("GM or employee identity changed during MFA policy update")
+            if required and not SecurityMFADevice.objects.filter(
+                user=target, status=MFADeviceStatus.ACTIVE
+            ).exists():
+                raise ValidationError("employee must complete MFA enrollment before it is required")
             policy, created = SecurityMFARequirement.objects.select_for_update().get_or_create(
                 user=target,
                 defaults={

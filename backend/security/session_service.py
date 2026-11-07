@@ -33,6 +33,7 @@ def register_login_session(user, session_key: str, *, mfa_verified_at=None, at=N
     now = at or timezone.now()
     absolute_expiry = now + SESSION_ABSOLUTE_LIFETIME
     idle_expiry = min(now + SESSION_IDLE_TIMEOUT, absolute_expiry)
+    expired_existing = False
 
     try:
         with transaction.atomic():
@@ -47,44 +48,53 @@ def register_login_session(user, session_key: str, *, mfa_verified_at=None, at=N
                     existing.revoked_at = now
                     existing.revoke_reason = "EXPIRED"
                     existing.save(update_fields=["revoked_at", "revoke_reason"])
-                    raise SessionAdmissionError("session has expired")
-                return existing
+                    expired_existing = True
+                else:
+                    return existing
 
-            SecurityLoginSession.objects.filter(
-                user=user, revoked_at__isnull=True
-            ).filter(
-                Q(idle_expires_at__lte=now) | Q(absolute_expires_at__lte=now)
-            ).update(revoked_at=now, revoke_reason="EXPIRED")
-
-            occupied = set(
+            # Close expired records before choosing one of the two durable slots.
+            # If the submitted key itself was expired, commit its closure first;
+            # deny reuse only after the transaction has committed.
+            if not expired_existing:
                 SecurityLoginSession.objects.filter(
                     user=user, revoked_at__isnull=True
-                ).values_list("slot_number", flat=True)
-            )
-            if len(occupied) >= SESSION_MAX_ACTIVE:
-                raise SessionAdmissionError("maximum active sessions reached")
+                ).filter(
+                    Q(idle_expires_at__lte=now) | Q(absolute_expires_at__lte=now)
+                ).update(revoked_at=now, revoke_reason="EXPIRED")
 
-            for slot_number in (1, 2):
-                if slot_number in occupied:
-                    continue
-                try:
-                    with transaction.atomic():
-                        return SecurityLoginSession.objects.create(
-                            user=user,
-                            session_key_hash=digest,
-                            slot_number=slot_number,
-                            created_at=now,
-                            last_seen_at=now,
-                            idle_expires_at=idle_expiry,
-                            absolute_expires_at=absolute_expiry,
-                            mfa_verified_at=mfa_verified_at,
-                        )
-                except IntegrityError:
-                    continue
-            raise SessionAdmissionError("maximum active sessions reached")
+                occupied = set(
+                    SecurityLoginSession.objects.filter(
+                        user=user, revoked_at__isnull=True
+                    ).values_list("slot_number", flat=True)
+                )
+                if len(occupied) >= SESSION_MAX_ACTIVE:
+                    raise SessionAdmissionError("maximum active sessions reached")
+
+                for slot_number in (1, 2):
+                    if slot_number in occupied:
+                        continue
+                    try:
+                        with transaction.atomic():
+                            return SecurityLoginSession.objects.create(
+                                user=user,
+                                session_key_hash=digest,
+                                slot_number=slot_number,
+                                created_at=now,
+                                last_seen_at=now,
+                                idle_expires_at=idle_expiry,
+                                absolute_expires_at=absolute_expiry,
+                                mfa_verified_at=mfa_verified_at,
+                            )
+                    except IntegrityError:
+                        continue
+                raise SessionAdmissionError("maximum active sessions reached")
+        if expired_existing:
+            raise SessionAdmissionError("session has expired")
     except SessionAdmissionError:
         raise
     except DatabaseError:
+        # A lock/busy/connection error must deny admission, never bypass the
+        # quota. The caller may safely ask the user to retry.
         raise SessionAdmissionError("session registry is unavailable") from None
 
 

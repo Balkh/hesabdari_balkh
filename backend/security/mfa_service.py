@@ -260,7 +260,7 @@ def rotate_recovery_codes(user, *, totp_code=None, recovery_code=None, provider=
     with transaction.atomic():
         type(user)._default_manager.select_for_update().get(pk=user.pk)
         device = SecurityMFADevice.objects.select_for_update().filter(
-            user=user, status=MFADeviceStatus.ACTIVE
+            user=locked_user, status=MFADeviceStatus.ACTIVE
         ).order_by("-confirmed_at", "-pk").first()
         if device is None:
             raise MFAEnrollmentRequired("no active MFA device exists")
@@ -304,18 +304,16 @@ def disable_employee_mfa(
     from security.session_service import revoke_all_login_sessions
 
     now = at or timezone.now()
-    if is_active_gm_holder(user, at=now):
-        raise MFAEnrollmentPolicyDenied("GM MFA requires local emergency recovery")
-    if not isinstance(password, str) or not user.check_password(password):
-        raise MFAInvalidCode("MFA reauthentication failed")
     if bool(totp_code) == bool(recovery_code):
         raise MFAInvalidCode("exactly one MFA factor is required")
 
     with transaction.atomic():
-        type(user)._default_manager.select_for_update().get(pk=user.pk)
-        if is_active_gm_holder(user, at=now):
+        locked_user = type(user)._default_manager.select_for_update().get(pk=user.pk)
+        if not isinstance(password, str) or not locked_user.check_password(password):
+            raise MFAInvalidCode("MFA reauthentication failed")
+        if is_active_gm_holder(locked_user, at=now):
             raise MFAEnrollmentPolicyDenied("GM MFA requires local emergency recovery")
-        if SecurityMFARequirement.objects.filter(user=user, is_required=True).exists():
+        if SecurityMFARequirement.objects.filter(user=locked_user, is_required=True).exists():
             raise MFAEnrollmentPolicyDenied("employee MFA is required by GM policy")
         device = SecurityMFADevice.objects.select_for_update().filter(
             user=user, status=MFADeviceStatus.ACTIVE
@@ -339,7 +337,7 @@ def disable_employee_mfa(
         ).update(used_at=now)
         revoked = revoke_all_login_sessions(user, reason="MFA_DISABLED", at=now)
         AuditEvent.objects.create(
-            user=user,
+            user=locked_user,
             action=AuditAction.UPDATE,
             entity="MFA_DEVICE",
             entity_id=str(device.pk),
