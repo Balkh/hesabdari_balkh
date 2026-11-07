@@ -43,7 +43,7 @@ class InitialGMBootstrapCommandTests(TestCase):
             call_command("issue_gm_bootstrap_token", stdout=output)
         marker = "ONE-TIME INITIAL GM BOOTSTRAP TOKEN (valid for 10 minutes):\\n"
         self.assertIn(marker, output.getvalue())
-        return output.getvalue().split(marker, 1)[1].strip()
+        return output.getvalue().split(marker, 1)[1].splitlines()[0].strip()
 
     def _otp_from_output(self, output, at):
         text = output.getvalue()
