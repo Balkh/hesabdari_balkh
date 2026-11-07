@@ -185,6 +185,7 @@ class AuthContext:
 
     is_basic_only: bool = False
     requires_mfa: bool = False
+    mfa_verified: bool = False
     session_user_id: Optional[int] = None
     session_expiry: Optional[object] = None
 
@@ -201,35 +202,56 @@ class AuthContext:
 
     @classmethod
     def from_request(cls, request) -> "AuthContext":
-        """Build the context from server-side request evidence only.
+        """Derive context only from authenticated server-side evidence.
 
-        Reads DRF's ``successful_authenticator`` (server fact) and Django's
-        server-side session store. Never reads caller-supplied payloads.
+        Django session cookies are insufficient by themselves: a live,
+        user-bound W0-2C registry row is required. BasicAuthentication remains
+        a temporary compatibility path for non-GM operations, but can never
+        satisfy the mandatory GM MFA gate.
         """
         from rest_framework.authentication import BasicAuthentication
 
         user = getattr(request, "user", None)
         session = getattr(request, "session", None)
-
+        authenticated = bool(user is not None and getattr(user, "is_authenticated", False))
+        at = timezone.now()
         is_basic_only = isinstance(
             getattr(request, "successful_authenticator", None), BasicAuthentication
         )
 
+        requires_mfa = False
+        mfa_verified = False
         session_user_id = None
         session_expiry = None
-        if (
-            session is not None
-            and user is not None
-            and getattr(user, "is_authenticated", False)
-        ):
-            raw_id = session.get("_auth_user_id")
-            if raw_id is not None and str(raw_id) == str(user.pk):
-                session_user_id = user.pk
-                session_expiry = session.get_expiry_date()
+
+        if authenticated:
+            # Only the active assignment linked to the singleton GM slot is
+            # treated as the GM identity. Staff/superuser flags and unlinked
+            # GM assignments cannot activate this requirement.
+            assignment_id = _singleton_gm_assignment_id(user)
+            requires_mfa = bool(
+                assignment_id is not None
+                and _linked_gm_assignment_is_active(user, assignment_id, at)
+            )
+
+            if session is not None:
+                raw_id = session.get("_auth_user_id")
+                session_key = getattr(session, "session_key", None)
+                if raw_id is not None and str(raw_id) == str(user.pk) and session_key:
+                    from security.session_service import touch_login_session
+
+                    record = touch_login_session(user, session_key, at=at)
+                    if record is not None:
+                        session_user_id = user.pk
+                        session_expiry = min(
+                            record.idle_expires_at, record.absolute_expires_at
+                        )
+                        mfa_verified = record.mfa_verified_at is not None
 
         return cls(
             is_basic_only=is_basic_only,
-            requires_mfa=False,  # R1: MFA arrives with W0-2C
+            requires_mfa=requires_mfa,
+            mfa_verified=mfa_verified,
             session_user_id=session_user_id,
             session_expiry=session_expiry,
         )
@@ -747,8 +769,8 @@ def _resolve(
         if auth_context is None or not auth_context.is_valid_for(user, at):
             trace.append("3:NO_ACTIVE_SESSION")
             return PermissionDecision(False, DENY_NO_ACTIVE_SESSION, None, tuple(trace))
-        if getattr(auth_context, "is_basic_only", False) and getattr(
-            auth_context, "requires_mfa", False
+        if getattr(auth_context, "requires_mfa", False) and not getattr(
+            auth_context, "mfa_verified", False
         ):
             trace.append("3:MFA_REQUIRED")
             return PermissionDecision(False, DENY_MFA_REQUIRED, None, tuple(trace))

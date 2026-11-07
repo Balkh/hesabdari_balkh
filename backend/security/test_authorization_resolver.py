@@ -606,6 +606,9 @@ class AuthContextFromRequestTests(TestCase):
         )
         self.assertEqual(session.get("_auth_user_id"), str(user.pk))
 
+        from security.session_service import register_login_session
+
+        register_login_session(user, session.session_key)
         request = self._raw_request(user=user, session=session)
         ctx = AuthContext.from_request(request)
         self.assertIsNotNone(ctx.session_user_id)
