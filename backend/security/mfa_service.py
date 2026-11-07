@@ -250,3 +250,100 @@ def consume_recovery_code(user, code: str, *, at=None) -> bool:
                 ).update(used_at=now)
                 return changed == 1
     return False
+
+
+def rotate_recovery_codes(user, *, totp_code=None, recovery_code=None, provider=None, at=None):
+    """Replace every recovery code after password-authenticated API reauthentication."""
+    now = at or timezone.now()
+    if bool(totp_code) == bool(recovery_code):
+        raise MFAInvalidCode("exactly one MFA factor is required")
+    with transaction.atomic():
+        type(user)._default_manager.select_for_update().get(pk=user.pk)
+        device = SecurityMFADevice.objects.select_for_update().filter(
+            user=user, status=MFADeviceStatus.ACTIVE
+        ).order_by("-confirmed_at", "-pk").first()
+        if device is None:
+            raise MFAEnrollmentRequired("no active MFA device exists")
+        if totp_code:
+            verified = provider is not None and verify_user_totp(
+                user, totp_code, provider=provider, at=now
+            )
+        else:
+            verified = consume_recovery_code(user, recovery_code, at=now)
+        if not verified:
+            raise MFAInvalidCode("MFA reauthentication failed")
+        SecurityRecoveryCode.objects.filter(
+            user=user, used_at__isnull=True
+        ).update(used_at=now)
+        codes = generate_recovery_codes()
+        SecurityRecoveryCode.objects.bulk_create([
+            SecurityRecoveryCode(user=user, code_hash=hash_recovery_code(raw))
+            for raw in codes
+        ])
+        AuditEvent.objects.create(
+            user=user,
+            action=AuditAction.UPDATE,
+            entity="MFA_RECOVERY_CODES",
+            entity_id=str(user.pk),
+            new_state={"active_code_count": 10},
+        )
+    return codes
+
+
+def disable_employee_mfa(
+    user, *, password, totp_code=None, recovery_code=None, provider=None, at=None
+):
+    """Disable optional employee MFA after strong reauthentication.
+
+    GM MFA is immutable through ordinary employee routes. A required employee
+    MFA policy cannot be disabled by the employee. Disabling atomically closes
+    the device, retires all recovery codes and revokes every active session.
+    """
+    from security.mfa_policy import is_active_gm_holder
+    from security.mfa_models import SecurityMFARequirement
+    from security.session_service import revoke_all_login_sessions
+
+    now = at or timezone.now()
+    if is_active_gm_holder(user, at=now):
+        raise MFAEnrollmentPolicyDenied("GM MFA requires local emergency recovery")
+    if not isinstance(password, str) or not user.check_password(password):
+        raise MFAInvalidCode("MFA reauthentication failed")
+    if bool(totp_code) == bool(recovery_code):
+        raise MFAInvalidCode("exactly one MFA factor is required")
+
+    with transaction.atomic():
+        type(user)._default_manager.select_for_update().get(pk=user.pk)
+        if is_active_gm_holder(user, at=now):
+            raise MFAEnrollmentPolicyDenied("GM MFA requires local emergency recovery")
+        if SecurityMFARequirement.objects.filter(user=user, is_required=True).exists():
+            raise MFAEnrollmentPolicyDenied("employee MFA is required by GM policy")
+        device = SecurityMFADevice.objects.select_for_update().filter(
+            user=user, status=MFADeviceStatus.ACTIVE
+        ).order_by("-confirmed_at", "-pk").first()
+        if device is None:
+            raise MFAEnrollmentRequired("no active MFA device exists")
+        if totp_code:
+            verified = provider is not None and verify_user_totp(
+                user, totp_code, provider=provider, at=now
+            )
+        else:
+            verified = consume_recovery_code(user, recovery_code, at=now)
+        if not verified:
+            raise MFAInvalidCode("MFA reauthentication failed")
+
+        device.status = MFADeviceStatus.DISABLED
+        device.disabled_at = now
+        device.save(update_fields=["status", "disabled_at"])
+        SecurityRecoveryCode.objects.filter(
+            user=user, used_at__isnull=True
+        ).update(used_at=now)
+        revoked = revoke_all_login_sessions(user, reason="MFA_DISABLED", at=now)
+        AuditEvent.objects.create(
+            user=user,
+            action=AuditAction.UPDATE,
+            entity="MFA_DEVICE",
+            entity_id=str(device.pk),
+            previous_state={"status": MFADeviceStatus.ACTIVE},
+            new_state={"status": MFADeviceStatus.DISABLED, "sessions_revoked": revoked},
+            reason="Employee disabled optional MFA after reauthentication",
+        )
