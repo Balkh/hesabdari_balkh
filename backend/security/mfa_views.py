@@ -171,7 +171,7 @@ def mfa_enrollment_confirm(request):
 )
 @api_view(["POST"])
 @authentication_classes([SessionAuthentication])
-@permission_classes([IsAuthenticatedForERP, HasErpOperation])
+@permission_classes([IsAuthenticatedForERP, HasErpOperation, IsEmployeeMFAAccount])
 def recovery_codes_rotate(request):
     """Rotate recovery codes after password plus TOTP or a single recovery code."""
     password = request.data.get("password")
@@ -195,6 +195,8 @@ def recovery_codes_rotate(request):
                 at=now,
             )
             _mark_session_mfa_verified(request, now)
+    except MFAEnrollmentPolicyDenied:
+        return Response({"error": "gm_recovery_local_only"}, status=status.HTTP_403_FORBIDDEN)
     except MFAEnrollmentRequired:
         return Response({"error": "mfa_not_enrolled"}, status=status.HTTP_409_CONFLICT)
     except MFAInvalidCode:

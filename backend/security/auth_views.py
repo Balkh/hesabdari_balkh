@@ -23,7 +23,7 @@ from rest_framework.response import Response
 from rest_framework.throttling import AnonRateThrottle
 
 from security.mfa_models import MFADeviceStatus, SecurityMFADevice
-from security.mfa_policy import user_requires_mfa
+from security.mfa_policy import is_active_gm_holder, user_requires_mfa
 from security.mfa_service import (
     consume_recovery_code,
     verify_user_totp,
@@ -111,6 +111,8 @@ def login_view(request):
 
         totp_code = request.data.get("totp_code")
         recovery_code = request.data.get("recovery_code")
+        if is_active_gm_holder(user) and recovery_code:
+            return Response({"error": "gm_recovery_local_only"}, status=status.HTTP_403_FORBIDDEN)
         if bool(totp_code) == bool(recovery_code):
             return Response({"error": "mfa_verification_required"}, status=status.HTTP_401_UNAUTHORIZED)
 

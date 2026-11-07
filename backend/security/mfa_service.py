@@ -255,11 +255,17 @@ def consume_recovery_code(user, code: str, *, at=None) -> bool:
 
 def rotate_recovery_codes(user, *, password, totp_code=None, recovery_code=None, provider=None, at=None):
     """Replace recovery codes after password plus TOTP or one recovery code."""
+    from security.mfa_policy import is_active_gm_holder
+
     now = at or timezone.now()
+    if is_active_gm_holder(user, at=now):
+        raise MFAEnrollmentPolicyDenied("GM recovery-code rotation is local-only")
     if bool(totp_code) == bool(recovery_code):
         raise MFAInvalidCode("exactly one MFA factor is required")
     with transaction.atomic():
         locked_user = get_user_model()._default_manager.select_for_update().get(pk=user.pk)
+        if is_active_gm_holder(locked_user, at=now):
+            raise MFAEnrollmentPolicyDenied("GM recovery-code rotation is local-only")
         if not isinstance(password, str) or not locked_user.check_password(password):
             raise MFAInvalidCode("MFA reauthentication failed")
         device = SecurityMFADevice.objects.select_for_update().filter(
