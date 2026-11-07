@@ -2,38 +2,15 @@
 from django.contrib.auth import get_user_model
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.shortcuts import get_object_or_404
-from django.utils import timezone
 from django.views.decorators.csrf import csrf_protect
 from rest_framework import status
 from rest_framework.authentication import SessionAuthentication
 from rest_framework.decorators import api_view, authentication_classes, permission_classes
-from rest_framework.permissions import BasePermission
 from rest_framework.response import Response
 
-from security.authorization import AuthContext
-from security.mfa_policy import is_active_gm_holder, set_employee_mfa_requirement
+from security.mfa_policy import set_employee_mfa_requirement
 from security.operation_registry import OperationSpec, erp_operations
-from security.permissions import HasErpOperation, IsAuthenticatedForERP
-
-
-class IsGMWithVerifiedMFA(BasePermission):
-    message = "An active GM session with verified MFA is required."
-
-    def has_permission(self, request, view):
-        user = getattr(request, "user", None)
-        if user is None or not getattr(user, "is_authenticated", False):
-            return False
-        try:
-            context = AuthContext.from_request(request)
-            return bool(
-                is_active_gm_holder(user)
-                and context.requires_mfa
-                and context.mfa_verified
-                and context.session_user_id == user.pk
-                and context.is_valid_for(user, timezone.now())
-            )
-        except Exception:
-            return False
+from security.permissions import HasErpOperation, IsAuthenticatedForERP, IsGMWithVerifiedMFA
 
 
 @csrf_protect

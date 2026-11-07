@@ -4,6 +4,8 @@ from django.test import SimpleTestCase
 
 # Import the mounted views so their server-owned declarations are registered.
 import security.views
+import security.auth_views
+import security.mfa_views
 import fiscal_periods.views
 import purchases.landed_cost_views
 
@@ -83,9 +85,11 @@ class OperationSpecValidationTests(SimpleTestCase):
                 target_source=TARGET_REQUEST_USER,
             )
 
-    def test_mounted_route_inventory_has_twelve_unique_operations(self):
+    def test_mounted_route_inventory_has_fourteen_unique_operations(self):
         expected = {
             "security.me.retrieve",
+            "security.auth.logout_own",
+            "security.mfa.policy.update_employee",
             "fiscal.period.collection.list",
             "fiscal.period.collection.create",
             "fiscal.period.object.close",
@@ -99,7 +103,7 @@ class OperationSpecValidationTests(SimpleTestCase):
             "purchases.landedcost.object.reverse",
         }
         self.assertEqual(set(OPERATION_SPECS), expected)
-        self.assertEqual(len(OPERATION_SPECS), 12)
+        self.assertEqual(len(OPERATION_SPECS), 14)
 
     def test_shared_permission_key_can_have_distinct_collection_and_object_operations(self):
         collection = OPERATION_SPECS["purchases.landedcost.collection.list"]
@@ -126,21 +130,25 @@ class OperationSpecValidationTests(SimpleTestCase):
                 "api/v1/",
                 "api/v1/health/",
                 "api/v1/health/missing/",
+                "api/v1/security/csrf/",
+                "api/v1/security/auth/login/",
             },
         )
-        # Three entries remain, but replacing the missing-resource route
-        # with an arbitrary business route must fail the exact allowlist.
+        # Keep the count constant, but replace a specifically-approved
+        # authentication route with an arbitrary business route.
         swapped_routes = [
             "api/v1/",
             "api/v1/health/",
+            "api/v1/health/missing/",
+            "api/v1/security/csrf/",
             "api/v1/purchases/private-export/",
         ]
         errors = _public_route_allowlist_errors(swapped_routes)
         self.assertEqual(len(errors), 1)
         self.assertIn("api/v1/purchases/private-export/", errors[0].msg)
-        self.assertIn("api/v1/health/missing/", errors[0].msg)
+        self.assertIn("api/v1/security/auth/login/", errors[0].msg)
 
-    def test_public_allowlist_accepts_only_the_three_expected_routes(self):
+    def test_public_allowlist_accepts_only_the_five_expected_routes(self):
         self.assertEqual(
             _public_route_allowlist_errors(sorted(EXPECTED_PUBLIC_API_ROUTES)),
             [],
