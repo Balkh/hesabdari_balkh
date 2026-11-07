@@ -41,8 +41,7 @@ class InitialGMBootstrapCommandTests(TestCase):
         output = StringIO()
         with patch("security.management.commands.issue_gm_bootstrap_token._require_tty"):
             call_command("issue_gm_bootstrap_token", stdout=output)
-        marker = "ONE-TIME INITIAL GM BOOTSTRAP TOKEN (valid for 10 minutes):
-"
+        marker = "ONE-TIME INITIAL GM BOOTSTRAP TOKEN (valid for 10 minutes):\\n"
         self.assertIn(marker, output.getvalue())
         return output.getvalue().split(marker, 1)[1].strip()
 
@@ -75,7 +74,7 @@ class InitialGMBootstrapCommandTests(TestCase):
         with (
             patch("security.management.commands.bootstrap_gm._require_tty"),
             patch("security.management.commands.bootstrap_gm.getpass.getpass", side_effect=hidden_prompt),
-            patch("security.management.commands.bootstrap_gm.input", return_value="initial-gm"),
+            patch("builtins.input", return_value="initial-gm"),
             patch("security.management.commands.bootstrap_gm.timezone.now", return_value=now),
         ):
             call_command("bootstrap_gm", stdout=output)
@@ -105,11 +104,11 @@ class InitialGMBootstrapCommandTests(TestCase):
         raw_token = self._issue_token()
         now = timezone.now() + timedelta(seconds=2)
         output = StringIO()
-        calls = iter([raw_token, "Strong-GM-Password-2026!", "Strong-GM-Password-2026!", "000000"])
+        calls = iter([raw_token, "Strong-GM-Password-2026!", "Strong-GM-Password-2026!", "not-a-code"])
         with (
             patch("security.management.commands.bootstrap_gm._require_tty"),
             patch("security.management.commands.bootstrap_gm.getpass.getpass", side_effect=lambda _p: next(calls)),
-            patch("security.management.commands.bootstrap_gm.input", return_value="bad-bootstrap-gm"),
+            patch("builtins.input", return_value="bad-bootstrap-gm"),
             patch("security.management.commands.bootstrap_gm.timezone.now", return_value=now),
             self.assertRaises(CommandError),
         ):
