@@ -674,9 +674,15 @@ class SingletonSlotMigrationTests(TransactionTestCase):
                 "makemigrations --check failed; generated migration diff follows. "
                 f"exit={exc.code}; stdout={out.getvalue()!r}; stderr={err.getvalue()!r}"
             )
+        self.assertIn(
+            "No changes detected in app 'security'",
+            out.getvalue(),
+            f"makemigrations --check did not confirm a clean migration state: "
+            f"stdout={out.getvalue()!r}; stderr={err.getvalue()!r}",
+        )
         self.assertEqual(
-            out.getvalue().strip(), "",
-            f"unexpected makemigrations output: {out.getvalue()!r}",
+            err.getvalue().strip(), "",
+            f"unexpected makemigrations stderr: {err.getvalue()!r}",
         )
 
 
