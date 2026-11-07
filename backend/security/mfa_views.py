@@ -2,6 +2,7 @@
 from django.contrib.auth import get_user_model
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.shortcuts import get_object_or_404
+from django.utils import timezone
 from django.views.decorators.csrf import csrf_protect
 from rest_framework import status
 from rest_framework.authentication import SessionAuthentication
@@ -29,7 +30,7 @@ class IsGMWithVerifiedMFA(BasePermission):
                 and context.requires_mfa
                 and context.mfa_verified
                 and context.session_user_id == user.pk
-                and context.is_valid_for(user, __import__("django.utils.timezone", fromlist=["now"]).now())
+                and context.is_valid_for(user, timezone.now())
             )
         except Exception:
             return False

@@ -30,8 +30,11 @@ class OperationApiEnforcementTests(TestCase):
         return user
 
     def logged_in_client(self, user):
+        from security.session_service import register_login_session
+
         client = APIClient()
         self.assertTrue(client.login(username=user.username, password="strong-test-password"))
+        register_login_session(user, client.session.session_key)
         return client
 
     def test_authentication_guard_is_first_on_every_r2_view(self):

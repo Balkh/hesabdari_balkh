@@ -48,6 +48,30 @@ class GMAuthContextMfaTests(TestCase):
         request.successful_authenticator = BasicAuthentication()
         self.assertFalse(AuthContext.from_request(request).requires_mfa)
 
+    def test_gm_configured_employee_mfa_denies_basic_only_access(self):
+        from security.mfa_models import SecurityMFARequirement
+        from rest_framework.authentication import BasicAuthentication
+
+        employee = get_user_model().objects.create_user(username="mfa-required-employee")
+        SecurityMFARequirement.objects.create(
+            user=employee,
+            is_required=True,
+            updated_by=self.user,
+            reason="owner policy test",
+        )
+        request = RequestFactory().get("/api/v1/security/me/")
+        request.user = employee
+        request.successful_authenticator = BasicAuthentication()
+        context = AuthContext.from_request(request)
+        self.assertTrue(context.requires_mfa)
+        decision = resolve(
+            employee,
+            "security.account.view_own",
+            auth_context=context,
+        )
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.reason, DENY_MFA_REQUIRED)
+
     def test_registered_session_mfa_evidence_is_user_bound(self):
         from django.contrib.sessions.backends.db import SessionStore
         from security.session_service import register_login_session
