@@ -15,7 +15,8 @@ from security.mfa_models import (
     SecurityMFADevice,
     SecurityRecoveryCode,
 )
-from security.models import AuditEvent, GMRoleSlot
+from security.gm_slot import claim_gm_slot
+from security.models import AuditEvent, GMRoleSlot, Role, UserRoleAssignment
 
 
 class ProviderStub:
@@ -30,6 +31,12 @@ class ProviderStub:
 
 @override_settings(ERP_MFA_KEY_PROVIDER="security.test_gm_bootstrap.ProviderStub")
 class InitialGMBootstrapCommandTests(TestCase):
+    def setUp(self):
+        self.gm_role, _ = Role.objects.get_or_create(
+            code="GM",
+            defaults={"name": "General Manager", "is_active": True, "is_system": True},
+        )
+
     def _issue_token(self):
         output = StringIO()
         with patch("security.management.commands.issue_gm_bootstrap_token._require_tty"):
@@ -114,10 +121,18 @@ class InitialGMBootstrapCommandTests(TestCase):
         self.assertIsNone(GMRoleSlot.objects.get(code="GM").assignment_id)
 
     def test_second_initial_bootstrap_is_refused_without_overwriting_holder(self):
-        raw_token = self._issue_token()
-        token = SecurityBootstrapToken.objects.get(purpose=SecurityBootstrapToken.INITIAL_GM)
-        token.consumed_at = timezone.now()
-        token.save(update_fields=["consumed_at"])
+        holder = get_user_model().objects.create_user(
+            username="already-provisioned-gm",
+            password="Strong-GM-Password-2026!",
+        )
+        assignment = UserRoleAssignment.objects.create(
+            user=holder,
+            role=self.gm_role,
+            start_at=timezone.now(),
+            reason="existing owner-approved GM",
+        )
+        claim_gm_slot(assignment)
         with patch("security.management.commands.issue_gm_bootstrap_token._require_tty"):
             with self.assertRaises(CommandError):
                 call_command("issue_gm_bootstrap_token", stdout=StringIO())
+        self.assertEqual(GMRoleSlot.objects.get(code="GM").assignment.user_id, holder.pk)
