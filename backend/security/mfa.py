@@ -65,7 +65,7 @@ def matching_totp_counter(
     valid_window: int = TOTP_VALID_WINDOW,
 ) -> int | None:
     """Return the matched moving factor, or None; supports replay prevention."""
-    if not isinstance(code, str) or not re.fullmatch(r"\\d{6}", code):
+    if not isinstance(code, str) or not re.fullmatch(r"\d{6}", code):
         return None
     if not isinstance(valid_window, int) or valid_window < 0 or valid_window > 1:
         raise ValueError("only the approved TOTP verification window is supported")
