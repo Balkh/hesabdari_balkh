@@ -74,7 +74,10 @@ class EmployeeMFAApiTests(TestCase):
             bytes(device.secret_ciphertext),
         )
 
-        now = timezone.now().replace(microsecond=0)
+        # Keep the mocked clock strictly after the seeded role's start_at.
+        # Flooring to a whole second could move it backwards across that grant
+        # boundary and make the authorization test deny a valid employee.
+        now = timezone.now() + timedelta(seconds=1)
         with patch("django.utils.timezone.now", return_value=now):
             confirmed = self.client.post(
                 "/api/v1/security/mfa/enroll/confirm/",
