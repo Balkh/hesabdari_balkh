@@ -9,7 +9,7 @@ from security.gm_slot import GM_SLOT_CODE
 from security.mfa import totp_code
 from security.mfa_models import MFADeviceStatus, SecurityLoginSession
 from security.mfa_service import begin_mfa_enrollment, confirm_mfa_enrollment
-from security.models import GMRoleSlot, Role, UserRoleAssignment
+from security.models import AuditAction, AuditEvent, GMRoleSlot, Role, UserRoleAssignment
 from security.session_service import (
     SessionAdmissionError,
     register_login_session,
@@ -63,9 +63,11 @@ class SecurityLoginFlowTests(TestCase):
         self.assertIsNone(record.mfa_verified_at)
         self.assertEqual(record.slot_number, 1)
         self.assertTrue(self.client.session.get("_auth_user_id"))
-        self.assertTrue(
-            self.user.audit_events if hasattr(self.user, "audit_events") else True
-        )
+        event = AuditEvent.objects.filter(
+            user=self.user, action=AuditAction.LOGIN, entity="AUTH_SESSION"
+        ).latest("id")
+        self.assertEqual(event.new_state["mfa_verified"], False)
+        self.assertEqual(event.new_state["session_slot"], 1)
 
     def test_password_only_gm_login_is_refused_until_mfa_enrolled(self):
         self._make_gm()
