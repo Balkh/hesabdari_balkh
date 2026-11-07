@@ -98,6 +98,8 @@ class SecurityLoginSession(models.Model):
         related_name="security_login_sessions",
     )
     session_key_hash = models.CharField(max_length=64, unique=True)
+    # Fixed admission slots turn the two-session cap into a DB invariant.
+    slot_number = models.PositiveSmallIntegerField(default=1)
     created_at = models.DateTimeField()
     last_seen_at = models.DateTimeField()
     idle_expires_at = models.DateTimeField()
@@ -116,6 +118,15 @@ class SecurityLoginSession(models.Model):
             models.CheckConstraint(
                 condition=Q(idle_expires_at__lte=F("absolute_expires_at")),
                 name="security_session_idle_before_absolute",
+            ),
+            models.CheckConstraint(
+                condition=Q(slot_number__in=(1, 2)),
+                name="security_session_slot_1_2",
+            ),
+            models.UniqueConstraint(
+                fields=["user", "slot_number"],
+                condition=Q(revoked_at__isnull=True),
+                name="sec_sess_usr_live_slot",
             ),
         ]
         indexes = [
