@@ -21,7 +21,7 @@ from security.mfa_service import (
     disable_employee_mfa,
     rotate_recovery_codes,
 )
-from security.operation_registry import OperationSpec, erp_operations
+from security.operation_registry import OBJECT, TARGET_REQUEST_USER, OperationSpec, erp_operations
 from security.permissions import (
     HasErpOperation,
     IsAuthenticatedForERP,

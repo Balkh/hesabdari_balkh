@@ -85,7 +85,7 @@ class OperationSpecValidationTests(SimpleTestCase):
                 target_source=TARGET_REQUEST_USER,
             )
 
-    def test_mounted_route_inventory_has_fourteen_unique_operations(self):
+    def test_mounted_route_inventory_has_eighteen_unique_operations(self):
         expected = {
             "security.me.retrieve",
             "security.auth.logout_own",
