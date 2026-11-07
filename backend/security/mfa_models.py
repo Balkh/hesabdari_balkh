@@ -82,7 +82,7 @@ class SecurityRecoveryCode(models.Model):
             ),
         ]
         indexes = [
-            models.Index(fields=["user", "used_at"], name="security_recovery_user_used_idx"),
+            models.Index(fields=["user", "used_at"], name="sec_rec_usr_used_idx"),
         ]
 
 
