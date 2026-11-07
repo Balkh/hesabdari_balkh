@@ -75,3 +75,46 @@ class SessionRegistryTests(TestCase):
         other = get_user_model().objects.create_user(username="other-session-user")
         register_login_session(self.user, "bound-session-key")
         self.assertIsNone(touch_login_session(other, "bound-session-key"))
+
+
+class SessionAdmissionConcurrencyTests(__import__("django.test", fromlist=["TransactionTestCase"]).TransactionTestCase):
+    """Concurrent admissions must never exceed the DB-enforced two-slot cap."""
+
+    def test_three_concurrent_logins_never_create_more_than_two_active_rows(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from threading import Barrier
+
+        from django.db import close_old_connections, connection
+
+        User = get_user_model()
+        user = User.objects.create_user(username="concurrent-session-admission")
+        user_id = user.pk
+        start = Barrier(3)
+
+        def attempt(index):
+            close_old_connections()
+            try:
+                thread_user = User.objects.get(pk=user_id)
+                start.wait(timeout=10)
+                register_login_session(
+                    thread_user,
+                    f"concurrent-session-key-{index}",
+                )
+                return True
+            except SessionAdmissionError:
+                return False
+            finally:
+                close_old_connections()
+
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            results = list(executor.map(attempt, range(3)))
+
+        active = SecurityLoginSession.objects.filter(
+            user_id=user_id, revoked_at__isnull=True
+        ).count()
+        self.assertLessEqual(active, 2)
+        self.assertEqual(active, sum(results))
+        self.assertGreaterEqual(active, 1)
+        if connection.features.has_select_for_update:
+            self.assertEqual(active, 2)
+            self.assertEqual(results.count(True), 2)
