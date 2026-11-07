@@ -20,6 +20,7 @@ from security.mfa import (
     matching_totp_counter,
     verify_recovery_code,
 )
+from security.models import AuditAction, AuditEvent
 from security.mfa_models import (
     MFADeviceStatus,
     SecurityMFADevice,
@@ -48,6 +49,10 @@ class MFAInvalidCode(MFAServiceError):
 
 
 class MFAAlreadyEnrolled(MFAServiceError):
+    pass
+
+
+class MFAEnrollmentPolicyDenied(MFAServiceError):
     pass
 
 
@@ -102,6 +107,13 @@ def begin_mfa_enrollment(user, *, provider: KeyProvider, issuer: str = "Hesabdar
             secret_key_id=envelope.key_id,
             secret_nonce=envelope.nonce,
             secret_ciphertext=envelope.ciphertext,
+        )
+        AuditEvent.objects.create(
+            user=user,
+            action=AuditAction.CREATE,
+            entity="MFA_DEVICE",
+            entity_id=str(device.pk),
+            new_state={"status": MFADeviceStatus.PENDING},
         )
     label = quote(f"{issuer}:{user.get_username()}", safe="")
     uri = (
@@ -168,6 +180,14 @@ def confirm_mfa_enrollment(
                         SecurityRecoveryCode(user=user, code_hash=hash_recovery_code(raw))
                         for raw in recovery_codes
                     ])
+                    AuditEvent.objects.create(
+                        user=user,
+                        action=AuditAction.UPDATE,
+                        entity="MFA_DEVICE",
+                        entity_id=str(device.pk),
+                        previous_state={"status": MFADeviceStatus.PENDING},
+                        new_state={"status": MFADeviceStatus.ACTIVE, "recovery_codes_issued": 10},
+                    )
     if error:
         raise error
     return recovery_codes
