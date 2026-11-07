@@ -93,7 +93,10 @@ class Command(BaseCommand):
         raw_token = getpass.getpass("One-time initial GM bootstrap token: ").strip()
         if not raw_token:
             raise CommandError("bootstrap token is required")
-        token_digest = hashlib.sha256(raw_token.encode("ascii", errors="strict")).hexdigest()
+        try:
+            token_digest = hashlib.sha256(raw_token.encode("ascii", errors="strict")).hexdigest()
+        except UnicodeEncodeError:
+            raise CommandError("bootstrap token is invalid") from None
         now = timezone.now()
         token = SecurityBootstrapToken.objects.filter(
             purpose=SecurityBootstrapToken.INITIAL_GM,
@@ -134,6 +137,13 @@ class Command(BaseCommand):
                 raise CommandError("GM singleton slot is missing; apply security migrations first")
             if slot.assignment_id is not None:
                 raise CommandError("GM slot is already held; this command cannot recover or transfer GM")
+            if UserRoleAssignment.objects.filter(role__code=GM_SLOT_CODE).exists():
+                raise CommandError("GM assignment history exists; initial bootstrap is permanently closed")
+            if SecurityBootstrapToken.objects.filter(
+                purpose=SecurityBootstrapToken.INITIAL_GM,
+                consumed_at__isnull=False,
+            ).exists():
+                raise CommandError("initial GM bootstrap was already consumed; local emergency recovery is separate")
             findings = inspect_slot_consistency()
             if findings:
                 raise CommandError(

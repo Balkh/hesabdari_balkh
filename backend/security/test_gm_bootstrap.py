@@ -119,6 +119,33 @@ class InitialGMBootstrapCommandTests(TestCase):
         self.assertIsNone(token.consumed_at)
         self.assertIsNone(GMRoleSlot.objects.get(code="GM").assignment_id)
 
+
+    def test_historical_gm_assignment_closes_initial_bootstrap_even_if_slot_is_empty(self):
+        holder = get_user_model().objects.create_user(
+            username="historical-gm-holder",
+            password="Strong-GM-Password-2026!",
+        )
+        UserRoleAssignment.objects.create(
+            user=holder,
+            role=self.gm_role,
+            start_at=timezone.now() - timedelta(days=2),
+            end_at=timezone.now() - timedelta(days=1),
+            revoked_at=timezone.now() - timedelta(days=1),
+            reason="historical GM assignment",
+        )
+        self.assertIsNone(GMRoleSlot.objects.get(code="GM").assignment_id)
+        with patch("security.management.commands.issue_gm_bootstrap_token._require_tty"):
+            with self.assertRaises(CommandError):
+                call_command("issue_gm_bootstrap_token", stdout=StringIO())
+        self.assertEqual(
+            SecurityBootstrapToken.objects.filter(
+                purpose=SecurityBootstrapToken.INITIAL_GM,
+                consumed_at__isnull=True,
+                revoked_at__isnull=True,
+            ).count(),
+            0,
+        )
+
     def test_second_initial_bootstrap_is_refused_without_overwriting_holder(self):
         holder = get_user_model().objects.create_user(
             username="already-provisioned-gm",

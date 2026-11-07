@@ -11,7 +11,7 @@ from django.db import transaction
 from django.utils import timezone
 
 from security.gm_slot import GM_SLOT_CODE, inspect_slot_consistency
-from security.models import AuditAction, AuditEvent, GMRoleSlot
+from security.models import AuditAction, AuditEvent, GMRoleSlot, UserRoleAssignment
 from security.mfa_models import SecurityBootstrapToken
 
 TOKEN_LIFETIME = timedelta(minutes=10)
@@ -38,6 +38,13 @@ class Command(BaseCommand):
                 raise CommandError("GM singleton slot is missing; apply security migrations first")
             if slot.assignment_id is not None:
                 raise CommandError("GM slot is already held; initial bootstrap is not permitted")
+            if UserRoleAssignment.objects.filter(role__code=GM_SLOT_CODE).exists():
+                raise CommandError("GM assignment history exists; initial bootstrap is permanently closed")
+            if SecurityBootstrapToken.objects.filter(
+                purpose=SecurityBootstrapToken.INITIAL_GM,
+                consumed_at__isnull=False,
+            ).exists():
+                raise CommandError("initial GM bootstrap was already consumed; use only the separate offline recovery process")
             findings = inspect_slot_consistency()
             if findings:
                 raise CommandError(
