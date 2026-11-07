@@ -663,12 +663,21 @@ class SingletonSlotMigrationTests(TransactionTestCase):
         self.assertEqual(GMRoleSlot.objects.count(), 1)
 
     def test_makemigrations_detects_no_pending_model_changes(self):
-        out = io.StringIO()
-        call_command(
-            "makemigrations", "security", "--check", "--dry-run",
-            stdout=out, verbosity=0,
+        out, err = io.StringIO(), io.StringIO()
+        try:
+            call_command(
+                "makemigrations", "security", "--check", "--dry-run",
+                stdout=out, stderr=err, verbosity=1,
+            )
+        except SystemExit as exc:
+            self.fail(
+                "makemigrations --check failed; generated migration diff follows. "
+                f"exit={exc.code}; stdout={out.getvalue()!r}; stderr={err.getvalue()!r}"
+            )
+        self.assertEqual(
+            out.getvalue().strip(), "",
+            f"unexpected makemigrations output: {out.getvalue()!r}",
         )
-        self.assertEqual(out.getvalue().strip(), "")
 
 
 # ---------------------------------------------------------------------------
