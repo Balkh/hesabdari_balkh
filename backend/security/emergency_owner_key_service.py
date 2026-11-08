@@ -13,6 +13,8 @@ import secrets
 from dataclasses import dataclass
 
 from django.contrib.auth import get_user_model
+from django.contrib.auth.password_validation import validate_password
+from django.core.exceptions import ValidationError
 from django.db import transaction
 from django.utils import timezone
 
@@ -259,6 +261,12 @@ def recover_existing_gm_offline(
     # The provider is probed/encryption is completed before destructive changes.
     # The exact user identity is bound again inside the locked transaction.
     preview = get_current_gm_for_local_operation(at=now)
+    try:
+        validate_password(new_password, user=preview.user)
+    except ValidationError:
+        raise EmergencyOwnerKeyInvalid(
+            "new GM password does not satisfy the configured password policy"
+        ) from None
     try:
         envelope: EncryptedSecret = encrypt_secret(
             new_totp_secret.encode("ascii"),

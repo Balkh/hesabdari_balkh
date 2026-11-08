@@ -182,6 +182,46 @@ class EmergencyOwnerKeyLifecycleTests(TestCase):
         self.old_owner_row.refresh_from_db()
         self.assertIsNone(self.old_owner_row.revoked_at)
 
+    def test_weak_new_password_is_rejected_before_any_recovery_state_changes(self):
+        new_secret = __import__("security.mfa", fromlist=["generate_totp_secret"]).generate_totp_secret()
+        with self.assertRaises(EmergencyOwnerKeyInvalid):
+            recover_existing_gm_offline(
+                self.old_owner_key,
+                new_owner_key=generate_emergency_owner_key(),
+                new_password="password",
+                new_totp_secret=new_secret,
+                new_totp_code=totp_code(new_secret, timestamp=self.now.timestamp()),
+                provider=self.provider,
+                at=self.now,
+            )
+        self.user.refresh_from_db()
+        self.assertTrue(self.user.check_password("Strong-old-GM-Password-2026!"))
+        self.old_owner_row.refresh_from_db()
+        self.assertIsNone(self.old_owner_row.consumed_at)
+        self.session.refresh_from_db()
+        self.assertIsNone(self.session.revoked_at)
+
+    def test_reusing_existing_owner_key_as_its_replacement_is_rejected(self):
+        with self.assertRaises(EmergencyOwnerKeyInvalid):
+            issue_gm_emergency_owner_key(
+                self.user,
+                password="Strong-old-GM-Password-2026!",
+                totp_code=totp_code(self.old_secret, timestamp=(self.now + timedelta(seconds=30)).timestamp()),
+                provider=self.provider,
+                new_owner_key=self.old_owner_key,
+                at=self.now + timedelta(seconds=30),
+            )
+        self.old_owner_row.refresh_from_db()
+        self.assertIsNone(self.old_owner_row.revoked_at)
+        self.assertEqual(
+            SecurityEmergencyOwnerKey.objects.filter(
+                scope=SecurityEmergencyOwnerKey.GM_RECOVERY,
+                consumed_at__isnull=True,
+                revoked_at__isnull=True,
+            ).count(),
+            1,
+        )
+
     def test_invalid_new_totp_does_not_consume_owner_key_or_revoke_sessions(self):
         new_secret = __import__("security.mfa", fromlist=["generate_totp_secret"]).generate_totp_secret()
         with self.assertRaises(EmergencyOwnerKeyInvalid):
