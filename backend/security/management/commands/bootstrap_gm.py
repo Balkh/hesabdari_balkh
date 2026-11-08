@@ -214,7 +214,7 @@ class Command(BaseCommand):
                 "After saving the key offline, enter its last 8 characters to confirm: "
             ).strip()
             if not hmac.compare_digest(owner_key_confirmation, owner_key[-8:]):
-                raise CommandError("owner-key confirmation failed; no GM account or slot was committed")
+                raise CommandError("owner-key confirmation failed; no GM account or slot was committed; discard the displayed owner key and authenticator seed")
 
             device = SecurityMFADevice.objects.create(
                 user=user,

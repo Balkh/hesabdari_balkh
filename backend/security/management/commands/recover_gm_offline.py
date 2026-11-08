@@ -33,7 +33,7 @@ def _confirm_saved_once(stdout, raw_key):
     stdout.write("Save this key offline and separately from this computer.")
     actual = getpass.getpass("After saving it offline, enter its last 8 characters to confirm: ").strip()
     if not hmac.compare_digest(actual, raw_key[-8:]):
-        raise CommandError("owner-key confirmation failed; discard the displayed replacement key")
+        raise CommandError("owner-key confirmation failed; discard both the displayed replacement key and the new authenticator seed")
 
 
 class Command(BaseCommand):

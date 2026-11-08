@@ -4,7 +4,6 @@ from django.contrib.auth import get_user_model
 from django.test import TestCase
 from django.utils import timezone
 
-from security.crypto import KeyUnavailableError, decrypt_secret
 from security.emergency_owner_key_service import (
     EmergencyOwnerKeyInvalid,
     emergency_owner_key_digest,
@@ -13,7 +12,7 @@ from security.emergency_owner_key_service import (
     issue_gm_emergency_owner_key,
     recover_existing_gm_offline,
 )
-from security.mfa import generate_recovery_codes, hash_recovery_code, totp_code
+from security.mfa import generate_totp_secret, totp_code
 from security.mfa_models import (
     MFADeviceStatus,
     SecurityEmergencyOwnerKey,
@@ -89,7 +88,7 @@ class EmergencyOwnerKeyLifecycleTests(TestCase):
         )
 
     def test_invalid_owner_key_changes_no_state(self):
-        new_secret = __import__("security.mfa", fromlist=["generate_totp_secret"]).generate_totp_secret()
+        new_secret = generate_totp_secret()
         replacement_key = generate_emergency_owner_key()
         with self.assertRaises(EmergencyOwnerKeyInvalid):
             recover_existing_gm_offline(
@@ -230,7 +229,7 @@ class EmergencyOwnerKeyLifecycleTests(TestCase):
                 new_owner_key=generate_emergency_owner_key(),
                 new_password="Strong-new-GM-Password-2026!",
                 new_totp_secret=new_secret,
-                new_totp_code="000000",
+                new_totp_code="not-a-code",
                 provider=self.provider,
                 at=self.now,
             )
