@@ -60,9 +60,3 @@ class Command(BaseCommand):
         self.stdout.write(f"Owner-key record: {row.pk}. Keep the raw key offline; it cannot be displayed again.")
 
 
-
-
-    def test_non_tty_execution_is_refused_before_any_prompt(self):
-        with patch("security.management.commands.issue_gm_emergency_owner_key.sys.stdin.isatty", return_value=False):
-            with self.assertRaises(CommandError):
-                _require_tty()
