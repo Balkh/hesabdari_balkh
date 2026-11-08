@@ -87,11 +87,15 @@ jobs:
         run: |
           python -c "import getpass, platform, sys; print(platform.platform()); print('Python:', sys.version); print('Process user:', getpass.getuser())"
           whoami /user
-      - name: Install isolated evaluation dependencies
-        run: python -m pip install --disable-pip-version-check Django pytest pytest-django
+      - name: Install isolated evaluation dependency
+        run: python -m pip install --disable-pip-version-check "pytest>=8.0,<9.0"
       - name: Probe DPAPI CurrentUser and Credential Manager
+        shell: pwsh
         working-directory: backend
-        run: python -m pytest -q security/test_windows_key_custody_eval.py
+        run: |
+          $config = Join-Path $env:RUNNER_TEMP "pytest-windows.ini"
+          Set-Content -Path $config -Value "[pytest]" -Encoding ascii
+          python -m pytest -c $config -q security/test_windows_key_custody_eval.py
   tauri:
     runs-on: ubuntu-latest
     steps:
