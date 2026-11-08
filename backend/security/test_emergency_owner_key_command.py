@@ -11,14 +11,20 @@ from security.management.commands.recover_gm_offline import _require_tty as requ
 
 class EmergencyRecoveryCommandBoundaryTests(SimpleTestCase):
     def test_owner_key_rotation_command_refuses_non_tty(self):
-        with patch("security.management.commands.issue_gm_emergency_owner_key.sys.stdin.isatty", return_value=False):
-            with self.assertRaises(CommandError):
-                require_issue_tty()
+        with (
+            patch("security.management.commands.issue_gm_emergency_owner_key.sys.stdin", StringIO()),
+            patch("security.management.commands.issue_gm_emergency_owner_key.sys.stdout", StringIO()),
+            self.assertRaises(CommandError),
+        ):
+            require_issue_tty()
 
     def test_emergency_recovery_command_refuses_non_tty(self):
-        with patch("security.management.commands.recover_gm_offline.sys.stdin.isatty", return_value=False):
-            with self.assertRaises(CommandError):
-                require_recovery_tty()
+        with (
+            patch("security.management.commands.recover_gm_offline.sys.stdin", StringIO()),
+            patch("security.management.commands.recover_gm_offline.sys.stdout", StringIO()),
+            self.assertRaises(CommandError),
+        ):
+            require_recovery_tty()
 
     def test_invalid_owner_key_is_rejected_before_new_totp_seed_is_shown(self):
         output = StringIO()
