@@ -20,7 +20,9 @@ import secrets
 from contextlib import contextmanager
 from ctypes import wintypes
 
-from security.crypto import KEY_BYTES, KeyUnavailableError
+from security.errors import KeyUnavailableError
+
+KEY_BYTES = 32  # AES-256 key size; kept dependency-free for OS key-store startup.
 
 CRED_TYPE_GENERIC = 1
 CRED_PERSIST_LOCAL_MACHINE = 2

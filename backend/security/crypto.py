@@ -20,12 +20,7 @@ KEY_BYTES = 32
 FORMAT_VERSION = 1
 
 
-class KeyUnavailableError(RuntimeError):
-    """The configured OS key provider cannot safely supply the key."""
-
-
-class SecretDecryptionError(RuntimeError):
-    """Ciphertext, key version, identity binding, or authentication tag invalid."""
+from security.errors import KeyUnavailableError, SecretDecryptionError
 
 
 class KeyProvider(Protocol):
