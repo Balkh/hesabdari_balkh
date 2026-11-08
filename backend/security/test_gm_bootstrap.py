@@ -105,7 +105,7 @@ class InitialGMBootstrapCommandTests(TestCase):
         self.assertEqual(owner_key.issued_by_id, gm.pk)
         self.assertEqual(len(owner_key.key_hash), 64)
         shown_owner_key = output.getvalue().split(
-            "OFFLINE GM EMERGENCY OWNER KEY — shown once; store it separately from this computer:\\n",
+            "OFFLINE GM EMERGENCY OWNER KEY — shown once; store it separately from this computer:\n",
             1,
         )[1].splitlines()[0]
         self.assertEqual(owner_key.key_hash, emergency_owner_key_digest(shown_owner_key))
