@@ -239,7 +239,7 @@ class SecurityEmergencyOwnerKey(models.Model):
     class Meta:
         constraints = [
             models.CheckConstraint(
-                condition=Q(scope=GM_RECOVERY),
+                condition=Q(scope="GM_RECOVERY"),
                 name="sec_em_owner_gm_scope_only",
             ),
             models.CheckConstraint(
