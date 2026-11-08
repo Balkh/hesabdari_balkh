@@ -17,6 +17,7 @@ from security.emergency_owner_key_service import (
     generate_emergency_owner_key,
     get_current_gm_for_local_operation,
     recover_existing_gm_offline,
+    validate_current_gm_emergency_owner_key,
 )
 from security.mfa import generate_totp_secret
 
@@ -42,6 +43,10 @@ class Command(BaseCommand):
         _require_tty()
         gm = get_current_gm_for_local_operation().user
         raw_owner_key = getpass.getpass("Offline GM emergency owner key: ").strip()
+        try:
+            validate_current_gm_emergency_owner_key(raw_owner_key)
+        except EmergencyOwnerKeyError as exc:
+            raise CommandError(str(exc)) from None
         new_password = getpass.getpass("New GM password: ")
         confirm_password = getpass.getpass("Confirm new GM password: ")
         if not new_password or not hmac.compare_digest(new_password, confirm_password):
@@ -78,6 +83,8 @@ class Command(BaseCommand):
             )
         except EmergencyOwnerKeyError as exc:
             raise CommandError(str(exc) + "; discard the displayed replacement owner key and new authenticator seed") from None
+        except Exception:
+            raise CommandError("offline GM recovery failed and changes were rolled back; discard the displayed replacement owner key and new authenticator seed") from None
 
         self.stdout.write(self.style.SUCCESS("Existing GM credentials recovered in place; singleton assignment was preserved."))
         self.stdout.write(f"Revoked sessions: {revoked_sessions}; disabled previous MFA devices: {disabled_devices}.")

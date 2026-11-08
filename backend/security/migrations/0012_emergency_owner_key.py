@@ -15,7 +15,7 @@ class Migration(migrations.Migration):
             name="SecurityEmergencyOwnerKey",
             fields=[
                 ("id", models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name="ID")),
-                ("scope", models.CharField(default="GM_RECOVERY", max_length=24)),
+                ("scope", models.CharField(choices=[("GM_RECOVERY", "GM emergency recovery")], default="GM_RECOVERY", max_length=24)),
                 ("source", models.CharField(choices=[("INITIAL_BOOTSTRAP", "Initial GM bootstrap"), ("ROTATION", "Local key rotation"), ("EMERGENCY_RECOVERY", "Offline GM emergency recovery")], max_length=32)),
                 ("key_hash", models.CharField(max_length=64, unique=True)),
                 ("issued_at", models.DateTimeField()),
@@ -27,6 +27,7 @@ class Migration(migrations.Migration):
             ],
             options={
                 "constraints": [
+                    models.CheckConstraint(condition=Q(scope="GM_RECOVERY"), name="sec_em_owner_gm_scope_only"),
                     models.CheckConstraint(condition=Q(consumed_at__isnull=True, consumed_by__isnull=True) | Q(consumed_at__isnull=False, consumed_by__isnull=False), name="sec_em_owner_consumed_actor"),
                     models.CheckConstraint(condition=Q(consumed_at__isnull=True) | Q(revoked_at__isnull=True), name="sec_em_owner_one_terminal"),
                     models.UniqueConstraint(fields=("scope",), condition=Q(consumed_at__isnull=True, revoked_at__isnull=True), name="sec_em_owner_one_live"),

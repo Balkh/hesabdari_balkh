@@ -9,7 +9,6 @@ from django.core.management.base import BaseCommand, CommandError
 from django.utils import timezone
 
 from security.management.commands.bootstrap_gm import _load_key_provider
-from security.mfa_service import MFAInvalidCode
 from security.emergency_owner_key_service import (
     EmergencyOwnerKeyError,
     generate_emergency_owner_key,
@@ -53,8 +52,10 @@ class Command(BaseCommand):
                 new_owner_key=candidate,
                 at=timezone.now(),
             )
-        except (EmergencyOwnerKeyError, MFAInvalidCode) as exc:
+        except EmergencyOwnerKeyError as exc:
             raise CommandError(str(exc) + "; discard the displayed candidate key") from None
+        except Exception:
+            raise CommandError("owner-key rotation failed; no owner-key change was accepted; discard the displayed candidate key") from None
         self.stdout.write(self.style.SUCCESS("GM emergency owner key rotated and stored as a hash."))
         self.stdout.write(f"Owner-key record: {row.pk}. Keep the raw key offline; it cannot be displayed again.")
 

@@ -8,6 +8,7 @@ from security.crypto import KeyUnavailableError, decrypt_secret
 from security.emergency_owner_key_service import (
     EmergencyOwnerKeyInvalid,
     emergency_owner_key_digest,
+    validate_current_gm_emergency_owner_key,
     generate_emergency_owner_key,
     issue_gm_emergency_owner_key,
     recover_existing_gm_offline,
@@ -169,7 +170,7 @@ class EmergencyOwnerKeyLifecycleTests(TestCase):
 
     def test_owner_key_rotation_requires_password_and_totp_and_preserves_old_key_on_failure(self):
         invalid_key = generate_emergency_owner_key()
-        with self.assertRaises(Exception):
+        with self.assertRaises(EmergencyOwnerKeyInvalid):
             issue_gm_emergency_owner_key(
                 self.user,
                 password="wrong password",
@@ -179,6 +180,35 @@ class EmergencyOwnerKeyLifecycleTests(TestCase):
                 at=self.now + timedelta(seconds=30),
             )
         self.old_owner_row.refresh_from_db()
+        self.assertIsNone(self.old_owner_row.revoked_at)
+
+    def test_invalid_new_totp_does_not_consume_owner_key_or_revoke_sessions(self):
+        new_secret = __import__("security.mfa", fromlist=["generate_totp_secret"]).generate_totp_secret()
+        with self.assertRaises(EmergencyOwnerKeyInvalid):
+            recover_existing_gm_offline(
+                self.old_owner_key,
+                new_owner_key=generate_emergency_owner_key(),
+                new_password="Strong-new-GM-Password-2026!",
+                new_totp_secret=new_secret,
+                new_totp_code="000000",
+                provider=self.provider,
+                at=self.now,
+            )
+        self.old_owner_row.refresh_from_db()
+        self.assertIsNone(self.old_owner_row.consumed_at)
+        self.session.refresh_from_db()
+        self.assertIsNone(self.session.revoked_at)
+        self.assertEqual(SecurityMFADevice.objects.filter(user=self.user, status=MFADeviceStatus.ACTIVE).count(), 1)
+
+    def test_current_owner_key_validation_is_read_only_and_rejects_wrong_key(self):
+        self.assertEqual(
+            validate_current_gm_emergency_owner_key(self.old_owner_key, at=self.now),
+            self.old_owner_row.pk,
+        )
+        with self.assertRaises(EmergencyOwnerKeyInvalid):
+            validate_current_gm_emergency_owner_key("B" * 43, at=self.now)
+        self.old_owner_row.refresh_from_db()
+        self.assertIsNone(self.old_owner_row.consumed_at)
         self.assertIsNone(self.old_owner_row.revoked_at)
 
     def test_owner_key_rotation_revokes_old_key_and_keeps_only_one_live(self):

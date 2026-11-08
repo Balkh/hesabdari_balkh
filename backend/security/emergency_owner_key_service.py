@@ -124,6 +124,22 @@ def get_current_gm_for_local_operation(*, at=None) -> CurrentGMIdentity:
         return CurrentGMIdentity(user=user, assignment_id=assignment.pk, slot_id=slot.pk)
 
 
+def validate_current_gm_emergency_owner_key(raw_key: str, *, at=None):
+    """Verify the currently live owner key without changing any account state."""
+    now = at or timezone.now()
+    digest = emergency_owner_key_digest(raw_key)
+    with transaction.atomic():
+        _user, _assignment, _slot = _current_gm_locked(at=now)
+        live = SecurityEmergencyOwnerKey.objects.select_for_update().filter(
+            scope=OWNER_KEY_SCOPE,
+            consumed_at__isnull=True,
+            revoked_at__isnull=True,
+        ).first()
+        if live is None or not hmac.compare_digest(live.key_hash, digest):
+            raise EmergencyOwnerKeyInvalid("offline GM owner key is invalid, consumed, or revoked")
+        return live.pk
+
+
 def create_initial_gm_emergency_owner_key(user, raw_key: str, *, at=None):
     """Persist the first owner key only after initial GM slot claim in caller transaction."""
     if transaction.get_autocommit():
@@ -165,8 +181,12 @@ def issue_gm_emergency_owner_key(
         raise EmergencyOwnerKeyPolicyDenied("a persisted GM account is required")
     if not isinstance(password, str) or not gm_user.check_password(password):
         raise EmergencyOwnerKeyInvalid("GM password verification failed")
-    if not verify_user_totp(gm_user, totp_code, provider=provider, at=now):
-        raise MFAInvalidCode("GM TOTP verification failed")
+    try:
+        verified = verify_user_totp(gm_user, totp_code, provider=provider, at=now)
+    except Exception:
+        raise EmergencyOwnerKeyError("GM TOTP verification service is unavailable") from None
+    if not verified:
+        raise EmergencyOwnerKeyInvalid("GM TOTP verification failed")
 
     with transaction.atomic():
         current_user, assignment, _slot = _current_gm_locked(at=now)
@@ -181,9 +201,13 @@ def issue_gm_emergency_owner_key(
             revoked_at__isnull=True,
         ).first()
         if previous is not None:
+            if hmac.compare_digest(previous.key_hash, digest):
+                raise EmergencyOwnerKeyInvalid("replacement owner key must differ from the current key")
             previous.revoked_at = now
             previous.revoke_reason = "ROTATED"
             previous.save(update_fields=["revoked_at", "revoke_reason"])
+        if SecurityEmergencyOwnerKey.objects.filter(key_hash=digest).exists():
+            raise EmergencyOwnerKeyInvalid("replacement owner key has already been used")
 
         row = SecurityEmergencyOwnerKey.objects.create(
             scope=OWNER_KEY_SCOPE,
@@ -218,6 +242,12 @@ def recover_existing_gm_offline(
     now = at or timezone.now()
     old_digest = emergency_owner_key_digest(raw_owner_key)
     new_digest = emergency_owner_key_digest(new_owner_key)
+    if hmac.compare_digest(old_digest, new_digest):
+        raise EmergencyOwnerKeyInvalid("replacement owner key must differ from the consumed key")
+    if not isinstance(new_password, str) or not new_password:
+        raise EmergencyOwnerKeyInvalid("a new GM password is required")
+    if SecurityEmergencyOwnerKey.objects.filter(key_hash=new_digest).exists():
+        raise EmergencyOwnerKeyInvalid("replacement owner key has already been used")
     matched_counter = matching_totp_counter(
         new_totp_secret,
         new_totp_code,
@@ -229,12 +259,15 @@ def recover_existing_gm_offline(
     # The provider is probed/encryption is completed before destructive changes.
     # The exact user identity is bound again inside the locked transaction.
     preview = get_current_gm_for_local_operation(at=now)
-    envelope: EncryptedSecret = encrypt_secret(
-        new_totp_secret.encode("ascii"),
-        purpose=TOTP_PURPOSE,
-        subject_id=str(preview.user.pk),
-        provider=provider,
-    )
+    try:
+        envelope: EncryptedSecret = encrypt_secret(
+            new_totp_secret.encode("ascii"),
+            purpose=TOTP_PURPOSE,
+            subject_id=str(preview.user.pk),
+            provider=provider,
+        )
+    except Exception:
+        raise EmergencyOwnerKeyError("OS-backed MFA key provider is unavailable; no recovery was applied") from None
     recovery_codes = generate_recovery_codes()
 
     with transaction.atomic():

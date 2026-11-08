@@ -212,7 +212,11 @@ class SecurityEmergencyOwnerKey(models.Model):
         (SOURCE_EMERGENCY_RECOVERY, "Offline GM emergency recovery"),
     )
 
-    scope = models.CharField(max_length=24, default=GM_RECOVERY)
+    scope = models.CharField(
+        max_length=24,
+        choices=((GM_RECOVERY, "GM emergency recovery"),),
+        default=GM_RECOVERY,
+    )
     source = models.CharField(max_length=32, choices=SOURCE_CHOICES)
     key_hash = models.CharField(max_length=64, unique=True)
     issued_at = models.DateTimeField()
@@ -234,6 +238,10 @@ class SecurityEmergencyOwnerKey(models.Model):
 
     class Meta:
         constraints = [
+            models.CheckConstraint(
+                condition=Q(scope=GM_RECOVERY),
+                name="sec_em_owner_gm_scope_only",
+            ),
             models.CheckConstraint(
                 condition=(
                     Q(consumed_at__isnull=True, consumed_by__isnull=True)
