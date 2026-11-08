@@ -9,7 +9,9 @@ from django.test import TestCase, override_settings
 from django.utils import timezone
 
 from security.mfa import totp_code
+from security.emergency_owner_key_service import emergency_owner_key_digest
 from security.mfa_models import (
+    SecurityEmergencyOwnerKey,
     MFADeviceStatus,
     SecurityBootstrapToken,
     SecurityMFADevice,
@@ -65,11 +67,15 @@ class InitialGMBootstrapCommandTests(TestCase):
         output = StringIO()
         calls = iter([raw_token, "Strong-GM-Password-2026!", "Strong-GM-Password-2026!"])
 
-        def hidden_prompt(_prompt):
+        def hidden_prompt(prompt):
             try:
                 return next(calls)
             except StopIteration:
-                return self._otp_from_output(output, now)
+                if "authenticator code" in prompt:
+                    return self._otp_from_output(output, now)
+                marker = "OFFLINE GM EMERGENCY OWNER KEY — shown once; store it separately from this computer:\n"
+                shown = output.getvalue().split(marker, 1)[1].splitlines()[0]
+                return shown[-8:]
 
         with (
             patch("security.management.commands.bootstrap_gm._require_tty"),
@@ -94,6 +100,16 @@ class InitialGMBootstrapCommandTests(TestCase):
         )
         token = SecurityBootstrapToken.objects.get(purpose=SecurityBootstrapToken.INITIAL_GM)
         self.assertIsNotNone(token.consumed_at)
+        owner_key = SecurityEmergencyOwnerKey.objects.get(scope=SecurityEmergencyOwnerKey.GM_RECOVERY)
+        self.assertEqual(owner_key.source, SecurityEmergencyOwnerKey.SOURCE_INITIAL_BOOTSTRAP)
+        self.assertEqual(owner_key.issued_by_id, gm.pk)
+        self.assertEqual(len(owner_key.key_hash), 64)
+        shown_owner_key = output.getvalue().split(
+            "OFFLINE GM EMERGENCY OWNER KEY — shown once; store it separately from this computer:\\n",
+            1,
+        )[1].splitlines()[0]
+        self.assertEqual(owner_key.key_hash, emergency_owner_key_digest(shown_owner_key))
+        self.assertNotIn(shown_owner_key, owner_key.key_hash)
         self.assertIn("Initial GM bootstrap succeeded", output.getvalue())
         self.assertEqual(
             AuditEvent.objects.filter(user=gm, entity="GM_BOOTSTRAP").count(),

@@ -415,4 +415,5 @@ from security.mfa_models import (  # noqa: E402,F401
     SecurityRecoveryCode,
     SecurityMFARequirement,
     SecurityBootstrapToken,
+    SecurityEmergencyOwnerKey,
 )

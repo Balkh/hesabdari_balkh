@@ -197,3 +197,64 @@ class SecurityBootstrapToken(models.Model):
     def __str__(self):
         state = "consumed" if self.consumed_at else "revoked" if self.revoked_at else "live"
         return f"{self.purpose}:{state}"
+
+
+class SecurityEmergencyOwnerKey(models.Model):
+    """One-time offline owner key for emergency recovery of the existing GM."""
+
+    GM_RECOVERY = "GM_RECOVERY"
+    SOURCE_INITIAL_BOOTSTRAP = "INITIAL_BOOTSTRAP"
+    SOURCE_ROTATION = "ROTATION"
+    SOURCE_EMERGENCY_RECOVERY = "EMERGENCY_RECOVERY"
+    SOURCE_CHOICES = (
+        (SOURCE_INITIAL_BOOTSTRAP, "Initial GM bootstrap"),
+        (SOURCE_ROTATION, "Local key rotation"),
+        (SOURCE_EMERGENCY_RECOVERY, "Offline GM emergency recovery"),
+    )
+
+    scope = models.CharField(max_length=24, default=GM_RECOVERY)
+    source = models.CharField(max_length=32, choices=SOURCE_CHOICES)
+    key_hash = models.CharField(max_length=64, unique=True)
+    issued_at = models.DateTimeField()
+    issued_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name="emergency_owner_keys_issued",
+    )
+    consumed_at = models.DateTimeField(null=True, blank=True)
+    consumed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="emergency_owner_keys_consumed",
+    )
+    revoked_at = models.DateTimeField(null=True, blank=True)
+    revoke_reason = models.CharField(max_length=40, blank=True, default="")
+
+    class Meta:
+        constraints = [
+            models.CheckConstraint(
+                condition=(
+                    Q(consumed_at__isnull=True, consumed_by__isnull=True)
+                    | Q(consumed_at__isnull=False, consumed_by__isnull=False)
+                ),
+                name="sec_em_owner_consumed_actor",
+            ),
+            models.CheckConstraint(
+                condition=Q(consumed_at__isnull=True) | Q(revoked_at__isnull=True),
+                name="sec_em_owner_one_terminal",
+            ),
+            models.UniqueConstraint(
+                fields=["scope"],
+                condition=Q(consumed_at__isnull=True, revoked_at__isnull=True),
+                name="sec_em_owner_one_live",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["scope", "consumed_at", "revoked_at"], name="sec_em_owner_status_idx"),
+        ]
+
+    def __str__(self):
+        state = "consumed" if self.consumed_at else "revoked" if self.revoked_at else "live"
+        return f"{self.scope}:{state}"

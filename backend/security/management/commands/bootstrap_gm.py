@@ -29,6 +29,10 @@ from security.mfa import (
     hash_recovery_code,
     matching_totp_counter,
 )
+from security.emergency_owner_key_service import (
+    create_initial_gm_emergency_owner_key,
+    generate_emergency_owner_key,
+)
 from security.mfa_models import (
     MFADeviceStatus,
     SecurityBootstrapToken,
@@ -202,6 +206,15 @@ class Command(BaseCommand):
             counter = matching_totp_counter(secret, code, timestamp=now.timestamp())
             if counter is None:
                 raise CommandError("TOTP confirmation failed; no GM account or slot was committed")
+            owner_key = generate_emergency_owner_key()
+            self.stdout.write("OFFLINE GM EMERGENCY OWNER KEY — shown once; store it separately from this computer:")
+            self.stdout.write(owner_key)
+            self.stdout.write("If bootstrap fails, discard this displayed key; it is not stored until the transaction commits.")
+            owner_key_confirmation = getpass.getpass(
+                "After saving the key offline, enter its last 8 characters to confirm: "
+            ).strip()
+            if not hmac.compare_digest(owner_key_confirmation, owner_key[-8:]):
+                raise CommandError("owner-key confirmation failed; no GM account or slot was committed")
 
             device = SecurityMFADevice.objects.create(
                 user=user,
@@ -227,6 +240,11 @@ class Command(BaseCommand):
                 reason="Initial local offline GM bootstrap",
             )
             claim_gm_slot(assignment)
+            owner_key_row = create_initial_gm_emergency_owner_key(
+                user,
+                owner_key,
+                at=now,
+            )
 
             token_row.consumed_at = now
             token_row.save(update_fields=["consumed_at"])
@@ -241,11 +259,14 @@ class Command(BaseCommand):
                     "recovery_codes_issued": 10,
                     "is_staff": True,
                     "is_superuser": False,
+                    "emergency_owner_key_issued": True,
+                    "emergency_owner_key_id": owner_key_row.pk,
                 },
                 reason="Initial local GM bootstrap with confirmed TOTP",
             )
 
         self.stdout.write(self.style.SUCCESS("Initial GM bootstrap succeeded."))
+        self.stdout.write("The offline emergency owner key was confirmed and stored as a hash; the raw key will not be shown again.")
         self.stdout.write("Save these ten recovery codes offline. They are shown only once:")
         for index, raw in enumerate(recovery_codes, start=1):
             self.stdout.write(f"{index:02d}. {raw}")
