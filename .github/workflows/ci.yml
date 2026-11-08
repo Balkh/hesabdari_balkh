@@ -70,6 +70,27 @@ jobs:
       - run: backend/.venv/bin/python -m pip install -r requirements.txt
       - run: scripts/verify_postgresql.sh
 
+
+  windows-key-custody-evaluation:
+    name: Windows key custody evaluation (\${{ matrix.runner }})
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [windows-2022, windows-2025]
+    runs-on: \${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Identify Windows runner and process identity
+        run: |
+          python -c "import getpass, platform, sys; print(platform.platform()); print('Python:', sys.version); print('Process user:', getpass.getuser())"
+      - name: Install isolated evaluation dependency
+        run: python -m pip install --disable-pip-version-check pytest
+      - name: Probe DPAPI CurrentUser and Credential Manager
+        working-directory: backend
+        run: python -m pytest -q security/test_windows_key_custody_eval.py
   tauri:
     runs-on: ubuntu-latest
     steps:
