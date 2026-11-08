@@ -59,8 +59,12 @@ def test_provider_refuses_to_overwrite_an_existing_or_partial_vault():
         )
         with pytest.raises(KeyUnavailableError):
             provider.provision()
-        assert provider.active_key_id() if False else True
-        assert provider._active_target()
+        # An active pointer without its referenced key is an invalid partial
+        # vault; reads fail closed and the existing pointer is not overwritten.
+        with pytest.raises(KeyUnavailableError):
+            provider.active_key_id()
+        from security.windows_key_provider import _read_generic
+        assert _read_generic(provider._active_target()) == provider.KEY_ID.encode("ascii")
         assert _delete_generic(provider._active_target())
     finally:
         _cleanup(provider)
