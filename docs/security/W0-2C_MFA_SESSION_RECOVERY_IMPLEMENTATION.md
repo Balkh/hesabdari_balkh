@@ -117,3 +117,40 @@ Not yet implemented:
 Verification note:
 - Earlier exact-head CI exposed Django's 30-character index-name limit; the two names were shortened.
 - Subsequent runs before migration 0007 were expected to fail the repository's makemigrations --check because the model fields had been added before their migration. Verify the newest exact head after migration 0007 and service tests land; do not infer success from intermediate runs.
+## 12. Current implementation snapshot — supersedes earlier status statements
+
+Sections 11 and earlier are historical progress notes. Where they say a capability is not implemented, this section records the later branch state.
+
+### Implemented in code on this feature branch
+
+- AES-256-GCM envelope encryption, 96-bit nonce, version/key-id metadata, and AAD binding to purpose and subject. Key material is injected through the KeyProvider interface; no plaintext, environment-variable, or ordinary-file fallback exists.
+- RFC 6238 TOTP profile: SHA-1 compatibility, six digits, 30-second step, ±1-step acceptance, replay-counter enforcement, and per-device failure throttling.
+- Durable MFA, recovery-code, and login-session models, including migrations 0006–0011. TOTP secrets are encrypted; recovery codes and session keys are stored only as hashes.
+- Password login and logout endpoints, anonymous-login CSRF enforcement, login throttling, audit events, and server-side session registry validation.
+- GM MFA is mandatory. Online GM login using a recovery code is denied; GM recovery-code rotation and employee self-service enrollment/disable routes are blocked for GM identities.
+- Employee MFA enrollment and confirmation, ten one-time recovery codes, recovery-code rotation after password plus a strong second factor, and optional employee disable only when GM policy does not require MFA. Disabling revokes active sessions.
+- GM-controlled employee MFA requirement, restricted to the active singleton-linked GM and written to audit history.
+- Two active session slots enforced by a database partial unique constraint; a third session is rejected without evicting either existing session. Idle timeout is 15 minutes; absolute lifetime is 12 hours.
+- Initial GM bootstrap commands: issue_gm_bootstrap_token creates a 256-bit, ten-minute, one-time token and stores only its SHA-256 hash; bootstrap_gm is interactive/local-only, requires a configured 32-byte OS-backed provider, confirms TOTP before claiming the singleton GM slot, creates ten hashed recovery codes, consumes the token, and audits the bootstrap.
+- Initial bootstrap is permanently closed when any GM assignment history exists or an initial token has already been consumed. This command cannot replace, recover, revoke, or transfer an existing GM.
+
+### Exact CI evidence
+
+- Commit 337d1da946a47dd8e93a2378da5142d658661833, run 42329560991: all four jobs completed successfully — Backend, PostgreSQL 17.11, Frontend, and Tauri.
+- Backend Django suite: 431 tests, 2 skipped. pytest suite: 1,342 passed, 10 skipped. PostgreSQL Django suite: 431 tests and POSTGRESQL VERIFICATION: PASS.
+- Frontend audit reported zero vulnerabilities. Tauri evidence is the Linux shell cargo check plus frontend build; it is not a Windows installer or packaged runtime test.
+- Commit c57995b70d5823b9c719e8d47d603966bc988d28 renamed three test key-provider helper classes to eliminate pytest collection warnings. Its exact-head CI run must complete before that warning cleanup is called verified.
+
+### Not implemented / not verified — release blockers
+
+1. No production Windows key provider has been selected or integrated. The backend still exposes only the injected KeyProvider interface. DPAPI CurrentUser and Windows Credential Manager must be compared under the actual execution identity on Windows 10 and Windows 11; Linux CI cannot prove Windows ACLs, persistence, reboot behavior, profile loss, or key recovery.
+2. The Tauri shell currently packages only the React frontend. Its Rust entry point has no backend sidecar/process integration or key-provider bridge. The Django runtime is not yet launched by the desktop shell. Therefore the Windows backend execution identity and local-only service boundary are not yet established.
+3. No separate offline GM emergency owner-key workflow exists. Lost-password-and-phone recovery, secure key custody outside the computer, MFA/session revocation, replacement TOTP enrollment, and audit-preserving local recovery remain unimplemented.
+4. Django Admin remains deny-all. A dedicated singleton-GM-plus-verified-MFA gate must be implemented and tested for every Admin request before it can be enabled.
+5. The two-minute session-expiry warning, packaged Windows installer/runtime tests, and actual Windows 10/11 validation remain outstanding.
+6. BasicAuthentication still requires the planned route-by-route compatibility review before any broader authentication-class change.
+7. Account lockout and related W0-2D controls, append-only/hash-chain audit controls in W0-2E, and trusted-origin controls in W0-2F remain separate workstreams.
+
+### Release decision
+
+W0-2C remains Draft, Open, unmerged, and not Production-ready. The successful run above verifies only the exact commit cited. The current branch head must have its own successful CI before its latest changes are verified. No merge, un-draft, Production enablement, or freeze is authorized by this status update.
