@@ -16,7 +16,7 @@ from security.mfa_service import (
 from security.mfa_models import MFADeviceStatus, SecurityMFADevice, SecurityRecoveryCode
 
 
-class TestKeyProvider:
+class StaticMFAKeyProvider:
     def __init__(self):
         self.key = b"K" * 32
 
@@ -34,7 +34,7 @@ class MFALifecycleServiceTests(TestCase):
         self.user = get_user_model().objects.create_user(
             username="mfa-lifecycle", password="Strong-test-password-123"
         )
-        self.provider = TestKeyProvider()
+        self.provider = StaticMFAKeyProvider()
 
     def test_enrollment_stores_only_ciphertext_and_activates_after_valid_totp(self):
         now = timezone.now().replace(microsecond=0)

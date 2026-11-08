@@ -19,7 +19,7 @@ from security.models import GMRoleSlot, Role, UserRoleAssignment
 from security.session_service import register_login_session, session_key_digest
 
 
-class TestKeyProvider:
+class StaticMFAKeyProvider:
     def __init__(self):
         self.key = b"Q" * 32
 
@@ -34,7 +34,7 @@ class TestKeyProvider:
 
 @override_settings(
     ERP_RBAC_ENFORCEMENT=True,
-    ERP_MFA_KEY_PROVIDER="security.test_mfa_views.TestKeyProvider",
+    ERP_MFA_KEY_PROVIDER="security.test_mfa_views.StaticMFAKeyProvider",
 )
 class EmployeeMFAApiTests(TestCase):
     def setUp(self):
@@ -51,7 +51,7 @@ class EmployeeMFAApiTests(TestCase):
         register_login_session(self.user, self.client.session.session_key)
 
     def _enroll_directly(self, now):
-        provider = TestKeyProvider()
+        provider = StaticMFAKeyProvider()
         started = begin_mfa_enrollment(self.user, provider=provider)
         confirm_mfa_enrollment(
             self.user,

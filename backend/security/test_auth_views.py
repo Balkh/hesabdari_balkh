@@ -17,7 +17,7 @@ from security.session_service import (
 )
 
 
-class TestKeyProvider:
+class StaticMFAKeyProvider:
     def __init__(self):
         self.key = b"T" * 32
 
@@ -80,11 +80,11 @@ class SecurityLoginFlowTests(TestCase):
         self.assertEqual(response.data["error"], "mfa_enrollment_required")
         self.assertEqual(SecurityLoginSession.objects.filter(user=self.user).count(), 0)
 
-    @override_settings(ERP_MFA_KEY_PROVIDER="security.test_auth_views.TestKeyProvider")
+    @override_settings(ERP_MFA_KEY_PROVIDER="security.test_auth_views.StaticMFAKeyProvider")
     def test_gm_login_requires_totp_and_marks_session_mfa_verified(self):
         self._make_gm()
         start = timezone.now().replace(microsecond=0)
-        provider = TestKeyProvider()
+        provider = StaticMFAKeyProvider()
         enrollment = begin_mfa_enrollment(self.user, provider=provider)
         confirm_mfa_enrollment(
             self.user,
