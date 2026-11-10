@@ -8,7 +8,7 @@ import uuid
 
 import pytest
 
-from security.crypto import KeyUnavailableError
+from security.errors import KeyUnavailableError
 from security.windows_key_provider import WindowsCredentialManagerKeyProvider, _delete_generic
 
 
