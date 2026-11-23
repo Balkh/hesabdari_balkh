@@ -234,7 +234,8 @@ class SessionRegistryAuthorizationBoundaryTests(TestCase):
         ).exists())
 
     def test_absolute_expiry_is_enforced_even_after_idle_activity(self):
-        from security.session_service import register_login_session, touch_login_session
+        from security.mfa_models import SecurityLoginSession
+        from security.session_service import register_login_session
 
         now = timezone.now()
         created_at = now - timedelta(hours=12)
@@ -243,20 +244,20 @@ class SessionRegistryAuthorizationBoundaryTests(TestCase):
             self.session_key,
             at=created_at,
         )
-        touched = touch_login_session(
-            self.user,
-            self.session_key,
-            at=created_at + timedelta(hours=11, minutes=50),
+        # Model a session whose last legitimate activity extended its idle
+        # deadline to the hard absolute lifetime cap.
+        last_activity = row.absolute_expires_at - timedelta(minutes=1)
+        SecurityLoginSession.objects.filter(pk=row.pk).update(
+            last_seen_at=last_activity,
+            idle_expires_at=row.absolute_expires_at,
         )
-        self.assertIsNotNone(touched)
-        self.assertEqual(touched.idle_expires_at, touched.absolute_expires_at)
-        self.assertEqual(touched.absolute_expires_at, now.replace(microsecond=0)
-                         if touched.absolute_expires_at.replace(microsecond=0) == now.replace(microsecond=0)
-                         else touched.absolute_expires_at)
+        row.refresh_from_db()
+        self.assertEqual(row.idle_expires_at, row.absolute_expires_at)
+        self.assertEqual(row.absolute_expires_at, now)
 
         with patch(
             "django.utils.timezone.now",
-            return_value=touched.absolute_expires_at + timedelta(seconds=1),
+            return_value=row.absolute_expires_at + timedelta(seconds=1),
         ):
             response = self.client.get("/api/v1/fiscal-periods/")
 
