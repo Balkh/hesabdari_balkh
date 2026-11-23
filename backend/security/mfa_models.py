@@ -322,6 +322,7 @@ class SecurityLoginAttempt(models.Model):
         ordering = ["-occurred_at", "-id"]
         indexes = [
             models.Index(fields=["user", "occurred_at"], name="sec_login_user_time_idx"),
+            models.Index(fields=["username_digest", "occurred_at"], name="sec_login_name_time_idx"),
             models.Index(fields=["username_digest", "source_digest", "occurred_at"], name="sec_login_name_src_time"),
             models.Index(fields=["source_digest", "occurred_at"], name="sec_login_source_time"),
         ]
