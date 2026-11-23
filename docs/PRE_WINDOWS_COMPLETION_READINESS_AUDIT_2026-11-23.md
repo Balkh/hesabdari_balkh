@@ -83,13 +83,41 @@ Current controls also include:
 
 ### 3.2 Remaining security work
 
-1. **W0-2D — Account lockout and recovery administration:** `account_locked()` in `backend/security/authorization.py` is currently a no-op. OD-5 requires failed-login logging, configurable account lockout, and GM review/unlock capability. The numeric defaults are already owner-approved in W0-2A §9A Item 4: five consecutive failed password attempts trigger a 15-minute temporary lock; the counter resets after 15 minutes without another failed attempt or after successful authentication. The implementation must also rate-limit by account and local source, keep the lock duration bounded, and support controlled GM unlock. The login throttle is not a substitute for account-level lockout.
+1. **W0-2D — Account lockout and recovery administration:** the original W0-2C baseline had `account_locked()` as a no-op. PR #60 (`security/w0-2d-account-lockout`) now contains an implementation candidate that wires the owner-approved 5-failure/15-minute policy into the resolver, revokes existing registered sessions on lock, records privacy-preserving attempts, and provides GM+verified-MFA review/unlock APIs. Its latest branch SHA at this audit update is `df248bd43a502c399d799363d1d7a58371c856f5`; exact-head CI run #45239547929 is still in progress, so this is not accepted or complete. The additional account/source rate limiter reuses the existing `security_login=10/min` setting and has been added to both password login and BasicAuthentication; exact-head Backend/PostgreSQL results are still pending.
 2. **W0-2E — Append-only/tamper-evident security audit:** The required control is not yet implemented as an enforceable append-only/hash-chain audit subsystem. Existing AuditEvent usage is a foundation, not proof against ordinary application-level tampering or a complete security event catalogue.
 3. **W0-2F — Trusted-origin controls:** Trusted browser/WebView origins and the local API boundary need explicit restrictive configuration and tests. No wildcard trusted origin is acceptable. This must be coordinated with the actual Tauri local-runtime transport/origin contract.
 4. **BasicAuthentication residual:** BasicAuthentication remains on selected frozen compatibility routes for employees not subject to MFA. Basic requests do not create registry-managed sessions, so they bypass the two-session admission cap, idle/absolute timeout, and per-session revocation. Removing it would alter the frozen Batch 2/3 compatibility contract; retaining it requires a documented, explicit owner risk decision.
 5. **Django Admin:** Keep all `/admin` routes denied (404) until the dedicated singleton-GM + verified-MFA + account-lockout authorization gate and its negative-path tests exist.
 
 OD-5 records the account-security requirements; the later owner-approved W0-2A §9A Item 4 resolves the initial numeric lockout/session defaults. W0-2D can implement those approved values without reopening them.
+
+
+### 3.2.1 W0-2E source inventory — centralization is a real prerequisite
+
+A source-level inventory was performed against the W0-2D branch at `df248bd43a502c399d799363d1d7a58371c856f5`, while GitHub code-search excerpts for pre-existing business services came from unchanged `main` SHA `6498f37c3b37fd802676a11fd8012b98bad1c754`. This distinction matters: PR #60 adds security audit producers that did not exist on the earlier main baseline.
+
+**Existing business writer surface:** `backend/security/services.py::record_audit_event()` is the shared writer and currently performs a direct `AuditEvent.objects.create()`. Repository code search identified at least 23 domain service modules calling it: UOM, Parties, Warehouses, Categories, Cash Accounts, Exchange Houses, Products, Payments, Fiscal Periods, Purchases, Accounting, Goods-in-Transit, Customer Custody, Party Ledger, Inventory, Sales Returns/Refunds, Sales warehouse checks, landed-cost reversal/draft/posting, supplier refunds/advances, and allocations. These call sites span financial posting, reversals, master-data changes and logistics/custody operations; their surrounding transaction boundaries are not uniform.
+
+**Additional direct security writers on the current W0-2D branch:** the source audit found direct `AuditEvent.objects.create()` calls in:
+- `security/auth_views.py`: successful login and logout (2);
+- `security/mfa_service.py`: enrollment, confirmation, recovery-code consumption/rotation and MFA disable/recovery state (5);
+- `security/mfa_policy.py`: employee MFA policy changes (1);
+- `security/login_lockout.py`: failed-login, account-lock and GM unlock events (3);
+- `security/emergency_owner_key_service.py`: offline emergency-key lifecycle/recovery events (2);
+- `security/management/commands/bootstrap_gm.py`: initial GM bootstrap (1); and
+- `security/management/commands/issue_gm_bootstrap_token.py`: bootstrap-token issuance (1).
+
+That is at least 15 direct security write call sites in addition to the central writer. W0-2E must route every one of them through one chain-aware append service; leaving even one direct model write would permit a chain bypass or produce an event with missing hash metadata. The inventory must be refreshed on the implementation head before migration work because code will continue to evolve.
+
+**Schema and test constraints observed:**
+- The existing `AuditEvent` model has no `event_uuid`, `prev_event_hash`, `event_hash`, or chain-head relationship. Its `action` field is currently length 20; W0-2D extends the choices, not the chain fields.
+- `backend/accounting/test_bootstrap.py` has legacy tests that delete a bootstrap audit event and mutate an existing event's action. Those exact test intentions must be rewritten without changing audit rows before database triggers are enabled. Tests that insert independent fixture events may continue using INSERT, but production audit events must be chained; any test fixture intended to model a production chain must use the audited writer.
+- `backend/accounting/management/commands/bootstrap_fresh_database.py` writes the bootstrap marker through `record_audit_event()` inside its atomic bootstrap operation and verifies its presence on rerun. This command is a critical compatibility path for the first-run migration and chain-head initialization order.
+- The current SQLite `DATABASES["default"]` setting has no explicit `OPTIONS.transaction_mode`; the PostgreSQL verification profile uses standard `transaction.atomic()`, while production settings use PostgreSQL only.
+- The application uses both `@transaction.atomic` and nested `with transaction.atomic()` patterns across domain services. W0-2E must map each audit-producing call to its true outermost caller. A nested atomic/savepoint or a late audit-head UPDATE cannot upgrade an earlier SQLite DEFERRED transaction.
+- Migration/restore verification must prove that SQLite triggers survive normal schema rebuilds and restore, PostgreSQL triggers/functions are installed on the actual table, and a migrated database cannot expose an AuditEvent table without its protections.
+
+**Required W0-2E implementation sequence:** (1) complete the caller/transaction map; (2) resolve the explicit SQLite IMMEDIATE decision or prove a different outermost boundary; (3) design the chain-aware single writer and canonical serializer; (4) add AuditChainHead and event chain fields; (5) add vendor-specific append-only triggers; (6) migrate every direct security writer and preserve domain atomicity/idempotency; (7) rewrite the legacy mutating tests; (8) run SQLite and PostgreSQL chain, concurrency, tamper, rollback, migration and restore tests. Do not begin the trigger migration until direct writer inventory and call-site transaction boundaries are complete.
 
 ### 3.3 Tauri desktop runtime
 
@@ -187,9 +215,6 @@ The audit found these decision gates; it does not choose on the owner's behalf:
 - **W0-2E SQLite transaction boundary:** W0-2A §18.4 requires the outermost SQLite transaction for every audit-producing business operation to start with `transaction_mode="IMMEDIATE"`, before business reads. This is a connection-wide behavior change, so the architecture requires explicit owner approval or an alternative technically proven transaction-boundary design before W0-2E can ship.
 - **W0-2E backup/auditor settings:** W0-2A §23 still lists UQ-6 (backup frequency/retention) and UQ-7 (auditor-visible categories/masking) as owner decisions before W0-2E. These values must not be invented.
 - **W0-2F trusted origins:** W0-2A §23 lists UQ-8 (the exact trusted local origins) as an owner decision. It must be coordinated with the chosen Tauri origin/transport and must never use a wildcard.
-- **BasicAuthentication:** retain the narrow legacy compatibility exception with an explicit risk acceptance, or authorize a staged migration to registered SessionAuthentication on every affected route. Do not silently alter Batch 2/3.
-- **Transit-loss reversal:** obtain the remaining owner choice in `PHASE_11_OPEN_POLICY_DECISIONS.md` before implementing reversal after dependent postings.
-- **Sales accounting gates:** review the exact outstanding Sales posting/COGS/valuation/custody/returns decisions before expanding Sales posting behavior.
 - **BasicAuthentication:** retain the narrow legacy compatibility exception with an explicit risk acceptance, or authorize a staged migration to registered SessionAuthentication on every affected route. Do not silently alter Batch 2/3.
 - **Transit-loss reversal:** obtain the remaining owner choice in `PHASE_11_OPEN_POLICY_DECISIONS.md` before implementing reversal after dependent postings.
 - **Sales accounting gates:** review the exact outstanding Sales posting/COGS/valuation/custody/returns decisions before expanding Sales posting behavior.
