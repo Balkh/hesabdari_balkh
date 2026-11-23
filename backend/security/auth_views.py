@@ -202,7 +202,7 @@ def login_view(request):
                 action=AuditAction.LOGIN_SUCCESS,
                 entity="AUTHENTICATION",
                 entity_id=str(user.pk),
-                new_state={"mfa_verified": mfa_verified_at is not None},
+                new_state={"mfa_verified": mfa_verified_at is not None, "session_slot": record.slot_number},
             )
             record_audit_event(
                 user=user,

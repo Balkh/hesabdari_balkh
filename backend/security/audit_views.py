@@ -95,7 +95,7 @@ def audit_events(request):
             "reference": event.reference,
             "previous_state": _redact_sensitive(event.previous_state),
             "new_state": _redact_sensitive(event.new_state),
-            "reason": event.reason,
+            "reason": _redact_sensitive(event.reason),
             "created_at": event.created_at.isoformat(),
         }
         for event in rows
