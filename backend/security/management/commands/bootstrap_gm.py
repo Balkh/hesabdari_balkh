@@ -9,7 +9,6 @@ from __future__ import annotations
 import getpass
 import hashlib
 import hmac
-import sys
 from urllib.parse import quote
 
 from django.conf import settings
@@ -17,6 +16,8 @@ from django.contrib.auth import get_user_model
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError
 from django.core.management.base import BaseCommand, CommandError
+
+from security.local_console import LocalConsoleRequiredError, require_local_console
 from django.db import transaction
 from django.utils import timezone
 from django.utils.module_loading import import_string
@@ -51,8 +52,10 @@ TOTP_PURPOSE = "totp"
 
 
 def _require_tty():
-    if not sys.stdin.isatty() or not sys.stdout.isatty():
-        raise CommandError("GM bootstrap is local-only and requires an interactive terminal")
+    try:
+        require_local_console()
+    except LocalConsoleRequiredError as exc:
+        raise CommandError(str(exc)) from None
 
 
 def _load_key_provider():
