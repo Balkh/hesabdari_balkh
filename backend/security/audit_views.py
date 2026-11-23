@@ -53,7 +53,7 @@ def _verify_or_unavailable():
         target_source=TARGET_NONE,
     )
 )
-@api_view(["GET"])
+@api_view(["GET", "HEAD"])
 @authentication_classes([SessionAuthentication])
 @permission_classes([IsAuthenticatedForERP, IsGMWithVerifiedMFA, HasErpOperation])
 def audit_events(request):
@@ -147,7 +147,7 @@ def audit_events(request):
         target_source=TARGET_NONE,
     )
 )
-@api_view(["GET"])
+@api_view(["GET", "HEAD"])
 @authentication_classes([SessionAuthentication])
 @permission_classes([IsAuthenticatedForERP, IsGMWithVerifiedMFA, HasErpOperation])
 def audit_integrity(request):
