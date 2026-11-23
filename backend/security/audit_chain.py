@@ -280,13 +280,18 @@ def append_audit_event(
         entity=entity,
         entity_id=str(entity_id),
         reference=reference or "",
-        previous_state=_redact_sensitive(previous_state),
-        new_state=_redact_sensitive(new_state),
+        # Normalize JSONField payloads to their exact persisted representation
+        # before hashing; the JSON encoder must not transform Decimal, UUID or
+        # datetime values after the digest has been calculated.
+        previous_state=_canonical_value(_redact_sensitive(previous_state)),
+        new_state=_canonical_value(_redact_sensitive(new_state)),
         reason=reason or "",
         event_uuid=uuid4(),
         prev_event_hash=head.head_hash,
-        actor_snapshot=_redact_sensitive(_actor_snapshot(user, now)),
-        authorization_context=_redact_sensitive(_authorization_snapshot(request, authorization_context)),
+        actor_snapshot=_canonical_value(_redact_sensitive(_actor_snapshot(user, now))),
+        authorization_context=_canonical_value(
+            _redact_sensitive(_authorization_snapshot(request, authorization_context))
+        ),
         source_fingerprint=_source_fingerprint(request),
         created_at=now,
     )
