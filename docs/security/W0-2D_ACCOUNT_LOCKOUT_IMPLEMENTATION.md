@@ -16,7 +16,7 @@
 
 - A persistent `SecurityAccountLockout` row stores the per-account failure count, last failure time, and lock expiry.
 - `SecurityLoginAttempt` stores recent authentication outcomes using keyed HMAC fingerprints; it does not store plaintext username, source IP, user agent, password, or token.
-- Authorization checks the account-lock predicate at policy step 2, before protected GM authority or role grants. Existing registered sessions cannot continue protected ERP operations while the lock is active.
+- Authorization checks the account-lock predicate at policy step 2, before protected GM authority or role grants. When the fifth password failure triggers a lock, all registered active sessions for that account are revoked in the same database transaction. A timed expiry or GM unlock therefore cannot revive a previously admitted session.
 - Successful session login resets consecutive failures. A successful eligible BasicAuthentication request clears stale failures only when no active lock exists.
 - MFA failures are recorded for GM review but do not increment the password-failure counter.
 - A registered session with verified GM MFA is required to review recent attempts and issue an early unlock. Unlock requires a non-empty reason and writes an audit event in the same transaction as the state reset.
