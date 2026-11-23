@@ -46,7 +46,10 @@ class AuditTriggerAwareTransactionTestCase(TransactionTestCase):
                 autoclobber=True,
                 serialize=False,
                 keepdb=False,
-            )def reset_ephemeral_test_database(*, aliases):
+            )
+
+
+def reset_ephemeral_test_database(*, aliases):
     """Discard and recreate disposable test DBs without issuing SQL DELETE."""
     original_names = getattr(settings, "ERP_TEST_ORIGINAL_DATABASE_NAMES", {})
     for alias in aliases:
