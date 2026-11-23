@@ -407,7 +407,10 @@ def _postgres_password_file(settings_dict: dict):
         raise BackupError("PostgreSQL password is not configured")
     host = str(settings_dict.get("HOST") or "localhost")
     port = str(settings_dict.get("PORT") or "5432")
-    name = str(settings_dict["NAME"])
+    # Wildcard database applies the short-lived credential only to this exact
+    # host/port/user. It is needed because pg_dump/pg_restore also connect to
+    # maintenance and disposable restore databases, not only the live DB.
+    name = "*"
     user = str(settings_dict["USER"])
     descriptor, path = tempfile.mkstemp(prefix="hesabdari-pgpass-")
     try:
@@ -844,12 +847,21 @@ def verify_encrypted_database_backup(
     provider: BackupKeyProvider,
 ) -> dict:
     """Verify signature, ciphertext and a full restore-chain check on a disposable DB."""
-    backup_path = Path(backup_path).resolve()
+    raw_backup_path = Path(backup_path)
+    if raw_backup_path.is_symlink():
+        raise BackupError("symbolic-link backup paths are not accepted")
+    backup_path = raw_backup_path.resolve()
     checkpoint_path = Path(checkpoint_path).resolve()
     payload = verify_signed_checkpoint(checkpoint_path, provider=provider)
     if payload.get("schema") != BACKUP_SCHEMA:
         raise BackupError("signed checkpoint is not a database-backup manifest")
-    if Path(payload.get("backup_filename", "")).name != payload.get("backup_filename"):
+    backup_filename = payload.get("backup_filename", "")
+    if (
+        not isinstance(backup_filename, str)
+        or not backup_filename
+        or Path(backup_filename).name != backup_filename
+        or not backup_filename.endswith(".hbak")
+    ):
         raise BackupError("signed checkpoint backup filename is unsafe")
     expected_path = checkpoint_path.parent / payload["backup_filename"]
     if expected_path != backup_path:
