@@ -181,19 +181,15 @@ class AuditChainTests(TestCase):
         with self.assertRaises(AuditChainVerificationError):
             verify_audit_chain()
 
-    def test_duplicate_successor_is_rejected_by_unique_previous_hash(self):
-        first = self._append(entity_id="first")
-        with self.assertRaises(DatabaseError):
-            with transaction.atomic():
-                duplicate = AuditEvent(
-                    action=AuditAction.UPDATE,
-                    entity="AuditChainTest",
-                    entity_id="duplicate",
-                    event_uuid=first.event_uuid.__class__(),
-                    prev_event_hash=first.prev_event_hash,
-                    event_hash="f" * 64,
-                )
-                duplicate.save(force_insert=True)
+    def test_previous_hash_has_database_unique_constraint(self):
+        with connection.cursor() as cursor:
+            constraints = connection.introspection.get_constraints(
+                cursor, AuditEvent._meta.db_table
+            )
+        self.assertTrue(any(
+            item.get("unique") and item.get("columns") == ["prev_event_hash"]
+            for item in constraints.values()
+        ))
 
     def test_action_inventory_respects_w0_2a_width_and_naming_contract(self):
         actions = [value for value, _label in AuditAction.choices]
