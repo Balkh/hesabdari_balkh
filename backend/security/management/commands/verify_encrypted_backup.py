@@ -5,7 +5,6 @@ from security.backup_service import (
     BackupKeyUnavailable,
     load_backup_key_provider,
     verify_encrypted_database_backup,
-    _record_checkpoint_event,
 )
 from security.management.commands._backup_command_support import require_active_gm
 

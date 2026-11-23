@@ -556,7 +556,10 @@ def create_audit_checkpoint_file(
         raise BackupError("checkpoint cadence must be 'daily' or 'shift'")
     if connection.in_atomic_block:
         raise BackupError("checkpoint creation must start outside an existing transaction")
-    chain = verify_audit_chain()
+    try:
+        chain = verify_audit_chain()
+    except AuditChainVerificationError as exc:
+        raise BackupError("audit chain must verify before a checkpoint can be created") from exc
     payload = {
         "schema": CHECKPOINT_SCHEMA,
         "checkpoint_type": "audit_chain",
@@ -597,7 +600,10 @@ def create_encrypted_database_backup(
     destination_directory.mkdir(parents=True, exist_ok=True)
     _assert_backup_destination_is_external(destination_directory)
 
-    before = verify_audit_chain()
+    try:
+        before = verify_audit_chain()
+    except AuditChainVerificationError as exc:
+        raise BackupError("audit chain must verify before a database backup can be created") from exc
     stamp = timezone.now().astimezone(dt_timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     filename = f"{retention_class}-{stamp}-{uuid.uuid4().hex[:8]}.hbak"
     encrypted_path = destination_directory / filename
@@ -614,7 +620,10 @@ def create_encrypted_database_backup(
         else:
             raise BackupError(f"unsupported database engine for backup: {connection.vendor}")
 
-        after = verify_audit_chain()
+        try:
+            after = verify_audit_chain()
+        except AuditChainVerificationError as exc:
+            raise BackupError("audit chain became invalid during database backup") from exc
         _require_same_chain(before, after)
 
         encrypted = encrypt_backup_file(
@@ -718,11 +727,14 @@ def _verify_restored_rows(events, head_row, expected_payload: dict) -> dict:
     if head_row is None:
         raise AuditChainVerificationError("restored database has no audit-chain head")
     namespace_events = [_event_namespace(row) for row in events]
-    result = verify_audit_chain_records(
-        namespace_events,
-        head_hash=head_row["head_hash"],
-        last_event_id=head_row["last_event_id"],
-    )
+    try:
+        result = verify_audit_chain_records(
+            namespace_events,
+            head_hash=head_row["head_hash"],
+            last_event_id=head_row["last_event_id"],
+        )
+    except AuditChainVerificationError as exc:
+        raise BackupError("restored database audit chain failed full verification") from exc
     expected = (
         expected_payload["chain_event_count"],
         expected_payload["chain_head_hash"],
