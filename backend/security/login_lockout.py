@@ -17,7 +17,8 @@ from security.mfa_models import (
     SecurityLoginAttemptOutcome,
     SecurityLoginSession,
 )
-from security.models import AuditAction, AuditEvent
+from security.models import AuditAction
+from security.services import record_audit_event
 from security.request_context import get_current_request
 
 PASSWORD_FAILURE_LIMIT = 5
@@ -146,7 +147,7 @@ def _record_attempt(*, user, username, request, outcome, at, failure_count=None,
         occurred_at=at,
     )
     if outcome != SecurityLoginAttemptOutcome.SUCCESS:
-        AuditEvent.objects.create(
+        record_audit_event(
             user=None,
             action=AuditAction.LOGIN_FAILED,
             entity="AUTHENTICATION",
@@ -214,7 +215,7 @@ def _record_password_failure_once(*, user, username, request, at):
                 revoked_at=at,
                 revoke_reason="ACCOUNT_LOCKED",
             )
-            AuditEvent.objects.create(
+            record_audit_event(
                 user=None,
                 action=AuditAction.ACCOUNT_LOCKED,
                 entity="ACCOUNT",
@@ -348,7 +349,7 @@ def unlock_account(user, actor, *, reason, at=None):
         state.save(update_fields=[
             "failed_password_attempts", "last_failed_at", "locked_until", "updated_at"
         ])
-        AuditEvent.objects.create(
+        record_audit_event(
             user=actor,
             action=AuditAction.ACCOUNT_UNLOCKED,
             entity="ACCOUNT",

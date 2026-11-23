@@ -37,7 +37,8 @@ from security.mfa_service import (
     consume_recovery_code,
     verify_user_totp,
 )
-from security.models import AuditAction, AuditEvent
+from security.models import AuditAction
+from security.services import record_audit_event
 from security.operation_registry import (
     OperationSpec,
     TARGET_REQUEST_USER,
@@ -196,9 +197,9 @@ def login_view(request):
                 request._request,
                 at=now,
             )
-            AuditEvent.objects.create(
+            record_audit_event(
                 user=user,
-                action=AuditAction.LOGIN,
+                action=AuditAction.LOGIN_SUCCESS,
                 entity="AUTH_SESSION",
                 entity_id=str(user.pk),
                 new_state={
@@ -244,7 +245,7 @@ def logout_view(request):
         with transaction.atomic():
             if session_key:
                 revoke_login_session(user, session_key, reason="LOGOUT")
-            AuditEvent.objects.create(
+            record_audit_event(
                 user=user,
                 action=AuditAction.LOGOUT,
                 entity="AUTH_SESSION",
