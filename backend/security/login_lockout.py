@@ -18,6 +18,7 @@ from security.mfa_models import (
     SecurityLoginSession,
 )
 from security.models import AuditAction, AuditEvent
+from security.request_context import get_current_request
 
 PASSWORD_FAILURE_LIMIT = 5
 PASSWORD_COUNTER_RESET = timedelta(minutes=15)
@@ -41,11 +42,12 @@ def username_fingerprint(username) -> str:
 
 
 def request_source_fingerprint(request) -> str:
-    """Fingerprint the socket peer and client agent; never trust forwarded headers."""
+    """Fingerprint the socket peer; never trust caller-controlled forwarded headers."""
+    if request is None:
+        request = get_current_request()
     meta = getattr(request, "META", {}) if request is not None else {}
     remote = str(meta.get("REMOTE_ADDR") or "unknown")[:128]
-    agent = str(meta.get("HTTP_USER_AGENT") or "")[:512]
-    return _fingerprint("source", remote + "\x00" + agent)
+    return _fingerprint("source", remote)
 
 
 def find_user_for_login(username):
@@ -66,6 +68,40 @@ def is_account_locked(user, *, at=None) -> bool:
     return SecurityAccountLockout.objects.filter(
         user_id=user.pk, locked_until__gt=now
     ).exists()
+
+
+def login_failure_rate(*, at=None):
+    """Reuse the existing security_login DRF rate; no new numeric policy is invented."""
+    from rest_framework.throttling import SimpleRateThrottle
+
+    configured = getattr(settings, "REST_FRAMEWORK", {}).get("DEFAULT_THROTTLE_RATES", {})
+    rate = configured.get("security_login")
+    if not rate:
+        raise RuntimeError("REST_FRAMEWORK.DEFAULT_THROTTLE_RATES.security_login is required")
+    count, duration = SimpleRateThrottle().parse_rate(rate)
+    if count is None or duration is None or count < 1 or duration < 1:
+        raise RuntimeError("security_login rate must be a positive bounded rate")
+    return count, timedelta(seconds=duration)
+
+
+def is_login_rate_limited(username, request, *, at=None) -> bool:
+    """Enforce the existing login-failure budget independently per account and source."""
+    now = at or timezone.now()
+    limit, window = login_failure_rate(at=now)
+    cutoff = now - window
+    name_digest = username_fingerprint(username)
+    source_digest = request_source_fingerprint(request)
+    recent = SecurityLoginAttempt.objects.filter(
+        occurred_at__gte=cutoff,
+        outcome__in=(
+            SecurityLoginAttemptOutcome.PASSWORD_FAILED,
+            SecurityLoginAttemptOutcome.LOCKED,
+        ),
+    )
+    return (
+        recent.filter(username_digest=name_digest).count() >= limit
+        or recent.filter(source_digest=source_digest).count() >= limit
+    )
 
 
 def _retry_sqlite_lock(operation):
