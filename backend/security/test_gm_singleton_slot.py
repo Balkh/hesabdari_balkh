@@ -492,6 +492,12 @@ class SingletonSlotMigrationTests(AuditTriggerAwareTransactionTestCase):
         _reseed_rbac_catalog()
 
     def _reverse_to_0004(self):
+        # This test must exercise the legacy GM-slot migration on an empty,
+        # disposable pre-W0-2E audit history. The chain backfill is intentionally
+        # irreversible once any event exists, so recreate the test DB rather
+        # than deleting or bypassing audit rows.
+        self.reset_test_database()
+        _reseed_rbac_catalog()
         call_command("migrate", "security", "0004", verbosity=0, interactive=False)
 
     def _apply_all(self):
