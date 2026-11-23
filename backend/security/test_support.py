@@ -1,72 +1,49 @@
-"""Test-only TransactionTestCase base for append-only audit database triggers."""
+"""Isolated TransactionTestCase database reset for append-only audit history.
 
+The audit triggers remain installed for the entire test body. Django's default
+TransactionTestCase cleanup uses DELETE/flush, which must be rejected by the
+append-only database guard. These tests therefore discard the disposable test
+database itself and recreate it by running all migrations. No audit row is
+mutated, no trigger is disabled, and the reconstructed database has the same
+schema guards as a fresh installation.
+"""
+
+from django.conf import settings
 from django.db import connections
 from django.test import TransactionTestCase
 
-GENESIS_HASH = "0" * 64
-
 
 class AuditTriggerAwareTransactionTestCase(TransactionTestCase):
-    """Keep production triggers active during tests, but permit Django test flush.
-
-    Django's TransactionTestCase flushes tables with DELETE, which correctly
-    conflicts with the production append-only triggers. We drop only the two
-    triggers immediately around the framework-owned test flush, then restore
-    them in a finally block. Test bodies still execute against the real guards.
-    """
+    """Reset by discarding the ephemeral database, never by flushing rows."""
 
     def _fixture_teardown(self):
         aliases = self._databases_names(include_mirrors=False)
+        original_names = getattr(settings, "ERP_TEST_ORIGINAL_DATABASE_NAMES", {})
         for alias in aliases:
-            self._drop_triggers(alias)
-        try:
-            super()._fixture_teardown()
-        finally:
-            for alias in aliases:
-                self._install_triggers(alias)
-
-    @staticmethod
-    def _drop_triggers(alias):
-        connection = connections[alias]
-        tables = set(connection.introspection.table_names())
-        if "security_auditevent" not in tables:
-            return
-        with connection.cursor() as cursor:
-            if connection.vendor == "sqlite":
-                cursor.execute("DROP TRIGGER IF EXISTS security_auditevent_no_update")
-                cursor.execute("DROP TRIGGER IF EXISTS security_auditevent_no_delete")
-            elif connection.vendor == "postgresql":
-                cursor.execute(
-                    "DROP TRIGGER IF EXISTS security_auditevent_no_update_delete "
-                    "ON security_auditevent"
+            connection = connections[alias]
+            if connection.in_atomic_block:
+                raise AssertionError(
+                    "Audit test database cannot be discarded while a transaction is active"
+                )
+            if alias not in original_names:
+                raise AssertionError(
+                    f"ERP_TEST_ORIGINAL_DATABASE_NAMES must define database alias {alias!r}"
                 )
 
-    @staticmethod
-    def _install_triggers(alias):
-        connection = connections[alias]
-        tables = set(connection.introspection.table_names())
-        if "security_auditevent" not in tables:
-            return
-        with connection.cursor() as cursor:
-            if connection.vendor == "sqlite":
-                cursor.execute(
-                    "CREATE TRIGGER IF NOT EXISTS security_auditevent_no_update "
-                    "BEFORE UPDATE ON security_auditevent "
-                    "BEGIN SELECT RAISE(ABORT, 'security_auditevent is append-only'); END"
-                )
-                cursor.execute(
-                    "CREATE TRIGGER IF NOT EXISTS security_auditevent_no_delete "
-                    "BEFORE DELETE ON security_auditevent "
-                    "BEGIN SELECT RAISE(ABORT, 'security_auditevent is append-only'); END"
-                )
-            elif connection.vendor == "postgresql":
-                cursor.execute(
-                    "CREATE OR REPLACE FUNCTION security_reject_audit_mutation() "
-                    "RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN "
-                    "RAISE EXCEPTION 'security_auditevent is append-only'; END; $$"
-                )
-                cursor.execute(
-                    "CREATE TRIGGER security_auditevent_no_update_delete "
-                    "BEFORE UPDATE OR DELETE ON security_auditevent "
-                    "FOR EACH ROW EXECUTE FUNCTION security_reject_audit_mutation()"
-                )
+            creation = connection.creation
+            original_name = original_names[alias]
+            # destroy_test_db() closes the current test connection, drops the
+            # disposable database, and restores the original configured NAME.
+            creation.destroy_test_db(
+                old_database_name=original_name,
+                verbosity=0,
+                keepdb=False,
+            )
+            # Recreate a clean database and rerun every migration. This
+            # reinstalls append-only triggers before the next test starts.
+            creation.create_test_db(
+                verbosity=0,
+                autoclobber=True,
+                serialize=False,
+                keepdb=False,
+            )
