@@ -93,10 +93,12 @@ class OperationSpecValidationTests(SimpleTestCase):
         self.assertEqual(operation.target_source, TARGET_URL_KWARG)
         self.assertEqual(operation.target_kwarg, "user_id")
 
-    def test_mounted_route_inventory_has_eighteen_unique_operations(self):
+    def test_mounted_route_inventory_has_twenty_unique_operations(self):
         expected = {
             "security.me.retrieve",
             "security.auth.logout_own",
+            "security.lockout.review",
+            "security.account.unlock",
             "security.mfa.policy.update_employee",
             "security.mfa.enroll.start_own",
             "security.mfa.enroll.confirm_own",
@@ -115,7 +117,7 @@ class OperationSpecValidationTests(SimpleTestCase):
             "purchases.landedcost.object.reverse",
         }
         self.assertEqual(set(OPERATION_SPECS), expected)
-        self.assertEqual(len(OPERATION_SPECS), 18)
+        self.assertEqual(len(OPERATION_SPECS), 20)
 
     def test_shared_permission_key_can_have_distinct_collection_and_object_operations(self):
         collection = OPERATION_SPECS["purchases.landedcost.collection.list"]
