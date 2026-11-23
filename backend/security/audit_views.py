@@ -44,17 +44,6 @@ def _verify_or_unavailable():
         return None
 
 
-@erp_operations(
-    GET=OperationSpec(
-        operation_id="security.audit.events.list",
-        permission_key="audit.report.view",
-        binding_kind=COLLECTION,
-        target_source=TARGET_NONE,
-    )
-)
-@api_view(["GET", "HEAD"])
-@authentication_classes([SessionAuthentication])
-@permission_classes([IsAuthenticatedForERP, IsGMWithVerifiedMFA, HasErpOperation])
 def _build_audit_events_payload(request):
     """Build one bounded, chain-verified event page for GM review/export."""
     integrity = _verify_or_unavailable()
@@ -93,7 +82,7 @@ def _build_audit_events_payload(request):
         except (TypeError, ValueError):
             return None, Response({"error": "invalid_before_id"}, status=status.HTTP_400_BAD_REQUEST)
         if parsed_before_id <= 0:
-            return Response({"error": "invalid_before_id"}, status=status.HTTP_400_BAD_REQUEST)
+            return None, Response({"error": "invalid_before_id"}, status=status.HTTP_400_BAD_REQUEST)
         queryset = queryset.filter(pk__lt=parsed_before_id)
 
     rows = list(queryset[:limit])
