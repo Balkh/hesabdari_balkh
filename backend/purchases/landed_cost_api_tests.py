@@ -186,8 +186,9 @@ class LandedCostApiTests(TestCase):
         )
         self.assertEqual(denied.status_code, 403, denied.content)
         self.assertEqual(LandedCostReversal.objects.count(), 0)
-        document = LandedCostDocument.objects.get(pk=document_id)
-        self.assertIsNone(document.reversal_id)
+        self.assertFalse(
+            LandedCostReversal.objects.filter(cost_document_id=document_id).exists()
+        )
 
     @override_settings(ERP_RBAC_ENFORCEMENT=True)
     def test_basic_auth_compatibility_allows_granted_landed_cost_post_without_registry_session(self):
