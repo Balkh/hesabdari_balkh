@@ -6,7 +6,6 @@ import json
 import logging
 
 from django.core.serializers.json import DjangoJSONEncoder
-
 from django.http import HttpResponse
 from rest_framework import status
 from rest_framework.authentication import SessionAuthentication
@@ -56,11 +55,11 @@ def _verify_or_unavailable():
 @api_view(["GET", "HEAD"])
 @authentication_classes([SessionAuthentication])
 @permission_classes([IsAuthenticatedForERP, IsGMWithVerifiedMFA, HasErpOperation])
-def audit_events(request):
-    """Return GM-only, chain-verified audit events; export is JSON and capped."""
+def _build_audit_events_payload(request):
+    """Build one bounded, chain-verified event page for GM review/export."""
     integrity = _verify_or_unavailable()
     if integrity is None:
-        return Response(
+        return None, Response(
             {"error": "audit_integrity_unavailable"},
             status=status.HTTP_503_SERVICE_UNAVAILABLE,
         )
@@ -69,9 +68,9 @@ def audit_events(request):
     try:
         limit = int(raw_limit)
     except (TypeError, ValueError):
-        return Response({"error": "invalid_limit"}, status=status.HTTP_400_BAD_REQUEST)
+        return None, Response({"error": "invalid_limit"}, status=status.HTTP_400_BAD_REQUEST)
     if not 1 <= limit <= 1000:
-        return Response(
+        return None, Response(
             {"error": "limit_must_be_between_1_and_1000"},
             status=status.HTTP_400_BAD_REQUEST,
         )
@@ -80,19 +79,19 @@ def audit_events(request):
     action = request.query_params.get("action")
     if action:
         if action not in AuditAction.values:
-            return Response({"error": "invalid_action"}, status=status.HTTP_400_BAD_REQUEST)
+            return None, Response({"error": "invalid_action"}, status=status.HTTP_400_BAD_REQUEST)
         queryset = queryset.filter(action=action)
     entity = request.query_params.get("entity")
     if entity:
         if len(entity) > 100:
-            return Response({"error": "invalid_entity"}, status=status.HTTP_400_BAD_REQUEST)
+            return None, Response({"error": "invalid_entity"}, status=status.HTTP_400_BAD_REQUEST)
         queryset = queryset.filter(entity=entity)
     before_id = request.query_params.get("before_id")
     if before_id:
         try:
             parsed_before_id = int(before_id)
         except (TypeError, ValueError):
-            return Response({"error": "invalid_before_id"}, status=status.HTTP_400_BAD_REQUEST)
+            return None, Response({"error": "invalid_before_id"}, status=status.HTTP_400_BAD_REQUEST)
         if parsed_before_id <= 0:
             return Response({"error": "invalid_before_id"}, status=status.HTTP_400_BAD_REQUEST)
         queryset = queryset.filter(pk__lt=parsed_before_id)
@@ -129,29 +128,55 @@ def audit_events(request):
         "next_before_id": rows[-1].pk if len(rows) == limit else None,
     }
 
-    if request.query_params.get("export") == "json":
-        # Viewing and exporting are distinct catalog capabilities. The outer
-        # GM+MFA guard remains mandatory for both; export additionally checks
-        # its dedicated grant through the same RBAC resolver.
-        from security.authorization import AuthContext, resolve
 
-        export_decision = resolve(
-            request.user,
-            "audit.report.export",
-            auth_context=AuthContext.from_request(request),
+    return response_data, None
+
+
+@erp_operations(
+    GET=OperationSpec(
+        operation_id="security.audit.events.list",
+        permission_key="audit.report.view",
+        binding_kind=COLLECTION,
+        target_source=TARGET_NONE,
+    )
+)
+@api_view(["GET", "HEAD"])
+@authentication_classes([SessionAuthentication])
+@permission_classes([IsAuthenticatedForERP, IsGMWithVerifiedMFA, HasErpOperation])
+def audit_events(request):
+    """Return a bounded GM-only event page; export has a separate permission."""
+    if "export" in request.query_params:
+        return Response(
+            {"error": "use_dedicated_audit_export_endpoint"},
+            status=status.HTTP_400_BAD_REQUEST,
         )
-        if not export_decision.allowed:
-            return Response(
-                {"error": "audit_export_forbidden"},
-                status=status.HTTP_403_FORBIDDEN,
-            )
-        response = HttpResponse(
-            json.dumps(response_data, cls=DjangoJSONEncoder, ensure_ascii=False, separators=(",", ":")),
-            content_type="application/json; charset=utf-8",
-        )
-        response["Content-Disposition"] = 'attachment; filename="hesabdari-audit-events.json"'
-        return response
-    return Response(response_data)
+    payload, error = _build_audit_events_payload(request)
+    return error if error is not None else Response(payload)
+
+
+@erp_operations(
+    GET=OperationSpec(
+        operation_id="security.audit.events.export",
+        permission_key="audit.report.export",
+        binding_kind=COLLECTION,
+        target_source=TARGET_NONE,
+    )
+)
+@api_view(["GET", "HEAD"])
+@authentication_classes([SessionAuthentication])
+@permission_classes([IsAuthenticatedForERP, IsGMWithVerifiedMFA, HasErpOperation])
+def audit_events_export(request):
+    """Export a bounded audit page; the route itself requires export permission."""
+    payload, error = _build_audit_events_payload(request)
+    if error is not None:
+        return error
+    response = HttpResponse(
+        json.dumps(payload, cls=DjangoJSONEncoder, ensure_ascii=False, separators=(",", ":")),
+        content_type="application/json; charset=utf-8",
+    )
+    response["Content-Disposition"] = 'attachment; filename="hesabdari-audit-events.json"'
+    return response
+
 
 
 @erp_operations(

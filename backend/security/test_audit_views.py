@@ -1,7 +1,7 @@
 from datetime import timedelta
 
 from django.contrib.auth import get_user_model
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.utils import timezone
 from rest_framework.test import APIClient
 
@@ -16,6 +16,7 @@ from security.mfa_models import SecurityLoginSession
 from security.session_service import session_key_digest
 
 
+@override_settings(ERP_RBAC_ENFORCEMENT=True, ERP_RBAC_ALLOW_AUTHENTICATED_ONLY=False)
 class AuditReviewAccessTests(TestCase):
     def setUp(self):
         self.User = get_user_model()
@@ -79,7 +80,7 @@ class AuditReviewAccessTests(TestCase):
         self._login_employee()
         for url in (
             "/api/v1/security/audit/events/",
-            "/api/v1/security/audit/events/?export=json",
+            "/api/v1/security/audit/events/export/",
             "/api/v1/security/audit/integrity/",
         ):
             response = self.client.get(url)
@@ -100,12 +101,22 @@ class AuditReviewAccessTests(TestCase):
 
     def test_verified_singleton_gm_export_requires_export_capability(self):
         user = self._login_gm_with_mfa()
-        response = self.client.get("/api/v1/security/audit/events/?export=json")
+        response = self.client.get("/api/v1/security/audit/events/export/")
         self.assertEqual(response.status_code, 403)
 
         role = Role.objects.get(code="GM")
-        permission = Permission.objects.get(key="audit.report.export")
+        permission, _ = Permission.objects.get_or_create(
+            key="audit.report.export",
+            defaults={
+                "domain": "audit",
+                "resource": "report",
+                "action": "export",
+                "description": "Export audit events",
+                "is_active": True,
+                "is_sensitive": True,
+            },
+        )
         RolePermission.objects.get_or_create(role=role, permission=permission)
-        allowed = self.client.get("/api/v1/security/audit/events/?export=json")
+        allowed = self.client.get("/api/v1/security/audit/events/export/")
         self.assertEqual(allowed.status_code, 200, allowed.content)
         self.assertIn("attachment; filename=", allowed["Content-Disposition"])

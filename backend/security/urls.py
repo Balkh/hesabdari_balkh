@@ -4,6 +4,7 @@ from . import audit_views, auth_views, lockout_views, mfa_views, views
 
 urlpatterns = [
     path("audit/events/", audit_views.audit_events, name="security-audit-events"),
+    path("audit/events/export/", audit_views.audit_events_export, name="security-audit-events-export"),
     path("audit/integrity/", audit_views.audit_integrity, name="security-audit-integrity"),
     path("me/", views.current_user, name="current-user"),
     path("csrf/", auth_views.csrf_cookie, name="security-csrf"),
