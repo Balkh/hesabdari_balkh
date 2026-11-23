@@ -7,6 +7,7 @@ from django.test import TestCase, override_settings
 from rest_framework.test import APIClient
 
 from security.models import AuditEvent, Role, UserRoleAssignment
+from security.mfa_models import SecurityMFARequirement
 from security.permissions import HasErpOperation, IsAuthenticatedForERP
 from security.views import current_user
 from fiscal_periods.views import period_collection
@@ -118,6 +119,26 @@ class OperationApiEnforcementTests(TestCase):
         response = client.get("/api/v1/fiscal-periods/")
 
         self.assertEqual(response.status_code, 200)
+
+    @override_settings(ERP_RBAC_ENFORCEMENT=True)
+    def test_basic_auth_cannot_bypass_employee_mfa_requirement(self):
+        user = self.make_user_with_role("r2-basic-mfa-required", "ACCOUNTANT")
+        updater = User.objects.create_user(username="mfa-policy-updater")
+        SecurityMFARequirement.objects.create(
+            user=user,
+            is_required=True,
+            updated_by=updater,
+            reason="API bypass regression test",
+        )
+        token = base64.b64encode(
+            b"r2-basic-mfa-required:strong-test-password"
+        ).decode("ascii")
+        client = APIClient()
+        client.credentials(HTTP_AUTHORIZATION=f"Basic {token}")
+
+        response = client.get("/api/v1/fiscal-periods/")
+
+        self.assertEqual(response.status_code, 403)
 
     @override_settings(ERP_RBAC_ENFORCEMENT=True)
     def test_me_endpoint_uses_the_authenticated_users_self_binding(self):
