@@ -20,9 +20,11 @@ Historical R1 boundary and current R2 wiring:
 - Both entry points use the same _resolve() policy core. The legacy
   key-only resolve() retains its R1 evaluation behavior; the operation
   entry point supplies a method-specific server-owned resource binding.
-- ERP_RBAC_ENFORCEMENT currently defaults to False in base settings. The
-  Production startup guard is not implemented in this branch yet, so this
-  draft must not be merged or deployed.
+- ERP_RBAC_ENFORCEMENT remains False by default in base/development
+  settings. Production settings now require an explicit true value through
+  security.production_guard.require_rbac_enforcement_from_env(); desktop
+  settings independently enable strict RBAC. This stacked PR remains Draft
+  until its full review, exact-head CI, and owner acceptance are complete.
 
 Evaluation order (§16.1 — never reordered, never short-circuited into an
 allow path):
@@ -60,10 +62,10 @@ Known R1 limitations (documented, fail-closed, tested):
 - ``account_locked`` is a no-op until the W0-2D lockout store exists; the
   ACCOUNT_LOCKED branch and its position BEFORE the GM step are pinned by
   tests using that seam.
-- ``AuthContext.requires_mfa`` is False for every caller in R1 because MFA
-  does not exist yet (W0-2C). The MFA_REQUIRED branch is implemented now
-  and pinned by tests, so BasicAuthentication can never satisfy an
-  MFA-protected operation later (§6, R27).
+- In the historical R1-only context, ``requires_mfa`` was False.
+  W0-2C now populates the flag from singleton-GM identity and the employee
+  MFA policy; the MFA_REQUIRED gate denies Basic-only authentication and
+  is covered by API regression tests (§6, R27).
 - Per-operation resource binding is SERVER-OWNED operation metadata,
   independent of the permission's scope_policy (§16.1 step 9, §16.2).
   The legacy R1 key-only entry point uses the shipped binding registry and
@@ -171,17 +173,21 @@ class AuthContext:
     from a Django/DRF request using the server session store and DRF's
     successful authenticator.
 
-    Session validity semantics in R1:
-    - A trusted server-side Django session bound to the user is valid until
-      its expiry (binding/revocation validation arrives with W0-2D).
-    - A BasicAuthentication-only context carries NO session evidence. Under
-      the frozen Batch 2/3 authentication contract, Basic remains a valid
-      authentication path until W0-2C introduces MFA; the fail-closed
-      MFA gate (``is_basic_only and requires_mfa``) is what will deny
-      Basic-only access to MFA-protected operations (R27). It must never
-      be set to True by callers in R1.
-    - Any context with neither session evidence nor a recognized
-      mechanism fails closed (NO_ACTIVE_SESSION).
+    Session validity semantics in W0-2C:
+    - SessionAuthentication is accepted only when Django's authenticated
+      user id matches the request user AND the session key resolves to a
+      live, user-bound SecurityLoginSession registry row. The row is
+      touched/validated against revocation, idle expiry, and absolute
+      lifetime before the operation resolver proceeds.
+    - BasicAuthentication carries NO registry-session evidence. The frozen
+      Batch 2/3 compatibility path remains intentionally enabled for
+      selected non-GM operations when employee MFA is not required. Such
+      calls do not consume one of the two registered session slots and do
+      not receive registry idle/absolute timeout or per-session revocation.
+      Basic-only requests can never satisfy the MFA_REQUIRED gate, and the
+      session-only MFA management endpoints do not accept Basic.
+    - Any context with neither a valid registry session nor a recognized
+      Basic compatibility mechanism fails closed (NO_ACTIVE_SESSION).
     """
 
     is_basic_only: bool = False
