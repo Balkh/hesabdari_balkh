@@ -23,6 +23,14 @@ from rest_framework.response import Response
 from rest_framework.throttling import AnonRateThrottle
 
 from security.mfa_models import MFADeviceStatus, SecurityMFADevice
+from security.login_lockout import (
+    AccountCurrentlyLocked,
+    find_user_for_login,
+    is_account_locked,
+    record_locked_login,
+    record_login_success,
+    record_mfa_failure,
+)
 from security.mfa_policy import is_active_gm_holder, user_requires_mfa
 from security.mfa_service import (
     consume_recovery_code,
@@ -88,11 +96,20 @@ def login_view(request):
     if not isinstance(username, str) or not username or not isinstance(password, str) or not password:
         return Response({"error": "invalid_credentials"}, status=status.HTTP_400_BAD_REQUEST)
 
-    user = authenticate(
-        request=request._request,
-        username=username,
-        password=password,
-    )
+    candidate = find_user_for_login(username)
+    try:
+        if candidate is not None and is_account_locked(candidate, at=timezone.now()):
+            record_locked_login(candidate, username, request._request)
+            return Response({"error": "invalid_credentials"}, status=status.HTTP_401_UNAUTHORIZED)
+        user = authenticate(
+            request=request._request,
+            username=username,
+            password=password,
+        )
+    except Exception:
+        logger.exception("password authentication or lockout evidence failed closed")
+        return Response({"error": "authentication_unavailable"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
     if user is None or not user.is_active:
         return Response({"error": "invalid_credentials"}, status=status.HTTP_401_UNAUTHORIZED)
 
@@ -114,6 +131,11 @@ def login_view(request):
         if is_active_gm_holder(user) and recovery_code:
             return Response({"error": "gm_recovery_local_only"}, status=status.HTTP_403_FORBIDDEN)
         if bool(totp_code) == bool(recovery_code):
+            try:
+                record_mfa_failure(user, username, request._request)
+            except Exception:
+                logger.exception("MFA failure evidence could not be stored")
+                return Response({"error": "authentication_unavailable"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
             return Response({"error": "mfa_verification_required"}, status=status.HTTP_401_UNAUTHORIZED)
 
         now = timezone.now()
@@ -129,6 +151,11 @@ def login_view(request):
             logger.exception("MFA verification failed closed")
             return Response({"error": "mfa_verification_unavailable"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
         if not verified:
+            try:
+                record_mfa_failure(user, username, request._request, at=now)
+            except Exception:
+                logger.exception("MFA failure evidence could not be stored")
+                return Response({"error": "authentication_unavailable"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
             return Response({"error": "invalid_credentials"}, status=status.HTTP_401_UNAUTHORIZED)
         mfa_verified_at = now
 
@@ -152,6 +179,12 @@ def login_view(request):
             if agent_digest:
                 record.user_agent_digest = agent_digest
                 record.save(update_fields=["user_agent_digest"])
+            record_login_success(
+                user,
+                username,
+                request._request,
+                at=now,
+            )
             AuditEvent.objects.create(
                 user=user,
                 action=AuditAction.LOGIN,
@@ -162,6 +195,9 @@ def login_view(request):
                     "session_slot": record.slot_number,
                 },
             )
+    except AccountCurrentlyLocked:
+        django_logout(request._request)
+        return Response({"error": "invalid_credentials"}, status=status.HTTP_401_UNAUTHORIZED)
     except (SessionAdmissionError, DatabaseError):
         django_logout(request._request)
         return Response({"error": "session_limit_or_registry_unavailable"}, status=status.HTTP_409_CONFLICT)
