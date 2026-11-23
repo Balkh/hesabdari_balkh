@@ -82,10 +82,12 @@ class OperationApiEnforcementTests(TestCase):
     def test_authenticated_user_without_grant_is_denied(self):
         user = User.objects.create_user(username="r2-no-role", password="strong-test-password")
         client = self.logged_in_client(user)
-        before = AuditEvent.objects.count()
+        before_denials = AuditEvent.objects.filter(action="PERMISSION_DENIED").count()
         self.assertEqual(client.get("/api/v1/fiscal-periods/").status_code, 403)
-        denied = AuditEvent.objects.filter(action="PERMISSION_DENIED")
-        self.assertEqual(denied.count(), before + 1)
+        self.assertEqual(
+            AuditEvent.objects.filter(action="PERMISSION_DENIED").count(),
+            before_denials + 1,
+        )
 
     @override_settings(ERP_RBAC_ENFORCEMENT=True)
     def test_gm_missing_landed_cost_object_is_uniformly_denied_before_view(self):
@@ -162,14 +164,14 @@ class OperationApiEnforcementTests(TestCase):
 
         # ACCOUNTANT has fiscal.period.view, but not fiscal.period.create.
         self.assertEqual(client.get("/api/v1/fiscal-periods/").status_code, 200)
-        before = AuditEvent.objects.count()
+        before_denials = AuditEvent.objects.filter(action="PERMISSION_DENIED").count()
         self.assertEqual(
             client.post("/api/v1/fiscal-periods/", data={}, format="json").status_code,
             403,
         )
         self.assertEqual(
             AuditEvent.objects.filter(action="PERMISSION_DENIED").count(),
-            before + 1,
+            before_denials + 1,
         )
 
     @override_settings(ERP_RBAC_ENFORCEMENT=True)
@@ -183,7 +185,7 @@ class OperationApiEnforcementTests(TestCase):
         client = self.logged_in_client(user)
         period_count = FiscalPeriod.objects.count()
         landed_count = LandedCostDocument.objects.count()
-        audit_count = AuditEvent.objects.count()
+        audit_denial_count = AuditEvent.objects.filter(action="PERMISSION_DENIED").count()
 
         self.assertEqual(
             client.post("/api/v1/fiscal-periods/", data={}, format="json").status_code,
@@ -197,7 +199,7 @@ class OperationApiEnforcementTests(TestCase):
         self.assertEqual(LandedCostDocument.objects.count(), landed_count)
         self.assertEqual(
             AuditEvent.objects.filter(action="PERMISSION_DENIED").count(),
-            audit_count + 2,
+            audit_denial_count + 2,
         )
 
 
