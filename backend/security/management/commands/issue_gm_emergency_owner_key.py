@@ -3,9 +3,10 @@ from __future__ import annotations
 
 import getpass
 import hmac
-import sys
 
 from django.core.management.base import BaseCommand, CommandError
+
+from security.local_console import LocalConsoleRequiredError, require_local_console
 from django.utils import timezone
 
 from security.management.commands.bootstrap_gm import _load_key_provider
@@ -18,8 +19,10 @@ from security.emergency_owner_key_service import (
 
 
 def _require_tty():
-    if not sys.stdin.isatty() or not sys.stdout.isatty():
-        raise CommandError("GM emergency owner-key rotation is local-only and requires an interactive terminal")
+    try:
+        require_local_console()
+    except LocalConsoleRequiredError as exc:
+        raise CommandError(str(exc)) from None
 
 
 def _confirm_saved_once(stdout, raw_key):
