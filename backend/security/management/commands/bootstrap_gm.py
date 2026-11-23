@@ -254,7 +254,7 @@ class Command(BaseCommand):
             token_row.save(update_fields=["consumed_at"])
             record_audit_event(
                 user=user,
-                action=AuditAction.CREATE,
+                action=AuditAction.ACCOUNT_BOOTSTRAP,
                 entity="GM_BOOTSTRAP",
                 entity_id=str(user.pk),
                 new_state={

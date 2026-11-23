@@ -69,7 +69,7 @@ class Command(BaseCommand):
             )
             record_audit_event(
                 user=None,
-                action=AuditAction.CREATE,
+                action=AuditAction.ACCOUNT_BOOTSTRAP,
                 entity="GM_BOOTSTRAP_TOKEN",
                 entity_id=str(record.pk),
                 new_state={"purpose": SecurityBootstrapToken.INITIAL_GM, "expires_at": record.expires_at.isoformat()},

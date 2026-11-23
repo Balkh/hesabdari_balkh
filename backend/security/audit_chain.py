@@ -107,6 +107,34 @@ def calculate_event_hash(previous_hash: str, payload: dict) -> str:
     ).hexdigest()
 
 
+_SENSITIVE_AUDIT_KEYS = {
+    "password", "passwd", "passphrase", "totp", "totp_code",
+    "recovery_code", "recovery_codes", "secret", "secret_key",
+    "owner_key", "encryption_key", "private_key", "ciphertext",
+    "nonce", "credential", "credentials", "authorization_header",
+    "access_token", "refresh_token", "api_key",
+}
+
+
+def _redact_sensitive(value):
+    """Redact credential-like fields recursively before they enter the ledger."""
+    if isinstance(value, dict):
+        result = {}
+        for key, item in value.items():
+            normalized = "".join(ch for ch in str(key).lower() if ch.isalnum())
+            if normalized in _SENSITIVE_AUDIT_KEYS or any(
+                marker in normalized
+                for marker in ("password", "totp", "recoverycode", "privatekey", "ciphertext")
+            ):
+                result[str(key)] = "[REDACTED]"
+            else:
+                result[str(key)] = _redact_sensitive(item)
+        return result
+    if isinstance(value, (list, tuple)):
+        return [_redact_sensitive(item) for item in value]
+    return value
+
+
 def _request_context():
     try:
         from security.request_context import get_current_request
@@ -252,8 +280,8 @@ def append_audit_event(
         entity=entity,
         entity_id=str(entity_id),
         reference=reference or "",
-        previous_state=previous_state,
-        new_state=new_state,
+        previous_state=_redact_sensitive(previous_state),
+        new_state=_redact_sensitive(new_state),
         reason=reason or "",
         event_uuid=uuid4(),
         prev_event_hash=head.head_hash,
