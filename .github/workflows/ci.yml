@@ -95,7 +95,7 @@ jobs:
         run: |
           $config = Join-Path $env:RUNNER_TEMP "pytest-windows.ini"
           Set-Content -Path $config -Value "[pytest]" -Encoding ascii
-          python -m pytest -c $config -q security/test_windows_key_custody_eval.py security/test_windows_key_provider.py
+          python -m pytest -c $config -q security/test_windows_key_custody_eval.py security/test_windows_key_provider.py security/test_windows_session_probe.py
   tauri:
     runs-on: ubuntu-latest
     steps:
