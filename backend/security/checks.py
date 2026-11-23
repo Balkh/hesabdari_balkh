@@ -145,6 +145,10 @@ EXPECTED_PUBLIC_API_ROUTES = frozenset(
         "api/v1/",
         "api/v1/health/",
         "api/v1/health/missing/",
+        # Explicit authentication entry points: public by design, throttled,
+        # CSRF-protected where state-changing, and never business endpoints.
+        "api/v1/security/csrf/",
+        "api/v1/security/auth/login/",
     }
 )
 
@@ -163,7 +167,7 @@ def _public_route_allowlist_errors(public_routes):
         checks.Error(
             "Public API allowlist mismatch: "
             f"unexpected={unexpected}, missing={missing}. "
-            "Only api-root, health-check, and missing-resource may use AllowAny.",
+            "Only the infrastructure probes plus the exact CSRF-cookie and password-login endpoints may use AllowAny.",
             id=OPERATION_REGISTRY_CHECK_ID,
         )
     ]

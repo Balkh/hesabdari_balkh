@@ -88,3 +88,45 @@ class HasErpOperation(BasePermission):
             }
             return False
         return True
+
+
+class IsGMWithVerifiedMFA(BasePermission):
+    """Require active singleton GM identity and a registry-backed MFA session."""
+
+    message = "An active GM session with verified MFA is required."
+
+    def has_permission(self, request, view):
+        user = getattr(request, "user", None)
+        if user is None or not getattr(user, "is_authenticated", False):
+            return False
+        try:
+            from django.utils import timezone
+            from security.authorization import AuthContext
+            from security.mfa_policy import is_active_gm_holder
+
+            context = AuthContext.from_request(request)
+            return bool(
+                is_active_gm_holder(user)
+                and context.requires_mfa
+                and context.mfa_verified
+                and context.session_user_id == user.pk
+                and context.is_valid_for(user, timezone.now())
+            )
+        except Exception:
+            return False
+
+
+class IsEmployeeMFAAccount(BasePermission):
+    """Self-service enrollment and disable controls are not available to GM."""
+
+    message = "GM MFA setup is reserved for the local emergency workflow."
+
+    def has_permission(self, request, view):
+        user = getattr(request, "user", None)
+        if user is None or not getattr(user, "is_authenticated", False):
+            return False
+        try:
+            from security.mfa_policy import is_active_gm_holder
+            return not is_active_gm_holder(user)
+        except Exception:
+            return False

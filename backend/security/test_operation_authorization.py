@@ -6,6 +6,7 @@ from django.test import TestCase
 from fiscal_periods.models import FiscalPeriod
 from security.authorization import (
     AuthContext,
+    BINDING_TARGET_USER,
     TargetReference,
     resolve_operation,
 )
@@ -86,6 +87,43 @@ class OperationAwareResolverTests(TestCase):
             operation,
             auth_context=self.ctx,
             target_reference=TargetReference("FISCAL_PERIOD", period.pk),
+        )
+        self.assertTrue(decision.allowed, decision)
+        self.assertEqual(decision.reason, "GM_PROTECTED")
+
+    def test_gm_user_target_operation_denies_missing_target(self):
+        operation = OperationSpec(
+            operation_id="test.mfa.policy.user-target",
+            permission_key="security.mfa.reset",
+            binding_kind=OBJECT,
+            target_kind=BINDING_TARGET_USER,
+            target_source=TARGET_URL_KWARG,
+            target_kwarg="user_id",
+        )
+        decision = resolve_operation(
+            self.gm,
+            operation,
+            auth_context=self.ctx,
+            target_reference=TargetReference(BINDING_TARGET_USER, 10**9),
+        )
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.reason, "SCOPE_DENIED")
+
+    def test_gm_user_target_operation_allows_existing_target(self):
+        target = User.objects.create_user(username="policy-target")
+        operation = OperationSpec(
+            operation_id="test.mfa.policy.user-target-valid",
+            permission_key="security.mfa.reset",
+            binding_kind=OBJECT,
+            target_kind=BINDING_TARGET_USER,
+            target_source=TARGET_URL_KWARG,
+            target_kwarg="user_id",
+        )
+        decision = resolve_operation(
+            self.gm,
+            operation,
+            auth_context=self.ctx,
+            target_reference=TargetReference(BINDING_TARGET_USER, target.pk),
         )
         self.assertTrue(decision.allowed, decision)
         self.assertEqual(decision.reason, "GM_PROTECTED")

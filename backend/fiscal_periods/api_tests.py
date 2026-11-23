@@ -10,14 +10,16 @@ Frozen Phase 2/3.1 tests are untouched.
 """
 
 from django.contrib.auth import get_user_model
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from rest_framework.test import APIClient
 
 from accounting.coa import seed_chart_of_accounts
 from accounting.models import Account, JournalEntry, PostedImmutabilityError
 from accounting.services import post_journal
 from currencies.models import Currency
-from security.models import AuditAction, AuditEvent
+from security.models import AuditAction, AuditEvent, Role, UserRoleAssignment
+from security.session_service import register_login_session
+from .services import close_period, lock_period
 
 from .models import FiscalPeriod, PeriodStatus
 from .services import create_period
@@ -374,3 +376,64 @@ class PeriodApiBootstrapTests(ApiFixture, TestCase):
         listed = self.client.get(self.COLLECTION)
         self.assertEqual(len(listed.json()), 1)
         self.assertEqual(FiscalPeriod.objects.count(), 1)
+
+
+@override_settings(ERP_RBAC_ENFORCEMENT=True)
+class AccountantFiscalLifecycleAuthorizationTests(TestCase):
+    """Accountant has list access, but all fiscal lifecycle transitions stay GM-only."""
+
+    def setUp(self):
+        User = get_user_model()
+        self.user = User.objects.create_user(
+            "accountant-lifecycle-guard", password="Strong-test-password-123"
+        )
+        accountant = Role.objects.get(code="ACCOUNTANT")
+        UserRoleAssignment.objects.create(user=self.user, role=accountant)
+
+        self.client = APIClient()
+        self.assertTrue(self.client.login(
+            username=self.user.username, password="Strong-test-password-123"
+        ))
+        register_login_session(self.user, self.client.session.session_key)
+
+        # Create three real persisted targets in the states expected by each
+        # transition. Authorization must deny before the lifecycle service runs.
+        self.open_period = create_period(
+            name="RBAC Open Period", start_date="2027-01-01",
+            end_date="2027-01-31", user=self.user,
+        )
+        self.closed_period = create_period(
+            name="RBAC Closed Period", start_date="2027-02-01",
+            end_date="2027-02-28", user=self.user,
+        )
+        close_period(self.closed_period, user=self.user, reason="test setup")
+        self.closed_period.refresh_from_db()
+
+        self.locked_period = create_period(
+            name="RBAC Locked Period", start_date="2027-03-01",
+            end_date="2027-03-31", user=self.user,
+        )
+        lock_period(self.locked_period, user=self.user, reason="test setup")
+        self.locked_period.refresh_from_db()
+
+    def test_accountant_can_list_but_cannot_run_any_fiscal_lifecycle_action(self):
+        listed = self.client.get(ApiFixture.COLLECTION)
+        self.assertEqual(listed.status_code, 200)
+
+        attempts = (
+            (f"{ApiFixture.COLLECTION}{self.open_period.pk}/close/", {"reason": "attempt"}),
+            (f"{ApiFixture.COLLECTION}{self.closed_period.pk}/reopen/", {"reason": "attempt"}),
+            (f"{ApiFixture.COLLECTION}{self.open_period.pk}/lock/", {"reason": "attempt"}),
+            (f"{ApiFixture.COLLECTION}{self.locked_period.pk}/unlock/", {"reason": "attempt"}),
+        )
+        for url, payload in attempts:
+            with self.subTest(url=url):
+                response = self.client.post(url, payload, format="json")
+                self.assertEqual(response.status_code, 403, response.content)
+
+        self.open_period.refresh_from_db()
+        self.closed_period.refresh_from_db()
+        self.locked_period.refresh_from_db()
+        self.assertEqual(self.open_period.status, PeriodStatus.OPEN)
+        self.assertEqual(self.closed_period.status, PeriodStatus.CLOSED)
+        self.assertEqual(self.locked_period.status, PeriodStatus.LOCKED)

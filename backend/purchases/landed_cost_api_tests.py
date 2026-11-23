@@ -1,8 +1,9 @@
 from datetime import date
 from decimal import Decimal
+import base64
 
 from django.contrib.auth import get_user_model
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from rest_framework.test import APIClient
 
 from accounting.coa import seed_chart_of_accounts
@@ -13,6 +14,8 @@ from inventory.models import WarehouseInventoryAccount
 from parties.services import create_party
 from products.services import create_product
 from purchases.models import LandedCostDocument, LandedCostReversal, LandedCostStatus
+from security.models import Role, UserRoleAssignment
+from security.session_service import register_login_session
 from purchases.services import create_purchase, post_purchase
 from uom.services import create_uom
 from warehouses.services import create_warehouse
@@ -149,3 +152,71 @@ class LandedCostApiTests(TestCase):
         self.assertEqual(retry.json()["id"], reversal_body["id"])
         repost = self.client.post(f"{self.COLLECTION}{document_id}/post/", {}, format="json")
         self.assertEqual(repost.status_code, 400)
+
+
+    @override_settings(ERP_RBAC_ENFORCEMENT=True)
+    def test_accountant_can_post_landed_cost_but_cannot_reverse_it(self):
+        accountant = Role.objects.get(code="ACCOUNTANT")
+        UserRoleAssignment.objects.create(user=self.user, role=accountant)
+
+        # Switch from the domain-test force-auth fixture to a real registered
+        # Django session so the operation resolver exercises R2 + W0-2C.
+        self.client.force_authenticate(user=None)
+        self.assertTrue(self.client.login(username=self.user.username, password="x"))
+        register_login_session(self.user, self.client.session.session_key)
+
+        created = self.client.post(self.COLLECTION, self._payload(), format="json")
+        self.assertEqual(created.status_code, 201, created.content)
+        document_id = created.json()["id"]
+
+        posted = self.client.post(
+            f"{self.COLLECTION}{document_id}/post/", {}, format="json"
+        )
+        self.assertEqual(posted.status_code, 200, posted.content)
+        self.assertEqual(posted.json()["status"], LandedCostStatus.POSTED)
+
+        denied = self.client.post(
+            f"{self.COLLECTION}{document_id}/reverse/",
+            {
+                "reversal_date": self.day.isoformat(),
+                "reason": "Accountant must not reverse this document",
+                "idempotency_key": "lc-api-accountant-reverse-denied",
+            },
+            format="json",
+        )
+        self.assertEqual(denied.status_code, 403, denied.content)
+        self.assertEqual(LandedCostReversal.objects.count(), 0)
+        self.assertFalse(
+            LandedCostReversal.objects.filter(cost_document_id=document_id).exists()
+        )
+
+    @override_settings(ERP_RBAC_ENFORCEMENT=True)
+    def test_basic_auth_compatibility_allows_granted_landed_cost_post_without_registry_session(self):
+        accountant = Role.objects.get(code="ACCOUNTANT")
+        UserRoleAssignment.objects.create(user=self.user, role=accountant)
+
+        token = base64.b64encode(b"landed-api-user:x").decode("ascii")
+        basic = APIClient()
+        basic.credentials(HTTP_AUTHORIZATION=f"Basic {token}")
+
+        created = basic.post(
+            self.COLLECTION,
+            self._payload(
+                document_number="LC-API-BASIC-001",
+                idempotency_key="lc-api-basic-key-001",
+            ),
+            format="json",
+        )
+        self.assertEqual(created.status_code, 201, created.content)
+        document_id = created.json()["id"]
+
+        posted = basic.post(
+            f"{self.COLLECTION}{document_id}/post/", {}, format="json"
+        )
+        self.assertEqual(posted.status_code, 200, posted.content)
+        self.assertEqual(posted.json()["status"], LandedCostStatus.POSTED)
+
+        # This pins the currently retained Batch 2/3 BasicAuthentication
+        # compatibility path: it does not create a registry-managed session.
+        from security.mfa_models import SecurityLoginSession
+        self.assertEqual(SecurityLoginSession.objects.filter(user=self.user).count(), 0)

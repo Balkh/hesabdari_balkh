@@ -20,9 +20,11 @@ Historical R1 boundary and current R2 wiring:
 - Both entry points use the same _resolve() policy core. The legacy
   key-only resolve() retains its R1 evaluation behavior; the operation
   entry point supplies a method-specific server-owned resource binding.
-- ERP_RBAC_ENFORCEMENT currently defaults to False in base settings. The
-  Production startup guard is not implemented in this branch yet, so this
-  draft must not be merged or deployed.
+- ERP_RBAC_ENFORCEMENT remains False by default in base/development
+  settings. Production settings now require an explicit true value through
+  security.production_guard.require_rbac_enforcement_from_env(); desktop
+  settings independently enable strict RBAC. This stacked PR remains Draft
+  until its full review, exact-head CI, and owner acceptance are complete.
 
 Evaluation order (§16.1 — never reordered, never short-circuited into an
 allow path):
@@ -60,10 +62,10 @@ Known R1 limitations (documented, fail-closed, tested):
 - ``account_locked`` is a no-op until the W0-2D lockout store exists; the
   ACCOUNT_LOCKED branch and its position BEFORE the GM step are pinned by
   tests using that seam.
-- ``AuthContext.requires_mfa`` is False for every caller in R1 because MFA
-  does not exist yet (W0-2C). The MFA_REQUIRED branch is implemented now
-  and pinned by tests, so BasicAuthentication can never satisfy an
-  MFA-protected operation later (§6, R27).
+- In the historical R1-only context, ``requires_mfa`` was False.
+  W0-2C now populates the flag from singleton-GM identity and the employee
+  MFA policy; the MFA_REQUIRED gate denies Basic-only authentication and
+  is covered by API regression tests (§6, R27).
 - Per-operation resource binding is SERVER-OWNED operation metadata,
   independent of the permission's scope_policy (§16.1 step 9, §16.2).
   The legacy R1 key-only entry point uses the shipped binding registry and
@@ -132,6 +134,7 @@ DENY_FAIL_CLOSED = "FAIL_CLOSED"
 # Target kinds for the R1 resource-binding registry (§16.1 step 9).
 BINDING_TARGET_WAREHOUSE = "WAREHOUSE"
 BINDING_TARGET_SELF_USER = "SELF_USER"
+BINDING_TARGET_USER = "USER"
 BINDING_TARGET_FISCAL_PERIOD = "FISCAL_PERIOD"
 BINDING_TARGET_LANDED_COST_DOCUMENT = "LANDED_COST_DOCUMENT"
 
@@ -170,21 +173,26 @@ class AuthContext:
     from a Django/DRF request using the server session store and DRF's
     successful authenticator.
 
-    Session validity semantics in R1:
-    - A trusted server-side Django session bound to the user is valid until
-      its expiry (binding/revocation validation arrives with W0-2D).
-    - A BasicAuthentication-only context carries NO session evidence. Under
-      the frozen Batch 2/3 authentication contract, Basic remains a valid
-      authentication path until W0-2C introduces MFA; the fail-closed
-      MFA gate (``is_basic_only and requires_mfa``) is what will deny
-      Basic-only access to MFA-protected operations (R27). It must never
-      be set to True by callers in R1.
-    - Any context with neither session evidence nor a recognized
-      mechanism fails closed (NO_ACTIVE_SESSION).
+    Session validity semantics in W0-2C:
+    - SessionAuthentication is accepted only when Django's authenticated
+      user id matches the request user AND the session key resolves to a
+      live, user-bound SecurityLoginSession registry row. The row is
+      touched/validated against revocation, idle expiry, and absolute
+      lifetime before the operation resolver proceeds.
+    - BasicAuthentication carries NO registry-session evidence. The frozen
+      Batch 2/3 compatibility path remains intentionally enabled for
+      selected non-GM operations when employee MFA is not required. Such
+      calls do not consume one of the two registered session slots and do
+      not receive registry idle/absolute timeout or per-session revocation.
+      Basic-only requests can never satisfy the MFA_REQUIRED gate, and the
+      session-only MFA management endpoints do not accept Basic.
+    - Any context with neither a valid registry session nor a recognized
+      Basic compatibility mechanism fails closed (NO_ACTIVE_SESSION).
     """
 
     is_basic_only: bool = False
     requires_mfa: bool = False
+    mfa_verified: bool = False
     session_user_id: Optional[int] = None
     session_expiry: Optional[object] = None
 
@@ -201,35 +209,54 @@ class AuthContext:
 
     @classmethod
     def from_request(cls, request) -> "AuthContext":
-        """Build the context from server-side request evidence only.
+        """Derive context only from authenticated server-side evidence.
 
-        Reads DRF's ``successful_authenticator`` (server fact) and Django's
-        server-side session store. Never reads caller-supplied payloads.
+        Django session cookies are insufficient by themselves: a live,
+        user-bound W0-2C registry row is required. BasicAuthentication remains
+        a temporary compatibility path for non-GM operations, but can never
+        satisfy the mandatory GM MFA gate.
         """
         from rest_framework.authentication import BasicAuthentication
 
         user = getattr(request, "user", None)
         session = getattr(request, "session", None)
-
+        authenticated = bool(user is not None and getattr(user, "is_authenticated", False))
+        at = timezone.now()
         is_basic_only = isinstance(
             getattr(request, "successful_authenticator", None), BasicAuthentication
         )
 
+        requires_mfa = False
+        mfa_verified = False
         session_user_id = None
         session_expiry = None
-        if (
-            session is not None
-            and user is not None
-            and getattr(user, "is_authenticated", False)
-        ):
-            raw_id = session.get("_auth_user_id")
-            if raw_id is not None and str(raw_id) == str(user.pk):
-                session_user_id = user.pk
-                session_expiry = session.get_expiry_date()
+
+        if authenticated:
+            # Only the active assignment linked to the singleton GM slot is
+            # treated as the GM identity. Staff/superuser flags and unlinked
+            # GM assignments cannot activate this requirement.
+            from security.mfa_policy import user_requires_mfa
+
+            requires_mfa = user_requires_mfa(user, at=at)
+
+            if session is not None:
+                raw_id = session.get("_auth_user_id")
+                session_key = getattr(session, "session_key", None)
+                if raw_id is not None and str(raw_id) == str(user.pk) and session_key:
+                    from security.session_service import touch_login_session
+
+                    record = touch_login_session(user, session_key, at=at)
+                    if record is not None:
+                        session_user_id = user.pk
+                        session_expiry = min(
+                            record.idle_expires_at, record.absolute_expires_at
+                        )
+                        mfa_verified = record.mfa_verified_at is not None
 
         return cls(
             is_basic_only=is_basic_only,
-            requires_mfa=False,  # R1: MFA arrives with W0-2C
+            requires_mfa=requires_mfa,
+            mfa_verified=mfa_verified,
             session_user_id=session_user_id,
             session_expiry=session_expiry,
         )
@@ -329,6 +356,7 @@ _BINDING_STATUS_UNDECLARED = _ResourceBinding(
 _BINDING_TARGET_MODELS = {
     BINDING_TARGET_WAREHOUSE: "warehouses.models.Warehouse",
     BINDING_TARGET_SELF_USER: "django.contrib.auth User",
+    BINDING_TARGET_USER: "django.contrib.auth User",
 }
 
 
@@ -343,7 +371,7 @@ def _binding_target_model(kind):
         from warehouses.models import Warehouse
 
         return Warehouse
-    if kind == BINDING_TARGET_SELF_USER:
+    if kind in (BINDING_TARGET_SELF_USER, BINDING_TARGET_USER):
         from django.contrib.auth import get_user_model
 
         return get_user_model()
@@ -747,8 +775,8 @@ def _resolve(
         if auth_context is None or not auth_context.is_valid_for(user, at):
             trace.append("3:NO_ACTIVE_SESSION")
             return PermissionDecision(False, DENY_NO_ACTIVE_SESSION, None, tuple(trace))
-        if getattr(auth_context, "is_basic_only", False) and getattr(
-            auth_context, "requires_mfa", False
+        if getattr(auth_context, "requires_mfa", False) and not getattr(
+            auth_context, "mfa_verified", False
         ):
             trace.append("3:MFA_REQUIRED")
             return PermissionDecision(False, DENY_MFA_REQUIRED, None, tuple(trace))
