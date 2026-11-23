@@ -113,6 +113,9 @@ def test_provider_provisions_separate_backup_and_ed25519_checkpoint_keys():
     namespace = "HesabdariBalkh:BackupProviderTest:" + uuid.uuid4().hex
     provider = WindowsCredentialManagerKeyProvider(namespace=namespace)
     try:
+        # The MFA AES key must already exist in the same user vault so this
+        # assertion proves backup and checkpoint key custody remains separate.
+        provider.provision()
         result = provider.provision_backup_keys()
         assert result == {
             "backup_encryption_key_id": provider.BACKUP_ENCRYPTION_KEY_ID,
