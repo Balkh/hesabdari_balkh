@@ -34,6 +34,19 @@ class HasErpOperation(BasePermission):
                 settings, "ERP_RBAC_ALLOW_AUTHENTICATED_ONLY", False
             )
             if auth_only_bypass is True:
+                operation_map = getattr(view.__class__, "erp_operation_specs", {})
+                method = request.method.upper()
+                if method == "HEAD":
+                    method = "GET"
+                operation = operation_map.get(method)
+                raw_request = getattr(request, "_request", request)
+                raw_request._erp_authorization_audit_context = {
+                    "mode": "AUTHENTICATED_COMPATIBILITY",
+                    "operation_id": getattr(operation, "operation_id", None),
+                    "permission_key": getattr(operation, "permission_key", None),
+                    "method": method,
+                    "decision": "ALLOW_AUTHENTICATED_COMPATIBILITY",
+                }
                 return True
             logger.error(
                 "ERP_RBAC_ENFORCEMENT is disabled and authenticated-only bypass is not enabled"
@@ -87,6 +100,19 @@ class HasErpOperation(BasePermission):
                 "reason": decision.reason,
             }
             return False
+
+        raw_request = getattr(request, "_request", request)
+        raw_request._erp_authorization_audit_context = {
+            "mode": "RBAC",
+            "operation_id": operation.operation_id,
+            "permission_key": operation.permission_key,
+            "method": method,
+            "decision": "ALLOW",
+            "decision_reason": decision.reason,
+            "decision_source": decision.source,
+            "target_kind": getattr(target_reference, "target_kind", None),
+            "target_id": str(getattr(target_reference, "pk", "")) if target_reference else None,
+        }
         return True
 
 
