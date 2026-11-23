@@ -2,9 +2,10 @@
 from __future__ import annotations
 
 import os
-import sys
 
 from django.core.management.base import BaseCommand, CommandError
+
+from security.local_console import LocalConsoleRequiredError, require_local_console
 
 from security.crypto import KeyUnavailableError
 from security.windows_key_provider import WindowsCredentialManagerKeyProvider
@@ -13,8 +14,10 @@ from security.windows_key_provider import WindowsCredentialManagerKeyProvider
 def _require_tty():
     if os.name != "nt":
         raise CommandError("Windows desktop secrets can be provisioned only on Windows")
-    if not sys.stdin.isatty() or not sys.stdout.isatty():
-        raise CommandError("Windows desktop secret provisioning requires a local interactive terminal")
+    try:
+        require_local_console()
+    except LocalConsoleRequiredError as exc:
+        raise CommandError(str(exc)) from None
 
 
 class Command(BaseCommand):
