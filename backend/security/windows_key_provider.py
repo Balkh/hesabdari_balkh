@@ -18,6 +18,9 @@ import os
 import re
 import secrets
 from contextlib import contextmanager
+
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from ctypes import wintypes
 
 from security.errors import KeyUnavailableError
@@ -312,4 +315,168 @@ class WindowsCredentialManagerKeyProvider:
                         pass
                 raise KeyUnavailableError(
                     "Windows desktop secret provisioning failed; inspect the current user's credential vault"
+                ) from None
+
+
+
+    # W0-2E backup encryption and audit-checkpoint signing keys are separate
+    # from the MFA AES key and Django signing secret. They are held only in
+    # the current Windows user's Credential Manager vault. Production must
+    # run the offline desktop under the dedicated GM Windows account; an
+    # ordinary employee profile has a different per-user vault.
+    BACKUP_ENCRYPTION_KEY_ID = "backup-aes256-v1"
+    CHECKPOINT_SIGNING_KEY_ID = "audit-checkpoint-ed25519-v1"
+
+    def _backup_active_target(self) -> str:
+        return f"{self.namespace}:BACKUP:ACTIVE_KEY_ID"
+
+    def _backup_key_target(self, key_id: str) -> str:
+        if not isinstance(key_id, str) or not _KEY_ID_RE.fullmatch(key_id):
+            raise KeyUnavailableError("backup encryption key identifier is invalid")
+        return f"{self.namespace}:BACKUP:KEY:{key_id}"
+
+    def _checkpoint_active_target(self) -> str:
+        return f"{self.namespace}:AUDIT_CHECKPOINT:ACTIVE_KEY_ID"
+
+    def _checkpoint_private_target(self, key_id: str) -> str:
+        if not isinstance(key_id, str) or not _KEY_ID_RE.fullmatch(key_id):
+            raise KeyUnavailableError("checkpoint signing key identifier is invalid")
+        return f"{self.namespace}:AUDIT_CHECKPOINT:PRIVATE:{key_id}"
+
+    def _checkpoint_public_target(self, key_id: str) -> str:
+        if not isinstance(key_id, str) or not _KEY_ID_RE.fullmatch(key_id):
+            raise KeyUnavailableError("checkpoint signing key identifier is invalid")
+        return f"{self.namespace}:AUDIT_CHECKPOINT:PUBLIC:{key_id}"
+
+    def active_backup_encryption_key_id(self) -> str:
+        raw = _read_generic(self._backup_active_target())
+        if raw is None:
+            raise KeyUnavailableError("backup encryption key is not provisioned for this Windows user")
+        try:
+            key_id = raw.decode("ascii")
+        except UnicodeDecodeError:
+            raise KeyUnavailableError("backup encryption key identifier is malformed") from None
+        self.get_backup_encryption_key(key_id)
+        return key_id
+
+    def get_backup_encryption_key(self, key_id: str) -> bytes:
+        raw = _read_generic(self._backup_key_target(key_id))
+        if raw is None or len(raw) != KEY_BYTES:
+            raise KeyUnavailableError("requested backup AES-256 key is unavailable or invalid")
+        return raw
+
+    def active_checkpoint_signing_key_id(self) -> str:
+        raw = _read_generic(self._checkpoint_active_target())
+        if raw is None:
+            raise KeyUnavailableError("audit checkpoint signing key is not provisioned for this Windows user")
+        try:
+            key_id = raw.decode("ascii")
+        except UnicodeDecodeError:
+            raise KeyUnavailableError("audit checkpoint signing key identifier is malformed") from None
+        self.get_checkpoint_signing_private_key(key_id)
+        self.get_checkpoint_signing_public_key(key_id)
+        return key_id
+
+    def get_checkpoint_signing_private_key(self, key_id: str) -> bytes:
+        raw = _read_generic(self._checkpoint_private_target(key_id))
+        if raw is None or len(raw) != 32:
+            raise KeyUnavailableError("requested Ed25519 checkpoint private key is unavailable or invalid")
+        return raw
+
+    def get_checkpoint_signing_public_key(self, key_id: str) -> bytes:
+        raw = _read_generic(self._checkpoint_public_target(key_id))
+        if raw is None or len(raw) != 32:
+            raise KeyUnavailableError("requested Ed25519 checkpoint public key is unavailable or invalid")
+        private = Ed25519PrivateKey.from_private_bytes(
+            self.get_checkpoint_signing_private_key(key_id)
+        )
+        expected = private.public_key().public_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PublicFormat.Raw,
+        )
+        if not hmac.compare_digest(raw, expected):
+            raise KeyUnavailableError("checkpoint public key does not match its protected private key")
+        return raw
+
+    def provision_backup_keys(self) -> dict[str, str]:
+        """Provision AES-256 backup and Ed25519 checkpoint keys once.
+
+        The method refuses any partial or existing key set. Key bytes are
+        never returned, logged, exported, or written beside the database.
+        Provision under the dedicated GM Windows account before enabling
+        backup commands on that desktop.
+        """
+        _require_windows()
+        backup_id = self.BACKUP_ENCRYPTION_KEY_ID
+        signing_id = self.CHECKPOINT_SIGNING_KEY_ID
+        backup_active = self._backup_active_target()
+        backup_target = self._backup_key_target(backup_id)
+        signing_active = self._checkpoint_active_target()
+        signing_private_target = self._checkpoint_private_target(signing_id)
+        signing_public_target = self._checkpoint_public_target(signing_id)
+        targets = (
+            backup_active,
+            backup_target,
+            signing_active,
+            signing_private_target,
+            signing_public_target,
+        )
+
+        with _provisioning_mutex(self.namespace):
+            if any(_read_generic(target) is not None for target in targets):
+                raise KeyUnavailableError(
+                    "backup/checkpoint keys already exist or are partially provisioned; refusing to overwrite"
+                )
+
+            backup_key = secrets.token_bytes(KEY_BYTES)
+            private_key = Ed25519PrivateKey.generate()
+            private_bytes = private_key.private_bytes(
+                encoding=serialization.Encoding.Raw,
+                format=serialization.PrivateFormat.Raw,
+                encryption_algorithm=serialization.NoEncryption(),
+            )
+            public_bytes = private_key.public_key().public_bytes(
+                encoding=serialization.Encoding.Raw,
+                format=serialization.PublicFormat.Raw,
+            )
+            records = (
+                (backup_target, backup_key, "Hesabdari Balkh AES-256 offline backup key"),
+                (signing_private_target, private_bytes, "Hesabdari Balkh Ed25519 audit checkpoint private key"),
+                (signing_public_target, public_bytes, "Hesabdari Balkh Ed25519 audit checkpoint public key"),
+                (backup_active, backup_id.encode("ascii"), "Hesabdari Balkh active backup key identifier"),
+                (signing_active, signing_id.encode("ascii"), "Hesabdari Balkh active audit checkpoint key identifier"),
+            )
+            written: list[str] = []
+            try:
+                for target, value, comment in records:
+                    _write_generic(target, value, comment=comment)
+                    written.append(target)
+
+                if (
+                    _read_generic(backup_target) != backup_key
+                    or _read_generic(signing_private_target) != private_bytes
+                    or _read_generic(signing_public_target) != public_bytes
+                    or _read_generic(backup_active) != backup_id.encode("ascii")
+                    or _read_generic(signing_active) != signing_id.encode("ascii")
+                ):
+                    raise KeyUnavailableError("backup/checkpoint key read-back verification failed")
+
+                # Also validate the provider's public/private key-pair check.
+                if not hmac.compare_digest(
+                    self.get_checkpoint_signing_public_key(signing_id),
+                    public_bytes,
+                ):
+                    raise KeyUnavailableError("checkpoint signing key-pair validation failed")
+                return {
+                    "backup_encryption_key_id": backup_id,
+                    "checkpoint_signing_key_id": signing_id,
+                }
+            except Exception:
+                for target in reversed(written):
+                    try:
+                        _delete_generic(target)
+                    except Exception:
+                        pass
+                raise KeyUnavailableError(
+                    "backup/checkpoint key provisioning failed; inspect the dedicated GM Credential Manager vault"
                 ) from None
