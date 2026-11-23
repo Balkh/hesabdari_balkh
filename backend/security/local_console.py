@@ -4,7 +4,6 @@ from __future__ import annotations
 import ctypes
 import os
 import sys
-import winreg
 from ctypes import wintypes
 
 
@@ -49,6 +48,8 @@ def _windows_remote_session_state(process_session_id: int) -> tuple[bool, bool, 
     for that case. A missing/unreadable registry value fails closed.
     """
     try:
+        import winreg
+
         user32 = ctypes.WinDLL("user32.dll", use_last_error=True)
         get_system_metrics = user32.GetSystemMetrics
         get_system_metrics.argtypes = [ctypes.c_int]
