@@ -233,6 +233,17 @@ class AuditChainTests(TestCase):
             self.assertRegex(action, re.compile(r"^[A-Z]+(?:_[A-Z]+){0,2}$"))
             self.assertLessEqual(len(action.split("_")), 3)
 
+    def test_reverse_trigger_migration_refuses_when_audit_history_exists(self):
+        event = self._append(new_state={"migration_rollback": "must-be-blocked"})
+        with self.assertRaisesMessage(RuntimeError, "cannot be removed while audit history exists"):
+            call_command("migrate", "security", "0016", verbosity=0, interactive=False)
+
+        self.assertTrue(AuditEvent.objects.filter(pk=event.pk).exists())
+        with self.assertRaises(DatabaseError):
+            with transaction.atomic():
+                AuditEvent.objects.filter(pk=event.pk).update(reason="rollback-bypass")
+        self.assertTrue(verify_audit_chain()["valid"])
+
     def test_event_insert_and_head_update_roll_back_with_business_mutation(self):
         original_count = AuditEvent.objects.count()
         with self.assertRaisesRegex(RuntimeError, "injected head update failure"):

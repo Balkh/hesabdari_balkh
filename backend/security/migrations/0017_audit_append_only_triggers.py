@@ -43,9 +43,28 @@ def remove_append_only_triggers(apps, schema_editor):
         schema_editor.execute(sql)
 
 
+def guard_trigger_removal_when_history_exists(apps, schema_editor):
+    """Block migration rollback before removing triggers if audit history exists."""
+    AuditEvent = apps.get_model("security", "AuditEvent")
+    alias = schema_editor.connection.alias
+    if AuditEvent.objects.using(alias).exists():
+        raise RuntimeError(
+            "W0-2E append-only triggers cannot be removed while audit history exists; "
+            "preserve the immutable ledger and apply a forward repair instead."
+        )
+
+
+def noop_forward(apps, schema_editor):
+    # Forward-only guard used to protect the reverse operation ordering.
+    return None
+
+
 class Migration(migrations.Migration):
     dependencies = [("security", "0016_audit_chain_backfill")]
 
     operations = [
         migrations.RunPython(install_append_only_triggers, remove_append_only_triggers),
+        # Reverse runs operations in reverse order, so this guard executes
+        # BEFORE trigger removal and preserves the immutable ledger on downgrade.
+        migrations.RunPython(noop_forward, guard_trigger_removal_when_history_exists),
     ]
