@@ -239,6 +239,13 @@ class AuthContext:
 
             requires_mfa = user_requires_mfa(user, at=at)
 
+            if is_basic_only and not requires_mfa:
+                # Successful eligible legacy Basic authentication clears
+                # stale failures, but can never clear a live account lock.
+                from security.login_lockout import clear_failures_after_basic_auth
+
+                clear_failures_after_basic_auth(user, at=at)
+
             if session is not None:
                 raw_id = session.get("_auth_user_id")
                 session_key = getattr(session, "session_key", None)
@@ -263,13 +270,19 @@ class AuthContext:
 
 
 def account_locked(user, at) -> bool:
-    """Account-lockout predicate — NO-OP until W0-2D ships its store.
+    """Fail-closed W0-2D account-lockout predicate (authorization step 2)."""
+    if user is None or getattr(user, "pk", None) is None:
+        return False
+    try:
+        from security.login_lockout import is_account_locked
 
-    The ACCOUNT_LOCKED deny reason and its position BEFORE the protected-GM
-    step are binding (§16.1 steps 2 and 5; test R14). W0-2D implements the
-    real store and keeps this seam.
-    """
-    return False
+        return is_account_locked(user, at=at)
+    except Exception:
+        logger.exception(
+            "account lockout state could not be verified; denying access",
+            extra={"user_id": getattr(user, "pk", None)},
+        )
+        return True
 
 
 @dataclass(frozen=True)
