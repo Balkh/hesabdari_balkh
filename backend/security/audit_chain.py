@@ -116,9 +116,10 @@ _SENSITIVE_AUDIT_KEYS = {
     "accesstoken", "refreshtoken", "apikey",
 }
 _INLINE_SECRET_PATTERN = re.compile(
-    r"(?i)(\\b(?:password|passwd|passphrase|totp(?:_code)?|"
-    r"recovery_codes?|owner_key|access_token|refresh_token|api_key)\\b\\s*[:=]\\s*)"
-    r"[^\\s,;]+"
+    r"(?i)(\\b(?:password|passwd|passphrase|totp(?:[\\s_-]*code)?|"
+    r"recovery[\\s_-]*codes?|owner[\\s_-]*key|access[\\s_-]*token|"
+    r"refresh[\\s_-]*token|api[\\s_-]*key)\\b\\s*[:=]\\s*)"
+    r"[^\\s,;&]+"
 )
 _BEARER_SECRET_PATTERN = re.compile(r"(?i)\\bBearer\\s+[A-Za-z0-9._~+/-]+=*")
 _OTP_URI_SECRET_PATTERN = re.compile(r"(?i)(otpauth://totp/[^?\\s]+\\?secret=)[^&\\s]+")
