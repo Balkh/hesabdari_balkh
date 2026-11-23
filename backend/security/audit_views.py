@@ -130,6 +130,21 @@ def audit_events(request):
     }
 
     if request.query_params.get("export") == "json":
+        # Viewing and exporting are distinct catalog capabilities. The outer
+        # GM+MFA guard remains mandatory for both; export additionally checks
+        # its dedicated grant through the same RBAC resolver.
+        from security.authorization import AuthContext, resolve
+
+        export_decision = resolve(
+            request.user,
+            "audit.report.export",
+            auth_context=AuthContext.from_request(request),
+        )
+        if not export_decision.allowed:
+            return Response(
+                {"error": "audit_export_forbidden"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
         response = HttpResponse(
             json.dumps(response_data, cls=DjangoJSONEncoder, ensure_ascii=False, separators=(",", ":")),
             content_type="application/json; charset=utf-8",
