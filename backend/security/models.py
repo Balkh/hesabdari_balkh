@@ -11,6 +11,9 @@ class AuditAction(models.TextChoices):
     POST = "POST", "Post"
     REVERSE = "REVERSE", "Reverse"
     APPROVE = "APPROVE", "Approve"
+    LOGIN_FAILED = "LOGIN_FAILED", "Failed login"
+    ACCOUNT_LOCKED = "ACCOUNT_LOCKED", "Account locked"
+    ACCOUNT_UNLOCKED = "ACCOUNT_UNLOCKED", "Account unlocked"
 
 
 class AuditEvent(models.Model):
@@ -416,4 +419,7 @@ from security.mfa_models import (  # noqa: E402,F401
     SecurityMFARequirement,
     SecurityBootstrapToken,
     SecurityEmergencyOwnerKey,
+    SecurityAccountLockout,
+    SecurityLoginAttempt,
+    SecurityLoginAttemptOutcome,
 )

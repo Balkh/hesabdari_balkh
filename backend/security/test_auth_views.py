@@ -1,6 +1,7 @@
 from datetime import timedelta
 
 from django.contrib.auth import get_user_model
+from django.core.cache import cache
 from django.test import TestCase, override_settings
 from django.utils import timezone
 from rest_framework.test import APIClient
@@ -32,6 +33,7 @@ class StaticMFAKeyProvider:
 
 class SecurityLoginFlowTests(TestCase):
     def setUp(self):
+        cache.clear()  # isolate the production login throttle across TestCase instances
         self.user = get_user_model().objects.create_user(
             username="login-employee",
             password="Strong-test-password-123",
