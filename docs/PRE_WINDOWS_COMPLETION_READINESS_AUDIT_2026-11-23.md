@@ -83,13 +83,13 @@ Current controls also include:
 
 ### 3.2 Remaining security work
 
-1. **W0-2D — Account lockout and recovery administration:** `account_locked()` in `backend/security/authorization.py` is currently a no-op. OD-5 requires failed-login logging, configurable account lockout, and GM review/unlock capability. Numeric thresholds/duration are explicitly not selected in OD-5; they must not be silently invented. The login throttle is not a substitute for account-level lockout.
+1. **W0-2D — Account lockout and recovery administration:** `account_locked()` in `backend/security/authorization.py` is currently a no-op. OD-5 requires failed-login logging, configurable account lockout, and GM review/unlock capability. The numeric defaults are already owner-approved in W0-2A §9A Item 4: five consecutive failed password attempts trigger a 15-minute temporary lock; the counter resets after 15 minutes without another failed attempt or after successful authentication. The implementation must also rate-limit by account and local source, keep the lock duration bounded, and support controlled GM unlock. The login throttle is not a substitute for account-level lockout.
 2. **W0-2E — Append-only/tamper-evident security audit:** The required control is not yet implemented as an enforceable append-only/hash-chain audit subsystem. Existing AuditEvent usage is a foundation, not proof against ordinary application-level tampering or a complete security event catalogue.
 3. **W0-2F — Trusted-origin controls:** Trusted browser/WebView origins and the local API boundary need explicit restrictive configuration and tests. No wildcard trusted origin is acceptable. This must be coordinated with the actual Tauri local-runtime transport/origin contract.
 4. **BasicAuthentication residual:** BasicAuthentication remains on selected frozen compatibility routes for employees not subject to MFA. Basic requests do not create registry-managed sessions, so they bypass the two-session admission cap, idle/absolute timeout, and per-session revocation. Removing it would alter the frozen Batch 2/3 compatibility contract; retaining it requires a documented, explicit owner risk decision.
 5. **Django Admin:** Keep all `/admin` routes denied (404) until the dedicated singleton-GM + verified-MFA + account-lockout authorization gate and its negative-path tests exist.
 
-OD-5 records the account-security requirements, but does not specify the numeric lockout parameters. A proposed setting set must be presented for owner selection before implementation relies on it.
+OD-5 records the account-security requirements; the later owner-approved W0-2A §9A Item 4 resolves the initial numeric lockout/session defaults. W0-2D can implement those approved values without reopening them.
 
 ### 3.3 Tauri desktop runtime
 
@@ -142,7 +142,7 @@ This is a sequencing recommendation, not an approval to alter unresolved owner d
 
 ### Gate A — Close security prerequisites
 
-1. Finish W0-2D account lockout design and implementation after selecting the owner-controlled threshold, lock duration/decay, and GM unlock/recovery behavior.
+1. Finish W0-2D account lockout implementation under the already-approved W0-2A values (5 consecutive failures, 15-minute timed lock, reset after 15 minutes since last failure or successful authentication), including local-source/account throttling and GM review/unlock audit.
 2. Implement W0-2E append-only/hash-chain audit protection with SQLite and PostgreSQL concurrency/rollback tests; cover successful/failed login, logout, account lifecycle, role/permission changes, session revocation, bootstrap/recovery, and sensitive actions.
 3. Implement W0-2F restrictive trusted-origin/CSRF/CORS settings after the local Tauri origin/transport is specified; reject wildcard and unrecognized origins.
 4. Resolve the BasicAuthentication residual through an explicit owner decision and test the chosen boundary.
@@ -184,7 +184,12 @@ Only after Gates A–D have passed review:
 
 The audit found these decision gates; it does not choose on the owner's behalf:
 
-- **W0-2D lockout parameters:** OD-5 requires configurable lockout and GM unlock but intentionally leaves numeric thresholds/time windows to implementation selection. Approve an exact policy before code hardens those values. Recommended candidate for review: 5 failed password attempts within 15 minutes, followed by a 15-minute timed lock, with progressive extension on repeated lockouts and GM-logged unlock. This is a recommendation only, not an adopted setting.
+- **W0-2E SQLite transaction boundary:** W0-2A §18.4 requires the outermost SQLite transaction for every audit-producing business operation to start with `transaction_mode="IMMEDIATE"`, before business reads. This is a connection-wide behavior change, so the architecture requires explicit owner approval or an alternative technically proven transaction-boundary design before W0-2E can ship.
+- **W0-2E backup/auditor settings:** W0-2A §23 still lists UQ-6 (backup frequency/retention) and UQ-7 (auditor-visible categories/masking) as owner decisions before W0-2E. These values must not be invented.
+- **W0-2F trusted origins:** W0-2A §23 lists UQ-8 (the exact trusted local origins) as an owner decision. It must be coordinated with the chosen Tauri origin/transport and must never use a wildcard.
+- **BasicAuthentication:** retain the narrow legacy compatibility exception with an explicit risk acceptance, or authorize a staged migration to registered SessionAuthentication on every affected route. Do not silently alter Batch 2/3.
+- **Transit-loss reversal:** obtain the remaining owner choice in `PHASE_11_OPEN_POLICY_DECISIONS.md` before implementing reversal after dependent postings.
+- **Sales accounting gates:** review the exact outstanding Sales posting/COGS/valuation/custody/returns decisions before expanding Sales posting behavior.
 - **BasicAuthentication:** retain the narrow legacy compatibility exception with an explicit risk acceptance, or authorize a staged migration to registered SessionAuthentication on every affected route. Do not silently alter Batch 2/3.
 - **Transit-loss reversal:** obtain the remaining owner choice in `PHASE_11_OPEN_POLICY_DECISIONS.md` before implementing reversal after dependent postings.
 - **Sales accounting gates:** review the exact outstanding Sales posting/COGS/valuation/custody/returns decisions before expanding Sales posting behavior.
@@ -199,7 +204,7 @@ A successful CI run is necessary but not sufficient. Physical Windows acceptance
 
 **The project is not ready for a Windows release package today.** The immediate blockers are not the installer itself: they are the still-unfinished security controls, exposed operational API/UI workflows, reports/documents, backup/restore, and the Tauri-to-Django runtime boundary.
 
-The correct next action is to proceed one bounded workstream at a time, beginning with W0-2D design/implementation after the lockout policy decision, then W0-2E and W0-2F, while separately advancing the business verticals and operational UI. Do not build or declare an accepted Windows package until the preceding gates have evidence and owner review.
+The correct next action is to proceed one bounded workstream at a time, beginning with W0-2D implementation under the already-approved lockout policy. W0-2E must pause for the expressly required SQLite IMMEDIATE / alternative-boundary decision and UQ-6/UQ-7; W0-2F must pause for UQ-8 and the desktop-origin contract. The business API/UI verticals, reports, documents and backup/restore also need bounded delivery batches. Do not build or declare an accepted Windows package until the preceding gates have evidence and owner review.
 
 ---
 **Audit limitations:** This document does not inspect a physical Windows workstation, execute local database tests, prove manual end-user behavior, or re-evaluate all historical business-phase test logs. It records current GitHub source/resource observations plus the cited contract/status documents. Where a previous report conflicts with the current source tree, the current branch tree controls; historical report claims are not carried forward as current facts.
