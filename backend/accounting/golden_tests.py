@@ -17,7 +17,8 @@ evidence report:
 from decimal import Decimal
 from unittest import mock
 
-from django.test import TestCase, TransactionTestCase
+from django.test import TestCase
+from security.test_support import AuditTriggerAwareTransactionTestCase
 
 from core.idempotency import IdempotencyRecord
 from core.money import cogs as cogs_amount
@@ -588,7 +589,7 @@ class GoldenIdempotencyTests(GoldenFixture, TestCase):
 # GOLDEN 15 — atomic rollback (real transactions)
 # ---------------------------------------------------------------------------
 
-class GoldenRollbackTests(GoldenFixture, TransactionTestCase):
+class GoldenRollbackTests(GoldenFixture, AuditTriggerAwareTransactionTestCase):
     def setUp(self):
         self.afn, self.usd = self._seed()
         self.acc = self._accounts()

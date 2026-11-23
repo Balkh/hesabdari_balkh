@@ -17,7 +17,8 @@ from django.contrib.auth import get_user_model
 from django.contrib.auth.models import AnonymousUser
 from django.db import IntegrityError, transaction, connection, close_old_connections
 from django.db.models import Sum
-from django.test import TestCase, TransactionTestCase
+from django.test import TestCase
+from security.test_support import AuditTriggerAwareTransactionTestCase
 
 from accounting.coa import seed_chart_of_accounts
 from accounting.models import (
@@ -1703,7 +1704,7 @@ class Stage66DispatchTests(InventoryFixture, TestCase):
         self.assertEqual(returned.return_movement.unit_cost, Decimal("12.0000"))
         self.assertEqual(stock_for(self.product, self.warehouse), 85)
 
-class Stage6ConcurrencyTests(InventoryFixture, TransactionTestCase):
+class Stage6ConcurrencyTests(InventoryFixture, AuditTriggerAwareTransactionTestCase):
     """PostgreSQL concurrency regression tests for stock identity locking."""
 
     reset_sequences = True

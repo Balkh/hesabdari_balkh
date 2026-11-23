@@ -5,7 +5,8 @@ from unittest import skipUnless
 
 from django.contrib.auth import get_user_model
 from django.db import close_old_connections, connection
-from django.test import TransactionTestCase
+from django.test import TestCase
+from security.test_support import AuditTriggerAwareTransactionTestCase
 
 from accounting.coa import seed_chart_of_accounts
 from accounting.models import Account, JournalEntry
@@ -29,7 +30,7 @@ from warehouses.services import create_warehouse
 
 
 @skipUnless(connection.vendor == "postgresql", "Row-lock concurrency is verified on PostgreSQL")
-class LandedCostConcurrentPostingTests(TransactionTestCase):
+class LandedCostConcurrentPostingTests(AuditTriggerAwareTransactionTestCase):
     reset_sequences = True
 
     def setUp(self):

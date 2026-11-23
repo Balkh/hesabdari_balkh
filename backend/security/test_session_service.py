@@ -1,7 +1,8 @@
 from datetime import timedelta
 
 from django.contrib.auth import get_user_model
-from django.test import TestCase, TransactionTestCase
+from django.test import TestCase
+from security.test_support import AuditTriggerAwareTransactionTestCase
 from django.utils import timezone
 
 from security.mfa_models import SecurityLoginSession
@@ -77,7 +78,7 @@ class SessionRegistryTests(TestCase):
         self.assertIsNone(touch_login_session(other, "bound-session-key"))
 
 
-class SessionAdmissionConcurrencyTests(TransactionTestCase):
+class SessionAdmissionConcurrencyTests(AuditTriggerAwareTransactionTestCase):
     """Concurrent admissions must never exceed the DB-enforced two-slot cap."""
 
     def test_three_concurrent_logins_never_create_more_than_two_active_rows(self):
