@@ -26,11 +26,33 @@ class LocalConsoleGuardTests(SimpleTestCase):
         require_local_console(
             stdin=_TTY(), stdout=_TTY(), environ={}, platform_name="nt",
             session_ids=lambda: (7, 7),
+            remote_session_state=lambda _pid: (False, False, 7),
         )
         with self.assertRaises(LocalConsoleRequiredError):
             require_local_console(
                 stdin=_TTY(), stdout=_TTY(), environ={}, platform_name="nt",
                 session_ids=lambda: (7, 8),
+            )
+
+    def test_remote_desktop_and_shadowed_sessions_are_rejected(self):
+        for state in (
+            (True, False, 7),
+            (False, True, 7),
+            (False, False, 8),
+        ):
+            with self.subTest(state=state), self.assertRaises(LocalConsoleRequiredError):
+                require_local_console(
+                    stdin=_TTY(), stdout=_TTY(), environ={}, platform_name="nt",
+                    session_ids=lambda: (7, 7),
+                    remote_session_state=lambda _pid, value=state: value,
+                )
+
+    def test_remote_session_probe_failure_is_denied(self):
+        with self.assertRaises(LocalConsoleRequiredError):
+            require_local_console(
+                stdin=_TTY(), stdout=_TTY(), environ={}, platform_name="nt",
+                session_ids=lambda: (7, 7),
+                remote_session_state=lambda _pid: (_ for _ in ()).throw(RuntimeError("probe failed")),
             )
 
     def test_missing_physical_console_is_rejected(self):
