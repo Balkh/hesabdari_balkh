@@ -12,3 +12,6 @@ class SecurityConfig(AppConfig):
         from security import checks  # noqa: F401
         # Capture failed ModelBackend/DRF BasicAuthentication password attempts.
         from security import login_signals  # noqa: F401
+        # Restore the empty chain singleton after Django TransactionTestCase
+        # flushes its disposable database; never reconstruct a non-empty chain.
+        from security import audit_chain_signals  # noqa: F401
