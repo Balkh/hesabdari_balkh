@@ -110,12 +110,19 @@ def require_local_console(
             raise LocalConsoleRequiredError(
                 "This operation must run in the Windows session attached to the physical console"
             )
-        remote_state = (
-            remote_session_state(process_session_id)
-            if remote_session_state is not None
-            else _windows_remote_session_state(process_session_id)
-        )
-        is_remote_session, is_remotely_controlled, glass_session_id = remote_state
+        try:
+            remote_state = (
+                remote_session_state(process_session_id)
+                if remote_session_state is not None
+                else _windows_remote_session_state(process_session_id)
+            )
+            is_remote_session, is_remotely_controlled, glass_session_id = remote_state
+        except LocalConsoleRequiredError:
+            raise
+        except Exception:
+            raise LocalConsoleRequiredError(
+                "Windows remote-session state could not be verified"
+            ) from None
         if not _is_uncontrolled_local_session(
             is_remote_session=is_remote_session,
             is_remotely_controlled=is_remotely_controlled,
