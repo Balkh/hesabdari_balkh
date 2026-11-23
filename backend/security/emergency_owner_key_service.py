@@ -344,7 +344,7 @@ def recover_existing_gm_offline(
         )
         record_audit_event(
             user=gm_user,
-            action=AuditAction.UPDATE,
+            action=AuditAction.ACCOUNT_EMERGENCY_RECOVERY,
             entity="GM_EMERGENCY_RECOVERY",
             entity_id=str(gm_user.pk),
             previous_state={

@@ -200,6 +200,13 @@ def login_view(request):
             record_audit_event(
                 user=user,
                 action=AuditAction.LOGIN_SUCCESS,
+                entity="AUTHENTICATION",
+                entity_id=str(user.pk),
+                new_state={"mfa_verified": mfa_verified_at is not None},
+            )
+            record_audit_event(
+                user=user,
+                action=AuditAction.SESSION_STARTED,
                 entity="AUTH_SESSION",
                 entity_id=str(user.pk),
                 new_state={
@@ -247,7 +254,7 @@ def logout_view(request):
                 revoke_login_session(user, session_key, reason="LOGOUT")
             record_audit_event(
                 user=user,
-                action=AuditAction.LOGOUT,
+                action=AuditAction.SESSION_TERMINATED,
                 entity="AUTH_SESSION",
                 entity_id=str(user.pk),
                 new_state={"session_revoked": bool(session_key)},

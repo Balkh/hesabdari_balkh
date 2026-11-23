@@ -184,7 +184,7 @@ def confirm_mfa_enrollment(
                     ])
                     record_audit_event(
                         user=user,
-                        action=AuditAction.UPDATE,
+                        action=AuditAction.MFA_ENROLLED,
                         entity="MFA_DEVICE",
                         entity_id=str(device.pk),
                         previous_state={"status": MFADeviceStatus.PENDING},
@@ -292,7 +292,7 @@ def rotate_recovery_codes(user, *, password, totp_code=None, recovery_code=None,
         ])
         record_audit_event(
             user=locked_user,
-            action=AuditAction.UPDATE,
+            action=AuditAction.RECOVERY_CODES_ROTATED,
             entity="MFA_RECOVERY_CODES",
             entity_id=str(locked_user.pk),
             new_state={"active_code_count": 10},
@@ -348,7 +348,7 @@ def disable_employee_mfa(
         revoked = revoke_all_login_sessions(locked_user, reason="MFA_DISABLED", at=now)
         record_audit_event(
             user=locked_user,
-            action=AuditAction.UPDATE,
+            action=AuditAction.MFA_REVOKED,
             entity="MFA_DEVICE",
             entity_id=str(device.pk),
             previous_state={"status": MFADeviceStatus.ACTIVE},
