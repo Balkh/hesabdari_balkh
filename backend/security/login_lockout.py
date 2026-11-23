@@ -70,24 +70,33 @@ def is_account_locked(user, *, at=None) -> bool:
     ).exists()
 
 
-def login_failure_rate(*, at=None):
+def login_failure_rate():
     """Reuse the existing security_login DRF rate; no new numeric policy is invented."""
-    from rest_framework.throttling import SimpleRateThrottle
-
     configured = getattr(settings, "REST_FRAMEWORK", {}).get("DEFAULT_THROTTLE_RATES", {})
     rate = configured.get("security_login")
-    if not rate:
+    if not isinstance(rate, str) or "/" not in rate:
         raise RuntimeError("REST_FRAMEWORK.DEFAULT_THROTTLE_RATES.security_login is required")
-    count, duration = SimpleRateThrottle().parse_rate(rate)
-    if count is None or duration is None or count < 1 or duration < 1:
-        raise RuntimeError("security_login rate must be a positive bounded rate")
+    count_text, period_text = rate.split("/", 1)
+    try:
+        count = int(count_text.strip())
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("security_login rate must start with a positive integer") from exc
+    period = period_text.strip().lower()
+    duration = {
+        "s": 1,
+        "m": 60,
+        "h": 3600,
+        "d": 86400,
+    }.get(period[:1])
+    if count < 1 or duration is None:
+        raise RuntimeError("security_login rate must be a positive bounded DRF rate")
     return count, timedelta(seconds=duration)
 
 
 def is_login_rate_limited(username, request, *, at=None) -> bool:
     """Enforce the existing login-failure budget independently per account and source."""
     now = at or timezone.now()
-    limit, window = login_failure_rate(at=now)
+    limit, window = login_failure_rate()
     cutoff = now - window
     name_digest = username_fingerprint(username)
     source_digest = request_source_fingerprint(request)
