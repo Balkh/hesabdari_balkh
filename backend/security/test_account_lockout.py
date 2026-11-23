@@ -154,9 +154,11 @@ class AccountLockoutPolicyTests(TestCase):
 
         response = client.get("/api/v1/security/me/")
         self.assertEqual(response.status_code, 403)
-        self.assertEqual(
-            SecurityLoginSession.objects.filter(user=self.user, revoked_at__isnull=True).count(),
-            1,
+        row = SecurityLoginSession.objects.get(user=self.user)
+        self.assertIsNotNone(row.revoked_at)
+        self.assertEqual(row.revoke_reason, "ACCOUNT_LOCKED")
+        self.assertFalse(
+            SecurityLoginSession.objects.filter(user=self.user, revoked_at__isnull=True).exists()
         )
 
     @override_settings(ERP_RBAC_ENFORCEMENT=True)
