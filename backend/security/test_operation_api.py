@@ -1,9 +1,12 @@
 """R2 endpoint-level permission ordering and operation selection tests."""
 
 import base64
+from datetime import timedelta
+from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
 from django.test import TestCase, override_settings
+from django.utils import timezone
 from rest_framework.test import APIClient
 
 from security.models import AuditEvent, Role, UserRoleAssignment
@@ -189,3 +192,75 @@ class OperationApiEnforcementTests(TestCase):
         self.assertEqual(FiscalPeriod.objects.count(), period_count)
         self.assertEqual(LandedCostDocument.objects.count(), landed_count)
         self.assertEqual(AuditEvent.objects.count(), audit_count)
+
+
+@override_settings(ERP_RBAC_ENFORCEMENT=True)
+class SessionRegistryAuthorizationBoundaryTests(TestCase):
+    """A valid Django cookie without a live W0-2C registry row is not a session."""
+
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username="registry-expiry-accountant",
+            password="strong-test-password",
+        )
+        accountant = Role.objects.get(code="ACCOUNTANT")
+        UserRoleAssignment.objects.create(user=self.user, role=accountant)
+        self.client = APIClient()
+        self.assertTrue(self.client.login(
+            username=self.user.username, password="strong-test-password"
+        ))
+        self.session_key = self.client.session.session_key
+
+    def test_idle_expiry_is_enforced_on_a_real_protected_api_request(self):
+        from security.mfa_models import SecurityLoginSession
+        from security.session_service import register_login_session
+
+        now = timezone.now()
+        row = register_login_session(
+            self.user,
+            self.session_key,
+            at=now - timedelta(minutes=16),
+        )
+
+        with patch("django.utils.timezone.now", return_value=now):
+            response = self.client.get("/api/v1/fiscal-periods/")
+
+        self.assertEqual(response.status_code, 403)
+        row.refresh_from_db()
+        self.assertIsNotNone(row.revoked_at)
+        self.assertEqual(row.revoke_reason, "EXPIRED")
+        self.assertFalse(SecurityLoginSession.objects.filter(
+            user=self.user, revoked_at__isnull=True
+        ).exists())
+
+    def test_absolute_expiry_is_enforced_even_after_idle_activity(self):
+        from security.session_service import register_login_session, touch_login_session
+
+        now = timezone.now()
+        created_at = now - timedelta(hours=12)
+        row = register_login_session(
+            self.user,
+            self.session_key,
+            at=created_at,
+        )
+        touched = touch_login_session(
+            self.user,
+            self.session_key,
+            at=created_at + timedelta(hours=11, minutes=50),
+        )
+        self.assertIsNotNone(touched)
+        self.assertEqual(touched.idle_expires_at, touched.absolute_expires_at)
+        self.assertEqual(touched.absolute_expires_at, now.replace(microsecond=0)
+                         if touched.absolute_expires_at.replace(microsecond=0) == now.replace(microsecond=0)
+                         else touched.absolute_expires_at)
+
+        with patch(
+            "django.utils.timezone.now",
+            return_value=touched.absolute_expires_at + timedelta(seconds=1),
+        ):
+            response = self.client.get("/api/v1/fiscal-periods/")
+
+        self.assertEqual(response.status_code, 403)
+        row.refresh_from_db()
+        self.assertIsNotNone(row.revoked_at)
+        self.assertEqual(row.revoke_reason, "EXPIRED")
