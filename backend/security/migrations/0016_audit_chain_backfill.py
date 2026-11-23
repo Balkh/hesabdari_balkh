@@ -157,7 +157,7 @@ class Migration(migrations.Migration):
             model_name="auditevent",
             name="action",
             field=models.CharField(max_length=40, choices=[
-                ("LOGIN", "Login (legacy)"), ("LOGOUT", "Logout"), ("CREATE", "Create"),
+                ("LOGIN", "Login"), ("LOGOUT", "Logout"), ("CREATE", "Create"),
                 ("UPDATE", "Update"), ("POST", "Post"), ("REVERSE", "Reverse"),
                 ("APPROVE", "Approve"), ("LOGIN_SUCCESS", "Login successful"),
                 ("LOGIN_FAILED", "Failed login"), ("ACCOUNT_CREATED", "Account created"),

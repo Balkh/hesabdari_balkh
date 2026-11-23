@@ -108,11 +108,11 @@ def calculate_event_hash(previous_hash: str, payload: dict) -> str:
 
 
 _SENSITIVE_AUDIT_KEYS = {
-    "password", "passwd", "passphrase", "totp", "totp_code",
-    "recovery_code", "recovery_codes", "secret", "secret_key",
-    "owner_key", "encryption_key", "private_key", "ciphertext",
-    "nonce", "credential", "credentials", "authorization_header",
-    "access_token", "refresh_token", "api_key",
+    "password", "passwd", "passphrase", "totp", "totpcode",
+    "recoverycode", "recoverycodes", "secret", "secretkey",
+    "ownerkey", "encryptionkey", "privatekey", "ciphertext",
+    "nonce", "credential", "credentials", "authorizationheader",
+    "accesstoken", "refreshtoken", "apikey",
 }
 
 
@@ -285,8 +285,8 @@ def append_audit_event(
         reason=reason or "",
         event_uuid=uuid4(),
         prev_event_hash=head.head_hash,
-        actor_snapshot=_actor_snapshot(user, now),
-        authorization_context=_authorization_snapshot(request, authorization_context),
+        actor_snapshot=_redact_sensitive(_actor_snapshot(user, now)),
+        authorization_context=_redact_sensitive(_authorization_snapshot(request, authorization_context)),
         source_fingerprint=_source_fingerprint(request),
         created_at=now,
     )

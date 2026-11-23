@@ -66,7 +66,7 @@ class SecurityLoginFlowTests(TestCase):
         self.assertEqual(record.slot_number, 1)
         self.assertTrue(self.client.session.get("_auth_user_id"))
         event = AuditEvent.objects.filter(
-            user=self.user, action=AuditAction.LOGIN_SUCCESS, entity="AUTH_SESSION"
+            user=self.user, action=AuditAction.LOGIN_SUCCESS, entity="AUTHENTICATION"
         ).latest("id")
         self.assertEqual(event.new_state["mfa_verified"], False)
         self.assertEqual(event.new_state["session_slot"], 1)

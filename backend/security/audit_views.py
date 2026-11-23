@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import logging
+
+from django.core.serializers.json import DjangoJSONEncoder
 
 from django.http import HttpResponse
 from rest_framework import status
@@ -110,7 +113,7 @@ def audit_events(request):
 
     if request.query_params.get("export") == "json":
         response = HttpResponse(
-            __import__("json").dumps(response_data, ensure_ascii=False, separators=(",", ":")),
+            json.dumps(response_data, cls=DjangoJSONEncoder, ensure_ascii=False, separators=(",", ":")),
             content_type="application/json; charset=utf-8",
         )
         response["Content-Disposition"] = 'attachment; filename="hesabdari-audit-events.json"'

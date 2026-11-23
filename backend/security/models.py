@@ -7,7 +7,7 @@ from django.utils import timezone
 
 class AuditAction(models.TextChoices):
     # Historical values are permanent: never rename or rewrite them.
-    LOGIN = "LOGIN", "Login (legacy)"
+    LOGIN = "LOGIN", "Login"
     LOGOUT = "LOGOUT", "Logout"
     CREATE = "CREATE", "Create"
     UPDATE = "UPDATE", "Update"
