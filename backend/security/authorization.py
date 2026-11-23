@@ -132,6 +132,7 @@ DENY_FAIL_CLOSED = "FAIL_CLOSED"
 # Target kinds for the R1 resource-binding registry (§16.1 step 9).
 BINDING_TARGET_WAREHOUSE = "WAREHOUSE"
 BINDING_TARGET_SELF_USER = "SELF_USER"
+BINDING_TARGET_USER = "USER"
 BINDING_TARGET_FISCAL_PERIOD = "FISCAL_PERIOD"
 BINDING_TARGET_LANDED_COST_DOCUMENT = "LANDED_COST_DOCUMENT"
 
@@ -349,6 +350,7 @@ _BINDING_STATUS_UNDECLARED = _ResourceBinding(
 _BINDING_TARGET_MODELS = {
     BINDING_TARGET_WAREHOUSE: "warehouses.models.Warehouse",
     BINDING_TARGET_SELF_USER: "django.contrib.auth User",
+    BINDING_TARGET_USER: "django.contrib.auth User",
 }
 
 
@@ -363,7 +365,7 @@ def _binding_target_model(kind):
         from warehouses.models import Warehouse
 
         return Warehouse
-    if kind == BINDING_TARGET_SELF_USER:
+    if kind in (BINDING_TARGET_SELF_USER, BINDING_TARGET_USER):
         from django.contrib.auth import get_user_model
 
         return get_user_model()

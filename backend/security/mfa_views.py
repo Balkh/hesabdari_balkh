@@ -23,7 +23,14 @@ from security.mfa_service import (
     disable_employee_mfa,
     rotate_recovery_codes,
 )
-from security.operation_registry import OBJECT, TARGET_REQUEST_USER, OperationSpec, erp_operations
+from security.operation_registry import (
+    OBJECT,
+    TARGET_REQUEST_USER,
+    TARGET_URL_KWARG,
+    OperationSpec,
+    erp_operations,
+)
+from security.authorization import BINDING_TARGET_USER
 logger = logging.getLogger("security.mfa_views")
 
 
@@ -40,7 +47,10 @@ from security.permissions import (
     POST=OperationSpec(
         operation_id="security.mfa.policy.update_employee",
         permission_key="security.mfa.reset",
-        binding_kind="COLLECTION",
+        binding_kind=OBJECT,
+        target_kind=BINDING_TARGET_USER,
+        target_source=TARGET_URL_KWARG,
+        target_kwarg="user_id",
     )
 )
 @api_view(["POST"])

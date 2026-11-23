@@ -17,6 +17,7 @@ from security.operation_registry import (
     TARGET_NONE,
     TARGET_REQUEST_USER,
     TARGET_URL_KWARG,
+    BINDING_TARGET_USER,
     erp_operations,
 )
 
@@ -84,6 +85,13 @@ class OperationSpecValidationTests(SimpleTestCase):
                 target_kind="FISCAL_PERIOD",
                 target_source=TARGET_REQUEST_USER,
             )
+
+    def test_mfa_employee_policy_operation_binds_url_user_target(self):
+        operation = OPERATION_SPECS["security.mfa.policy.update_employee"]
+        self.assertEqual(operation.binding_kind, OBJECT)
+        self.assertEqual(operation.target_kind, BINDING_TARGET_USER)
+        self.assertEqual(operation.target_source, TARGET_URL_KWARG)
+        self.assertEqual(operation.target_kwarg, "user_id")
 
     def test_mounted_route_inventory_has_eighteen_unique_operations(self):
         expected = {

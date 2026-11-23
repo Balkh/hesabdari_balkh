@@ -17,6 +17,7 @@ from security.mfa_models import (
 from security.mfa_service import begin_mfa_enrollment, confirm_mfa_enrollment
 from security.models import GMRoleSlot, Role, UserRoleAssignment
 from security.session_service import register_login_session, session_key_digest
+from security.gm_slot import claim_gm_slot
 
 
 class StaticMFAKeyProvider:
@@ -201,6 +202,54 @@ class EmployeeMFAApiTests(TestCase):
             format="json",
         )
         self.assertEqual(response.status_code, 403)
+
+    def _gm_client(self, *, mfa_verified):
+        gm = get_user_model().objects.create_user(
+            username=f"policy-gm-{mfa_verified}",
+            password="Strong-test-password-123",
+        )
+        gm_role = Role.objects.get(code="GM")
+        assignment = UserRoleAssignment.objects.create(user=gm, role=gm_role)
+        claim_gm_slot(assignment)
+        client = APIClient()
+        self.assertTrue(client.login(
+            username=gm.username, password="Strong-test-password-123"
+        ))
+        register_login_session(
+            gm,
+            client.session.session_key,
+            mfa_verified_at=timezone.now() if mfa_verified else None,
+        )
+        return gm, client
+
+    def test_mfa_policy_endpoint_rejects_gm_session_without_verified_mfa(self):
+        _, client = self._gm_client(mfa_verified=False)
+        response = client.post(
+            f"/api/v1/security/mfa/policy/{self.user.pk}/",
+            {"required": False, "reason": "test"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 403)
+
+    def test_mfa_policy_endpoint_requires_persisted_user_target(self):
+        _, client = self._gm_client(mfa_verified=True)
+        response = client.post(
+            "/api/v1/security/mfa/policy/999999999/",
+            {"required": False, "reason": "test"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 403)
+
+    def test_verified_gm_can_update_employee_mfa_policy(self):
+        _, client = self._gm_client(mfa_verified=True)
+        response = client.post(
+            f"/api/v1/security/mfa/policy/{self.user.pk}/",
+            {"required": False, "reason": "owner-approved test"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data["user_id"], self.user.pk)
+        self.assertFalse(response.data["mfa_required"])
 
     def test_gm_cannot_use_employee_self_enrollment_route(self):
         role, _ = Role.objects.get_or_create(
