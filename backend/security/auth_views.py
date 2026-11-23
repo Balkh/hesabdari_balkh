@@ -27,6 +27,7 @@ from security.login_lockout import (
     AccountCurrentlyLocked,
     find_user_for_login,
     is_account_locked,
+    is_login_rate_limited,
     record_locked_login,
     record_login_success,
     record_mfa_failure,
@@ -95,6 +96,16 @@ def login_view(request):
     password = request.data.get("password")
     if not isinstance(username, str) or not username or not isinstance(password, str) or not password:
         return Response({"error": "invalid_credentials"}, status=status.HTTP_400_BAD_REQUEST)
+
+    try:
+        if is_login_rate_limited(username, request._request, at=timezone.now()):
+            return Response(
+                {"error": "authentication_rate_limited"},
+                status=status.HTTP_429_TOO_MANY_REQUESTS,
+            )
+    except Exception:
+        logger.exception("account/source login-rate state unavailable")
+        return Response({"error": "authentication_unavailable"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
 
     candidate = find_user_for_login(username)
     try:
