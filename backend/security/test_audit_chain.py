@@ -71,12 +71,18 @@ class AuditChainTests(TestCase):
             new_state={
                 "password": "must-not-persist",
                 "nested": {"totp_code": "123456", "safe_value": "visible"},
+                "message": "reset password=Secret123; TOTP code=654321; Bearer abc.def.ghi",
+                "setup_uri": "otpauth://totp/Hesabdari?secret=ABCDEF123&issuer=ERP",
             }
         )
         self.assertEqual(event.new_state["password"], "[REDACTED]")
         self.assertEqual(event.new_state["nested"]["totp_code"], "[REDACTED]")
         self.assertEqual(event.new_state["nested"]["safe_value"], "visible")
         self.assertNotIn(b"must-not-persist", canonical_json_bytes(event.new_state))
+        self.assertNotIn(b"Secret123", canonical_json_bytes(event.new_state))
+        self.assertNotIn(b"654321", canonical_json_bytes(event.new_state))
+        self.assertNotIn(b"abc.def.ghi", canonical_json_bytes(event.new_state))
+        self.assertNotIn(b"ABCDEF123", canonical_json_bytes(event.new_state))
         self.assertTrue(verify_audit_chain()["valid"])
 
     def test_jsonfield_values_are_canonical_before_persisting_and_verify_after_reload(self):

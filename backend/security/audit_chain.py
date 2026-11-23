@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import json
 import math
+import re
 from datetime import date, datetime, timezone as dt_timezone
 from decimal import Decimal
 from uuid import UUID, uuid4
@@ -114,6 +115,21 @@ _SENSITIVE_AUDIT_KEYS = {
     "nonce", "credential", "credentials", "authorizationheader",
     "accesstoken", "refreshtoken", "apikey",
 }
+_INLINE_SECRET_PATTERN = re.compile(
+    r"(?i)(\\b(?:password|passwd|passphrase|totp(?:_code)?|"
+    r"recovery_codes?|owner_key|access_token|refresh_token|api_key)\\b\\s*[:=]\\s*)"
+    r"[^\\s,;]+"
+)
+_BEARER_SECRET_PATTERN = re.compile(r"(?i)\\bBearer\\s+[A-Za-z0-9._~+/-]+=*")
+_OTP_URI_SECRET_PATTERN = re.compile(r"(?i)(otpauth://totp/[^?\\s]+\\?secret=)[^&\\s]+")
+
+
+def _redact_text(value):
+    if not isinstance(value, str):
+        return value
+    value = _INLINE_SECRET_PATTERN.sub(r"\\1[REDACTED]", value)
+    value = _BEARER_SECRET_PATTERN.sub("Bearer [REDACTED]", value)
+    return _OTP_URI_SECRET_PATTERN.sub(r"\\1[REDACTED]", value)
 
 
 def _redact_sensitive(value):
@@ -132,6 +148,8 @@ def _redact_sensitive(value):
         return result
     if isinstance(value, (list, tuple)):
         return [_redact_sensitive(item) for item in value]
+    if isinstance(value, str):
+        return _redact_text(value)
     return value
 
 
@@ -278,14 +296,14 @@ def append_audit_event(
         user=user,
         action=action,
         entity=entity,
-        entity_id=str(entity_id),
-        reference=reference or "",
+        entity_id=_redact_text(str(entity_id)),
+        reference=_redact_text(reference or ""),
         # Normalize JSONField payloads to their exact persisted representation
         # before hashing; the JSON encoder must not transform Decimal, UUID or
         # datetime values after the digest has been calculated.
         previous_state=_canonical_value(_redact_sensitive(previous_state)),
         new_state=_canonical_value(_redact_sensitive(new_state)),
-        reason=reason or "",
+        reason=_redact_text(reason or ""),
         event_uuid=uuid4(),
         prev_event_hash=head.head_hash,
         actor_snapshot=_canonical_value(_redact_sensitive(_actor_snapshot(user, now))),
