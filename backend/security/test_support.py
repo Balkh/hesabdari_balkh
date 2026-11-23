@@ -13,42 +13,6 @@ from django.db import connections
 from django.test import TransactionTestCase
 
 
-class AuditTriggerAwareTransactionTestCase(TransactionTestCase):
-    """Reset by discarding the ephemeral database, never by flushing rows."""
-
-    def _fixture_teardown(self):
-        aliases = self._databases_names(include_mirrors=False)
-        original_names = getattr(settings, "ERP_TEST_ORIGINAL_DATABASE_NAMES", {})
-        for alias in aliases:
-            connection = connections[alias]
-            if connection.in_atomic_block:
-                raise AssertionError(
-                    "Audit test database cannot be discarded while a transaction is active"
-                )
-            if alias not in original_names:
-                raise AssertionError(
-                    f"ERP_TEST_ORIGINAL_DATABASE_NAMES must define database alias {alias!r}"
-                )
-
-            creation = connection.creation
-            original_name = original_names[alias]
-            # destroy_test_db() closes the current test connection, drops the
-            # disposable database, and restores the original configured NAME.
-            creation.destroy_test_db(
-                old_database_name=original_name,
-                verbosity=0,
-                keepdb=False,
-            )
-            # Recreate a clean database and rerun every migration. This
-            # reinstalls append-only triggers before the next test starts.
-            creation.create_test_db(
-                verbosity=0,
-                autoclobber=True,
-                serialize=False,
-                keepdb=False,
-            )
-
-
 def reset_ephemeral_test_database(*, aliases):
     """Discard and recreate disposable test DBs without issuing SQL DELETE."""
     original_names = getattr(settings, "ERP_TEST_ORIGINAL_DATABASE_NAMES", {})
