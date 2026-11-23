@@ -137,6 +137,14 @@ The current `vite.config.ts` development server binds to `0.0.0.0` and allows ho
 
 The runbook `docs/security/W0-2C_WINDOWS_ACCEPTANCE_RUNBOOK.md` is marked required/manual/not executed. The outstanding tests include Windows 10 x64 and Windows 11 x64 end-user machines, reboot persistence, second-user Credential Manager isolation, real RDP/remote-control/remote-shell denials, same-user DB backup/restore, and a profile-loss GM recovery drill against a disposable database. These tests are distinct from GitHub-hosted Windows CI.
 
+### 3.2.2 W0-2E detailed pre-implementation plan
+
+A separate documentation-only plan now records the current schema/writer inventory, direct security audit producers, legacy mutating tests, chain schema/canonicalization, transaction boundary, existing-history backfill, cross-database triggers, mandatory tests, and the exact owner decisions needed before code:
+
+- `docs/security/W0-2E_AUDIT_CHAIN_PREIMPLEMENTATION_PLAN.md`
+
+The plan is linked in this readiness PR. It makes no application-code or settings change and does not approve the global SQLite IMMEDIATE mode or backup/auditor policy.
+
 ## 4. Business-contract and operational gaps
 
 The following distinction is mandatory: a model/service/test foundation is not the same as a complete business transaction workflow.
