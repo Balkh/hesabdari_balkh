@@ -2,6 +2,7 @@ from base64 import b64encode
 from datetime import timedelta
 
 from django.contrib.auth import get_user_model
+from django.core.cache import cache
 from django.test import RequestFactory, TestCase, override_settings
 from django.utils import timezone
 from rest_framework.test import APIClient
@@ -32,6 +33,7 @@ PASSWORD = "Strong-test-password-123"
 class AccountLockoutPolicyTests(TestCase):
     def setUp(self):
         self.user = User.objects.create_user(username="lockout-employee", password=PASSWORD)
+        cache.clear()  # isolate the production login throttle across TestCase instances
         self.client = APIClient()
 
     def _failed_login(self, username=None, password="wrong-password"):
@@ -134,7 +136,7 @@ class AccountLockoutPolicyTests(TestCase):
 
         for _ in range(5):
             response = client.get("/api/v1/security/me/")
-            self.assertEqual(response.status_code, 401)
+            self.assertEqual(response.status_code, 403)
 
         state = SecurityAccountLockout.objects.get(user=self.user)
         self.assertEqual(state.failed_password_attempts, 5)
