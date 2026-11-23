@@ -3,12 +3,13 @@ from __future__ import annotations
 
 import getpass
 import hmac
-import sys
 from urllib.parse import quote
 
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError
 from django.core.management.base import BaseCommand, CommandError
+
+from security.local_console import LocalConsoleRequiredError, require_local_console
 from django.utils import timezone
 
 from security.management.commands.bootstrap_gm import _load_key_provider
@@ -23,8 +24,10 @@ from security.mfa import generate_totp_secret
 
 
 def _require_tty():
-    if not sys.stdin.isatty() or not sys.stdout.isatty():
-        raise CommandError("GM emergency recovery is local-only and requires an interactive terminal")
+    try:
+        require_local_console()
+    except LocalConsoleRequiredError as exc:
+        raise CommandError(str(exc)) from None
 
 
 def _confirm_saved_once(stdout, raw_key):
