@@ -29,7 +29,8 @@ from django.contrib.auth import get_user_model
 from django.core.management import call_command
 from django.core.management.base import CommandError
 from django.db import connection, transaction
-from django.test import TestCase, TransactionTestCase
+from django.test import TestCase
+from security.test_support import AuditTriggerAwareTransactionTestCase
 from django.utils import timezone
 
 from security import authorization
@@ -353,7 +354,7 @@ class SlotClaimCardinalityTests(TestCase):
 # ---------------------------------------------------------------------------
 # Concurrency — two real competing claims (separate connections/threads)
 # ---------------------------------------------------------------------------
-class ConcurrentSlotClaimTests(TransactionTestCase):
+class ConcurrentSlotClaimTests(AuditTriggerAwareTransactionTestCase):
     def setUp(self):
         _reseed_rbac_catalog()
 
@@ -421,7 +422,7 @@ class ConcurrentSlotClaimTests(TransactionTestCase):
     "Row-lock CAS conflict evidence is verified on PostgreSQL 17.11 "
     "(repo concurrency-test convention); SQLite cannot provide it",
 )
-class PostgreSQLConcurrentSlotClaimTests(TransactionTestCase):
+class PostgreSQLConcurrentSlotClaimTests(AuditTriggerAwareTransactionTestCase):
     """Strict PostgreSQL evidence: two independent connections race the
     compare-and-set claim. On PostgreSQL the loser MUST receive the clean
     domain conflict (the winner's row lock blocks the loser's CAS UPDATE,
@@ -477,7 +478,7 @@ class PostgreSQLConcurrentSlotClaimTests(TransactionTestCase):
 # ---------------------------------------------------------------------------
 # Migration 0005 behavior
 # ---------------------------------------------------------------------------
-class SingletonSlotMigrationTests(TransactionTestCase):
+class SingletonSlotMigrationTests(AuditTriggerAwareTransactionTestCase):
     """Migration 0005 behavior against the real migration runner.
 
     ``TransactionTestCase`` is required: reversing/applying migrations

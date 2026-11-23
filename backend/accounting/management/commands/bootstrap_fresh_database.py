@@ -97,6 +97,7 @@ def _find_existing_application_data(using="default"):
         if (
             model in FRAMEWORK_GENERATED_MODELS
             or model in RBAC_SEEDED_REFERENCE_MODELS
+            or model._meta.label == "security.AuditChainHead"
         ):
             continue
 

@@ -84,7 +84,8 @@ class OperationApiEnforcementTests(TestCase):
         client = self.logged_in_client(user)
         before = AuditEvent.objects.count()
         self.assertEqual(client.get("/api/v1/fiscal-periods/").status_code, 403)
-        self.assertEqual(AuditEvent.objects.count(), before)
+        denied = AuditEvent.objects.filter(action="PERMISSION_DENIED")
+        self.assertEqual(denied.count(), before + 1)
 
     @override_settings(ERP_RBAC_ENFORCEMENT=True)
     def test_gm_missing_landed_cost_object_is_uniformly_denied_before_view(self):
@@ -166,7 +167,10 @@ class OperationApiEnforcementTests(TestCase):
             client.post("/api/v1/fiscal-periods/", data={}, format="json").status_code,
             403,
         )
-        self.assertEqual(AuditEvent.objects.count(), before)
+        self.assertEqual(
+            AuditEvent.objects.filter(action="PERMISSION_DENIED").count(),
+            before + 1,
+        )
 
     @override_settings(ERP_RBAC_ENFORCEMENT=True)
     def test_unauthorized_business_posts_are_denied_before_domain_writes(self):
@@ -191,7 +195,10 @@ class OperationApiEnforcementTests(TestCase):
         )
         self.assertEqual(FiscalPeriod.objects.count(), period_count)
         self.assertEqual(LandedCostDocument.objects.count(), landed_count)
-        self.assertEqual(AuditEvent.objects.count(), audit_count)
+        self.assertEqual(
+            AuditEvent.objects.filter(action="PERMISSION_DENIED").count(),
+            audit_count + 2,
+        )
 
 
 @override_settings(ERP_RBAC_ENFORCEMENT=True)

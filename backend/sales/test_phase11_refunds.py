@@ -4,7 +4,8 @@ from decimal import Decimal
 from types import SimpleNamespace
 
 from django.db import close_old_connections, connection
-from django.test import SimpleTestCase, TestCase, TransactionTestCase
+from django.test import SimpleTestCase, TestCase
+from security.test_support import AuditTriggerAwareTransactionTestCase
 
 from accounting.coa import seed_chart_of_accounts
 from accounting.models import Account
@@ -335,7 +336,7 @@ class Phase11WorkflowTests(TestCase):
         self.assertEqual(stock_for(self.product, self.warehouse), 10)
 
 
-class Phase11RefundConcurrencyTests(TransactionTestCase):
+class Phase11RefundConcurrencyTests(AuditTriggerAwareTransactionTestCase):
     """PostgreSQL regression: concurrent refunds cannot exceed entitlement."""
 
     reset_sequences = True
