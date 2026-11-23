@@ -7,7 +7,13 @@ from django.test import RequestFactory, TestCase, override_settings
 from django.utils import timezone
 from rest_framework.test import APIClient
 
-from security.login_lockout import record_password_failure
+from security.login_lockout import (
+    _fingerprint,
+    is_login_rate_limited,
+    record_password_failure,
+    request_source_fingerprint,
+    username_fingerprint,
+)
 from security.mfa_models import (
     SecurityAccountLockout,
     SecurityLoginAttempt,
@@ -129,18 +135,79 @@ class AccountLockoutPolicyTests(TestCase):
         self.assertNotIn("sensitive-unknown-name", str(event.new_state))
         self.assertNotIn("sensitive-unknown-name", event.reason)
 
-    def test_basic_authentication_failures_are_captured_by_django_signal(self):
+    def test_basic_authentication_failures_capture_the_real_local_source(self):
         token = b64encode(b"lockout-employee:wrong-password").decode("ascii")
         client = APIClient()
         client.credentials(HTTP_AUTHORIZATION=f"Basic {token}")
+        source = "192.0.2.44"
 
         for _ in range(5):
-            response = client.get("/api/v1/security/me/")
+            response = client.get("/api/v1/security/me/", REMOTE_ADDR=source)
             self.assertEqual(response.status_code, 403)
 
         state = SecurityAccountLockout.objects.get(user=self.user)
         self.assertEqual(state.failed_password_attempts, 5)
         self.assertIsNotNone(state.locked_until)
+        attempt = SecurityLoginAttempt.objects.filter(
+            user=self.user,
+            outcome=SecurityLoginAttemptOutcome.PASSWORD_FAILED,
+        ).latest("id")
+        expected = request_source_fingerprint(
+            RequestFactory().get("/api/v1/security/me/", REMOTE_ADDR=source)
+        )
+        self.assertEqual(attempt.source_digest, expected)
+
+    def test_password_login_is_rate_limited_by_account_using_existing_ten_per_minute_rate(self):
+        now = timezone.now()
+        source_request = RequestFactory().post(
+            "/api/v1/security/auth/login/", REMOTE_ADDR="198.51.100.20"
+        )
+        name_digest = username_fingerprint(self.user.username)
+        for i in range(10):
+            SecurityLoginAttempt.objects.create(
+                user=None,
+                username_digest=name_digest,
+                source_digest=_fingerprint("source", f"198.51.100.{i + 1}"),
+                outcome=SecurityLoginAttemptOutcome.PASSWORD_FAILED,
+                occurred_at=now - timedelta(seconds=10),
+            )
+
+        response = self.client.post(
+            "/api/v1/security/auth/login/",
+            {"username": self.user.username, "password": PASSWORD},
+            format="json",
+            REMOTE_ADDR="198.51.100.20",
+        )
+        self.assertEqual(response.status_code, 429)
+        self.assertEqual(response.data["error"], "authentication_rate_limited")
+        self.assertFalse(SecurityLoginSession.objects.filter(user=self.user).exists())
+
+    def test_basic_authentication_is_rate_limited_by_local_source(self):
+        source = "203.0.113.77"
+        source_request = RequestFactory().get(
+            "/api/v1/security/me/", REMOTE_ADDR=source
+        )
+        source_digest = request_source_fingerprint(source_request)
+        now = timezone.now()
+        for i in range(10):
+            SecurityLoginAttempt.objects.create(
+                user=None,
+                username_digest=username_fingerprint(f"other-account-{i}"),
+                source_digest=source_digest,
+                outcome=SecurityLoginAttemptOutcome.PASSWORD_FAILED,
+                occurred_at=now - timedelta(seconds=5),
+            )
+
+        token = b64encode(
+            f"{self.user.username}:{PASSWORD}".encode("utf-8")
+        ).decode("ascii")
+        client = APIClient()
+        client.credentials(HTTP_AUTHORIZATION=f"Basic {token}")
+
+        response = client.get("/api/v1/security/me/", REMOTE_ADDR=source)
+
+        self.assertEqual(response.status_code, 429)
+        self.assertEqual(response.json(), {"error": "authentication_rate_limited"})
 
     @override_settings(ERP_RBAC_ENFORCEMENT=True)
     def test_lock_blocks_an_already_registered_employee_session(self):
