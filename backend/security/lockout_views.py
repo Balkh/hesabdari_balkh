@@ -24,7 +24,7 @@ from security.permissions import HasErpOperation, IsAuthenticatedForERP, IsGMWit
         binding_kind=COLLECTION,
     )
 )
-@api_view(["GET"])
+@api_view(["GET", "HEAD"])
 @authentication_classes([SessionAuthentication])
 @permission_classes([IsAuthenticatedForERP, HasErpOperation, IsGMWithVerifiedMFA])
 def lockout_collection(request):
