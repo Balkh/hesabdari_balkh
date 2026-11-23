@@ -325,13 +325,9 @@ def append_audit_event(
     return event
 
 
-def verify_audit_chain(*, using="default") -> dict:
-    from security.models import AuditEvent, AuditChainHead
-
-    events = list(AuditEvent.objects.using(using).all().order_by("pk"))
-    if not AuditChainHead.objects.using(using).filter(pk=1).exists():
-        raise AuditChainVerificationError("audit chain singleton head is missing")
-    head = AuditChainHead.objects.using(using).get(pk=1)
+def verify_audit_chain_records(events, *, head_hash: str, last_event_id):
+    """Verify already-loaded event rows; shared by live DB and restored backups."""
+    events = list(events)
     by_previous = {}
     for event in events:
         if event.prev_event_hash in by_previous:
@@ -343,23 +339,40 @@ def verify_audit_chain(*, using="default") -> dict:
     seen_uuid = set()
     while current in by_previous:
         event = by_previous[current]
-        if event.event_uuid in seen_uuid:
+        event_uuid = str(event.event_uuid).lower()
+        if event_uuid in seen_uuid:
             raise AuditChainVerificationError("duplicate event UUID or cycle detected")
-        seen_uuid.add(event.event_uuid)
+        seen_uuid.add(event_uuid)
         expected = calculate_event_hash(current, immutable_event_payload(event))
         if not hmac.compare_digest(expected, event.event_hash):
-            raise AuditChainVerificationError(f"event hash mismatch at event id {event.pk}")
+            raise AuditChainVerificationError(
+                f"event hash mismatch at event id {getattr(event, 'pk', getattr(event, 'id', '?'))}"
+            )
         visited.append(event)
         current = event.event_hash
 
     if len(visited) != len(events):
         raise AuditChainVerificationError("orphan, missing link, or disconnected audit event detected")
-    last_id = visited[-1].pk if visited else None
-    if head.head_hash != current or head.last_event_id != last_id:
+    verified_last_id = getattr(visited[-1], "pk", getattr(visited[-1], "id", None)) if visited else None
+    if head_hash != current or last_event_id != verified_last_id:
         raise AuditChainVerificationError("audit chain head does not match the verified final event")
     return {
         "valid": True,
         "event_count": len(visited),
         "head_hash": current,
-        "last_event_id": last_id,
+        "last_event_id": verified_last_id,
     }
+
+
+def verify_audit_chain(*, using="default") -> dict:
+    from security.models import AuditEvent, AuditChainHead
+
+    events = list(AuditEvent.objects.using(using).all().order_by("pk"))
+    if not AuditChainHead.objects.using(using).filter(pk=1).exists():
+        raise AuditChainVerificationError("audit chain singleton head is missing")
+    head = AuditChainHead.objects.using(using).get(pk=1)
+    return verify_audit_chain_records(
+        events,
+        head_hash=head.head_hash,
+        last_event_id=head.last_event_id,
+    )
