@@ -65,32 +65,45 @@ def set_employee_mfa_requirement(actor, target, *, required: bool, reason: str, 
     try:
         with transaction.atomic():
             locked_ids = sorted({actor.pk, target.pk})
-            list(user_model._default_manager.select_for_update().filter(pk__in=locked_ids).order_by("pk"))
-            if not is_active_gm_holder(actor, at=now) or is_active_gm_holder(target, at=now):
+            locked_users = list(
+                user_model._default_manager.select_for_update()
+                .filter(pk__in=locked_ids)
+                .order_by("pk")
+            )
+            locked_by_id = {locked_user.pk: locked_user for locked_user in locked_users}
+            locked_actor = locked_by_id.get(actor.pk)
+            locked_target = locked_by_id.get(target.pk)
+            if locked_actor is None or not locked_actor.is_active:
+                raise PermissionDenied("only an active GM may change employee MFA policy")
+            if locked_target is None or not locked_target.is_active:
+                raise ValidationError("target employee must be active")
+            if not is_active_gm_holder(locked_actor, at=now) or is_active_gm_holder(
+                locked_target, at=now
+            ):
                 raise PermissionDenied("GM or employee identity changed during MFA policy update")
             if required and not SecurityMFADevice.objects.filter(
-                user=target, status=MFADeviceStatus.ACTIVE
+                user=locked_target, status=MFADeviceStatus.ACTIVE
             ).exists():
                 raise ValidationError("employee must complete MFA enrollment before it is required")
             policy, created = SecurityMFARequirement.objects.select_for_update().get_or_create(
-                user=target,
+                user=locked_target,
                 defaults={
                     "is_required": required,
-                    "updated_by": actor,
+                    "updated_by": locked_actor,
                     "reason": clean_reason,
                 },
             )
             previous = policy.is_required if not created else False
             if not created:
                 policy.is_required = required
-                policy.updated_by = actor
+                policy.updated_by = locked_actor
                 policy.reason = clean_reason
                 policy.save(update_fields=["is_required", "updated_by", "reason", "updated_at"])
             AuditEvent.objects.create(
-                user=actor,
+                user=locked_actor,
                 action=AuditAction.UPDATE,
                 entity="MFA_REQUIREMENT",
-                entity_id=str(target.pk),
+                entity_id=str(locked_target.pk),
                 previous_state={"required": previous},
                 new_state={"required": required},
                 reason=clean_reason,

@@ -61,6 +61,32 @@ class EmployeeMFAPolicyTests(TestCase):
                 self.employee, self.gm, required=True, reason="unauthorized"
             )
 
+    def test_stale_gm_instance_is_rejected_after_account_deactivation(self):
+        User = get_user_model()
+        User.objects.filter(pk=self.gm.pk).update(is_active=False)
+
+        with self.assertRaises(PermissionDenied):
+            set_employee_mfa_requirement(
+                self.gm, self.employee, required=False, reason="stale actor test"
+            )
+
+        self.assertFalse(
+            SecurityMFARequirement.objects.filter(user=self.employee).exists()
+        )
+
+    def test_stale_employee_instance_is_rejected_after_deactivation(self):
+        User = get_user_model()
+        User.objects.filter(pk=self.employee.pk).update(is_active=False)
+
+        with self.assertRaises(ValidationError):
+            set_employee_mfa_requirement(
+                self.gm, self.employee, required=False, reason="stale target test"
+            )
+
+        self.assertFalse(
+            SecurityMFARequirement.objects.filter(user=self.employee).exists()
+        )
+
     def test_mfa_cannot_be_required_before_device_enrollment(self):
         with self.assertRaises(ValidationError):
             set_employee_mfa_requirement(
