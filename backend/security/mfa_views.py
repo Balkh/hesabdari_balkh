@@ -24,13 +24,13 @@ from security.mfa_service import (
     rotate_recovery_codes,
 )
 from security.operation_registry import (
+    BINDING_TARGET_USER,
     OBJECT,
     TARGET_REQUEST_USER,
     TARGET_URL_KWARG,
     OperationSpec,
     erp_operations,
 )
-from security.authorization import BINDING_TARGET_USER
 logger = logging.getLogger("security.mfa_views")
 
 
