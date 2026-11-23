@@ -7,6 +7,7 @@ must never be persisted in these tables.
 from django.conf import settings
 from django.db import models
 from django.db.models import F, Q
+from django.utils import timezone
 
 
 class MFADeviceStatus(models.TextChoices):
@@ -266,3 +267,61 @@ class SecurityEmergencyOwnerKey(models.Model):
     def __str__(self):
         state = "consumed" if self.consumed_at else "revoked" if self.revoked_at else "live"
         return f"{self.scope}:{state}"
+
+
+
+class SecurityAccountLockout(models.Model):
+    """Durable per-account failed-password counter and bounded lock state."""
+
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name="security_account_lockout",
+    )
+    failed_password_attempts = models.PositiveSmallIntegerField(default=0)
+    last_failed_at = models.DateTimeField(null=True, blank=True)
+    locked_until = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.CheckConstraint(
+                condition=Q(failed_password_attempts__lte=5),
+                name="sec_lock_failures_at_most_5",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["locked_until"], name="sec_lock_locked_until_idx"),
+        ]
+
+
+class SecurityLoginAttemptOutcome(models.TextChoices):
+    PASSWORD_FAILED = "PASSWORD_FAILED", "Password failed"
+    MFA_FAILED = "MFA_FAILED", "MFA failed"
+    LOCKED = "LOCKED", "Account locked"
+    SUCCESS = "SUCCESS", "Successful login"
+
+
+class SecurityLoginAttempt(models.Model):
+    """Privacy-preserving authentication history; no raw username, IP or secrets."""
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="security_login_attempts",
+    )
+    username_digest = models.CharField(max_length=64)
+    source_digest = models.CharField(max_length=64)
+    outcome = models.CharField(max_length=20, choices=SecurityLoginAttemptOutcome.choices)
+    occurred_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ["-occurred_at", "-id"]
+        indexes = [
+            models.Index(fields=["user", "occurred_at"], name="sec_login_user_time_idx"),
+            models.Index(fields=["username_digest", "source_digest", "occurred_at"], name="sec_login_name_src_time"),
+            models.Index(fields=["source_digest", "occurred_at"], name="sec_login_source_time"),
+        ]
