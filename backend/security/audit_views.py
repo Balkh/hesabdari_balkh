@@ -19,7 +19,17 @@ from security.audit_chain import (
     verify_audit_chain,
 )
 from security.models import AuditAction, AuditEvent
-from security.permissions import IsAuthenticatedForERP, IsGMWithVerifiedMFA
+from security.operation_registry import (
+    COLLECTION,
+    TARGET_NONE,
+    OperationSpec,
+    erp_operations,
+)
+from security.permissions import (
+    HasErpOperation,
+    IsAuthenticatedForERP,
+    IsGMWithVerifiedMFA,
+)
 
 logger = logging.getLogger("security.audit")
 
@@ -35,9 +45,17 @@ def _verify_or_unavailable():
         return None
 
 
+@erp_operations(
+    GET=OperationSpec(
+        operation_id="security.audit.events.list",
+        permission_key="audit.report.view",
+        binding_kind=COLLECTION,
+        target_source=TARGET_NONE,
+    )
+)
 @api_view(["GET"])
 @authentication_classes([SessionAuthentication])
-@permission_classes([IsAuthenticatedForERP, IsGMWithVerifiedMFA])
+@permission_classes([IsAuthenticatedForERP, IsGMWithVerifiedMFA, HasErpOperation])
 def audit_events(request):
     """Return GM-only, chain-verified audit events; export is JSON and capped."""
     integrity = _verify_or_unavailable()
@@ -121,9 +139,17 @@ def audit_events(request):
     return Response(response_data)
 
 
+@erp_operations(
+    GET=OperationSpec(
+        operation_id="security.audit.integrity.view",
+        permission_key="audit.report.view",
+        binding_kind=COLLECTION,
+        target_source=TARGET_NONE,
+    )
+)
 @api_view(["GET"])
 @authentication_classes([SessionAuthentication])
-@permission_classes([IsAuthenticatedForERP, IsGMWithVerifiedMFA])
+@permission_classes([IsAuthenticatedForERP, IsGMWithVerifiedMFA, HasErpOperation])
 def audit_integrity(request):
     """GM-only on-demand integrity diagnostic; never repairs or rewrites history."""
     integrity = _verify_or_unavailable()
