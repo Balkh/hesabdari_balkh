@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import re
+from datetime import timezone as dt_timezone
+from decimal import Decimal
 from unittest.mock import patch
+from uuid import uuid4
 
 from django.db import DatabaseError, connection, transaction
 from django.test import TestCase
+from django.utils import timezone
 
 from categories.models import Category
 from security.audit_chain import (
@@ -73,6 +77,27 @@ class AuditChainTests(TestCase):
         self.assertEqual(event.new_state["nested"]["totp_code"], "[REDACTED]")
         self.assertEqual(event.new_state["nested"]["safe_value"], "visible")
         self.assertNotIn(b"must-not-persist", canonical_json_bytes(event.new_state))
+        self.assertTrue(verify_audit_chain()["valid"])
+
+    def test_jsonfield_values_are_canonical_before_persisting_and_verify_after_reload(self):
+        moment = timezone.now().replace(microsecond=123456)
+        identifier = uuid4()
+        event = self._append(
+            new_state={
+                "amount": Decimal("10.5000"),
+                "moment": moment,
+                "identifier": identifier,
+            }
+        )
+        event.refresh_from_db()
+        expected_moment = (
+            moment.astimezone(dt_timezone.utc)
+            .isoformat(timespec="microseconds")
+            .replace("+00:00", "Z")
+        )
+        self.assertEqual(event.new_state["amount"], "10.5")
+        self.assertEqual(event.new_state["moment"], expected_moment)
+        self.assertEqual(event.new_state["identifier"], str(identifier).lower())
         self.assertTrue(verify_audit_chain()["valid"])
 
     def test_audit_rows_reject_orm_and_raw_update_delete(self):
