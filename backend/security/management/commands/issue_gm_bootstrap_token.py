@@ -3,10 +3,11 @@ from __future__ import annotations
 
 import hashlib
 import secrets
-import sys
 from datetime import timedelta
 
 from django.core.management.base import BaseCommand, CommandError
+
+from security.local_console import LocalConsoleRequiredError, require_local_console
 from django.db import transaction
 from django.utils import timezone
 
@@ -18,8 +19,10 @@ TOKEN_LIFETIME = timedelta(minutes=10)
 
 
 def _require_tty():
-    if not sys.stdin.isatty() or not sys.stdout.isatty():
-        raise CommandError("GM bootstrap is local-only and requires an interactive terminal")
+    try:
+        require_local_console()
+    except LocalConsoleRequiredError as exc:
+        raise CommandError(str(exc)) from None
 
 
 class Command(BaseCommand):
