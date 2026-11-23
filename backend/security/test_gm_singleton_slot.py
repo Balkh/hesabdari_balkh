@@ -29,6 +29,7 @@ from django.contrib.auth import get_user_model
 from django.core.management import call_command
 from django.core.management.base import CommandError
 from django.db import connection, transaction
+from django.db.models import Q
 from django.test import TestCase
 from security.test_support import AuditTriggerAwareTransactionTestCase
 from django.utils import timezone
@@ -518,8 +519,27 @@ class SingletonSlotMigrationTests(AuditTriggerAwareTransactionTestCase):
 
     def test_exactly_one_candidate_is_linked_automatically(self):
         self._reverse_to_0004()
+        at = timezone.now()
+        preexisting = list(
+            UserRoleAssignment.objects.filter(
+                role__code=GM_SLOT_CODE,
+                revoked_at__isnull=True,
+                start_at__lte=at,
+            ).filter(Q(end_at__isnull=True) | Q(end_at__gt=at))
+            .values_list("pk", "user_id", "reason")
+        )
+        self.assertEqual(preexisting, [], f"unexpected active GM assignments before fixture: {preexisting}")
         user = User.objects.create_user(username="legacy-super", is_superuser=True)
         assignment = _unlinked_gm_assignment(user)
+        at = timezone.now()
+        self.assertEqual(
+            UserRoleAssignment.objects.filter(
+                role__code=GM_SLOT_CODE,
+                revoked_at__isnull=True,
+                start_at__lte=at,
+            ).filter(Q(end_at__isnull=True) | Q(end_at__gt=at)).count(),
+            1,
+        )
         # Pre-migration state is unmigrated state, not an inconsistency:
         # E004 must not pre-block the migration that owns the linking.
         self.assertEqual(check_gm_singleton_slot_for_alias("default"), [])
