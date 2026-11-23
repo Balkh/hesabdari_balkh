@@ -100,22 +100,15 @@ class AuditReviewAccessTests(TestCase):
         self.assertEqual(head_response.status_code, 200, head_response.content)
 
     def test_verified_singleton_gm_export_requires_export_capability(self):
-        user = self._login_gm_with_mfa()
-        response = self.client.get("/api/v1/security/audit/events/export/")
-        self.assertEqual(response.status_code, 403)
-
+        self._login_gm_with_mfa()
         role = Role.objects.get(code="GM")
-        permission, _ = Permission.objects.get_or_create(
-            key="audit.report.export",
-            defaults={
-                "domain": "audit",
-                "resource": "report",
-                "action": "export",
-                "description": "Export audit events",
-                "is_active": True,
-                "is_sensitive": True,
-            },
-        )
+        permission = Permission.objects.get(key="audit.report.export")
+        # The canonical GM seed includes export authority; remove it to prove
+        # the route independently enforces its dedicated permission.
+        RolePermission.objects.filter(role=role, permission=permission).delete()
+        denied = self.client.get("/api/v1/security/audit/events/export/")
+        self.assertEqual(denied.status_code, 403)
+
         RolePermission.objects.get_or_create(role=role, permission=permission)
         allowed = self.client.get("/api/v1/security/audit/events/export/")
         self.assertEqual(allowed.status_code, 200, allowed.content)
