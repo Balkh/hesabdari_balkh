@@ -11,7 +11,12 @@ from django.contrib.auth import get_user_model
 from django.db import DatabaseError, connections, transaction
 from django.utils import timezone
 
-from security.mfa_models import SecurityAccountLockout, SecurityLoginAttempt, SecurityLoginAttemptOutcome
+from security.mfa_models import (
+    SecurityAccountLockout,
+    SecurityLoginAttempt,
+    SecurityLoginAttemptOutcome,
+    SecurityLoginSession,
+)
 from security.models import AuditAction, AuditEvent
 
 PASSWORD_FAILURE_LIMIT = 5
@@ -154,6 +159,16 @@ def _record_password_failure_once(*, user, username, request, at):
             failure_count=failure_count, reason="PASSWORD_AUTHENTICATION_FAILED",
         )
         if newly_locked:
+            # Revoke every registered session in the same transaction as
+            # the account lock. A timed unlock must never revive a previously
+            # admitted (possibly stolen) session.
+            revoked_sessions = SecurityLoginSession.objects.filter(
+                user=user,
+                revoked_at__isnull=True,
+            ).update(
+                revoked_at=at,
+                revoke_reason="ACCOUNT_LOCKED",
+            )
             AuditEvent.objects.create(
                 user=None,
                 action=AuditAction.ACCOUNT_LOCKED,
@@ -164,6 +179,7 @@ def _record_password_failure_once(*, user, username, request, at):
                     "user_id": user.pk,
                     "failed_password_attempts": PASSWORD_FAILURE_LIMIT,
                     "locked_until": state.locked_until.isoformat(),
+                    "revoked_sessions": revoked_sessions,
                 },
             )
         return {
