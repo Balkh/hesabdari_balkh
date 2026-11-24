@@ -697,7 +697,13 @@ def _event_namespace(row: dict):
         created_at = row["created_at"]
     return SimpleNamespace(
         pk=row["id"],
-        event_uuid=row["event_uuid"],
+        # Django's SQLite UUIDField persists UUIDs as undashed 32-char hex
+        # text; the ORM re-hydrates them into uuid.UUID objects whose str()
+        # is the dashed canonical form the write-path hash committed to.
+        # Raw restored rows must be normalized the same way, or the restored
+        # chain verification would see a different canonical payload and
+        # reject every legitimate SQLite backup.
+        event_uuid=str(uuid.UUID(str(row["event_uuid"]))),
         user_id=row["user_id"],
         action=row["action"],
         entity=row["entity"],
@@ -734,7 +740,9 @@ def _verify_restored_rows(events, head_row, expected_payload: dict) -> dict:
             last_event_id=head_row["last_event_id"],
         )
     except AuditChainVerificationError as exc:
-        raise BackupError("restored database audit chain failed full verification") from exc
+        raise BackupError(
+            f"restored database audit chain failed full verification: {exc}"
+        ) from exc
     expected = (
         expected_payload["chain_event_count"],
         expected_payload["chain_head_hash"],
