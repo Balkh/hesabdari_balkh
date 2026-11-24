@@ -6,6 +6,7 @@ from decimal import Decimal
 from unittest.mock import patch
 from uuid import uuid4
 
+from django.core.management import call_command
 from django.db import DatabaseError, connection, transaction
 from django.test import TestCase
 from django.utils import timezone
@@ -20,6 +21,7 @@ from security.audit_chain import (
 )
 from security.models import AuditAction, AuditChainHead, AuditEvent
 from security.services import record_audit_event
+from security.test_support import AuditTriggerAwareTransactionTestCase
 
 
 class AuditChainTests(TestCase):
@@ -233,17 +235,6 @@ class AuditChainTests(TestCase):
             self.assertRegex(action, re.compile(r"^[A-Z]+(?:_[A-Z]+){0,2}$"))
             self.assertLessEqual(len(action.split("_")), 3)
 
-    def test_reverse_trigger_migration_refuses_when_audit_history_exists(self):
-        event = self._append(new_state={"migration_rollback": "must-be-blocked"})
-        with self.assertRaisesMessage(RuntimeError, "cannot be removed while audit history exists"):
-            call_command("migrate", "security", "0016", verbosity=0, interactive=False)
-
-        self.assertTrue(AuditEvent.objects.filter(pk=event.pk).exists())
-        with self.assertRaises(DatabaseError):
-            with transaction.atomic():
-                AuditEvent.objects.filter(pk=event.pk).update(reason="rollback-bypass")
-        self.assertTrue(verify_audit_chain()["valid"])
-
     def test_event_insert_and_head_update_roll_back_with_business_mutation(self):
         original_count = AuditEvent.objects.count()
         with self.assertRaisesRegex(RuntimeError, "injected head update failure"):
@@ -257,4 +248,48 @@ class AuditChainTests(TestCase):
                     self._append(new_state={"transactional": True})
         self.assertFalse(Category.objects.filter(name="must roll back with audit").exists())
         self.assertEqual(AuditEvent.objects.count(), original_count)
+        self.assertTrue(verify_audit_chain()["valid"])
+
+
+class AuditChainReversalGuardTests(AuditTriggerAwareTransactionTestCase):
+    """Migration 0017 must refuse downgrades that would remove append-only
+    triggers while any audit history exists.
+
+    This runs on ``AuditTriggerAwareTransactionTestCase`` (no wrapping
+    ``TestCase`` atomic block) for two reasons:
+
+    1. The expected migration failure raises inside the migration
+       executor's own atomic block; running it under ``TestCase`` would
+       poison the outer transaction (``needs_rollback``) and the follow-up
+       assertions could not execute at all.
+    2. The trigger-rejection assertion below needs the *real* installed
+       trigger to reject the UPDATE after the refused rollback.
+    """
+
+    def _append(self, **kwargs):
+        return record_audit_event(
+            action=AuditAction.CREATE,
+            entity="AuditChainTest",
+            entity_id="reversal-guard",
+            **kwargs,
+        )
+
+    def test_reverse_trigger_migration_refuses_when_audit_history_exists(self):
+        # TransactionTestCase runs in autocommit mode; the append service
+        # requires the caller's business transaction, so commit the history
+        # event explicitly before attempting the refused downgrade.
+        with transaction.atomic():
+            event = self._append(new_state={"migration_rollback": "must-be-blocked"})
+        with self.assertRaisesMessage(
+            RuntimeError, "cannot be removed while audit history exists"
+        ):
+            call_command("migrate", "security", "0016", verbosity=0, interactive=False)
+
+        # The refused downgrade must not have lost a single audit row.
+        self.assertTrue(AuditEvent.objects.filter(pk=event.pk).exists())
+        # Trigger removal never happened, so the append-only guard must
+        # still reject mutation attempts on the ledger.
+        with self.assertRaises(DatabaseError):
+            with transaction.atomic():
+                AuditEvent.objects.filter(pk=event.pk).update(reason="rollback-bypass")
         self.assertTrue(verify_audit_chain()["valid"])
