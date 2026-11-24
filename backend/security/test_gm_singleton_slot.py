@@ -649,12 +649,22 @@ class SingletonSlotMigrationTests(AuditTriggerAwareTransactionTestCase):
         self.assertEqual(GMRoleSlot.objects.get().assignment_id, a1.pk)
 
     def test_reverse_preserves_assignment_history_and_reapplies(self):
+        # W0-2E note: the append-only guards intentionally REFUSE downgrades
+        # once any audit event exists (migration 0017 reverse guard + the
+        # irreversible chain backfill), so the historical "claim, then
+        # reverse" flow can no longer run against a history-bearing ledger.
+        # This test therefore exercises the still-supported empty-ledger
+        # downgrade path: a freshly rebuilt database (zero audit events) is
+        # downgraded to 0004, pre-existing assignment rows must survive the
+        # downgrade verbatim, and re-application must reconcile the same
+        # single candidate again. History-bearing downgrade refusal is
+        # covered by security.test_audit_chain.AuditChainReversalGuardTests.
+        self.reset_test_database()
+        _reseed_rbac_catalog()
         user = User.objects.create_user(username="reverse-holder", is_superuser=True)
         assignment = _unlinked_gm_assignment(user)
-        claim_gm_slot(assignment)
-        self.assertEqual(GMRoleSlot.objects.get().assignment_id, assignment.pk)
 
-        self._reverse_to_0004()
+        call_command("migrate", "security", "0004", verbosity=0, interactive=False)
         self.assertFalse(self._slot_table_exists())
         # Every pre-existing UserRoleAssignment row is preserved exactly.
         self.assertTrue(
