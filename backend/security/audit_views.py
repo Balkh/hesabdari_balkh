@@ -6,6 +6,7 @@ import json
 import logging
 
 from django.core.serializers.json import DjangoJSONEncoder
+from django.db import transaction
 from django.http import HttpResponse
 from rest_framework import status
 from rest_framework.authentication import SessionAuthentication
@@ -44,8 +45,9 @@ def _verify_or_unavailable():
         return None
 
 
+@transaction.atomic
 def _build_audit_events_payload(request):
-    """Build one bounded, chain-verified event page for GM review/export."""
+    """Materialize the verified page before releasing the chain snapshot lock."""
     integrity = _verify_or_unavailable()
     if integrity is None:
         return None, Response(

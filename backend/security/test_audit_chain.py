@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import re
+from concurrent.futures import ThreadPoolExecutor
+from threading import Event
+from types import SimpleNamespace
 from datetime import timezone as dt_timezone
 from decimal import Decimal
 from unittest.mock import patch
@@ -9,6 +12,7 @@ from uuid import uuid4
 from django.core.management import call_command
 from django.db import DatabaseError, connection, transaction
 from django.test import TestCase
+from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 
 from categories.models import Category
@@ -293,3 +297,100 @@ class AuditChainReversalGuardTests(AuditTriggerAwareTransactionTestCase):
             with transaction.atomic():
                 AuditEvent.objects.filter(pk=event.pk).update(reason="rollback-bypass")
         self.assertTrue(verify_audit_chain()["valid"])
+
+
+class AuditChainSnapshotTests(AuditTriggerAwareTransactionTestCase):
+    def _append(self, entity_id):
+        with transaction.atomic():
+            return record_audit_event(
+                action=AuditAction.CREATE,
+                entity="AuditSnapshotTest",
+                entity_id=entity_id,
+            )
+
+    def test_verifier_acquires_snapshot_boundary_before_loading_events(self):
+        self._append("first")
+        self.assertFalse(connection.in_atomic_block)
+        with CaptureQueriesContext(connection) as queries:
+            verified = verify_audit_chain()
+        statements = [query["sql"].upper() for query in queries.captured_queries]
+        head_index = next(i for i, sql in enumerate(statements) if "SECURITY_AUDITCHAINHEAD" in sql)
+        events_index = next(i for i, sql in enumerate(statements) if "SECURITY_AUDITEVENT" in sql)
+        self.assertLess(head_index, events_index)
+        if connection.vendor == "postgresql":
+            self.assertIn("FOR UPDATE", statements[head_index])
+        elif connection.vendor == "sqlite":
+            self.assertTrue(any("BEGIN IMMEDIATE" in sql for sql in statements[:head_index]))
+        self.assertEqual(verified["event_count"], 1)
+        self.assertFalse(connection.in_atomic_block)
+
+    def test_concurrent_append_cannot_commit_during_verification(self):
+        from security.audit_chain import verify_audit_chain_records
+
+        self._append("first")
+        allow_writer = Event()
+        writer_attempted = Event()
+        writer_committed = Event()
+
+        def observe_write(execute, sql, params, many, context):
+            upper = sql.upper()
+            if ("BEGIN IMMEDIATE" in upper or
+                    ("UPDATE" in upper and "SECURITY_AUDITCHAINHEAD" in upper)):
+                writer_attempted.set()
+            return execute(sql, params, many, context)
+
+        def writer():
+            try:
+                if not allow_writer.wait(10):
+                    raise AssertionError("verifier did not reach the snapshot")
+                with connection.execute_wrapper(observe_write):
+                    self._append("second")
+                writer_committed.set()
+            finally:
+                connection.close()
+
+        def verify_while_writer_attempts(events, **kwargs):
+            self.assertTrue(connection.in_atomic_block)
+            allow_writer.set()
+            self.assertTrue(writer_attempted.wait(10), "writer did not attempt the lock")
+            self.assertFalse(writer_committed.wait(0.2), "writer committed inside verification")
+            return verify_audit_chain_records(events, **kwargs)
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(writer)
+            try:
+                with patch("security.audit_chain.verify_audit_chain_records",
+                           side_effect=verify_while_writer_attempts):
+                    verified = verify_audit_chain()
+            finally:
+                allow_writer.set()
+            future.result(timeout=25)
+        self.assertEqual(verified["event_count"], 1)
+        self.assertTrue(writer_committed.is_set())
+        self.assertEqual(verify_audit_chain()["event_count"], 2)
+
+    def test_review_materializes_page_inside_same_verification_transaction(self):
+        from security.audit_views import _build_audit_events_payload
+
+        self._append("first")
+        verified_inside_transaction = []
+
+        def check_transaction():
+            verified_inside_transaction.append(connection.in_atomic_block)
+            return verify_audit_chain()
+
+        with CaptureQueriesContext(connection) as queries:
+            with patch("security.audit_views.verify_audit_chain", side_effect=check_transaction):
+                payload, error = _build_audit_events_payload(SimpleNamespace(query_params={}))
+        self.assertIsNone(error)
+        self.assertEqual(verified_inside_transaction, [True])
+        self.assertEqual(payload["integrity"]["event_count"], 1)
+        self.assertEqual(len(payload["events"]), 1)
+        self.assertEqual(payload["events"][0]["event_hash"], payload["integrity"]["head_hash"])
+        statements = [q["sql"].upper() for q in queries.captured_queries]
+        commit_index = next(i for i, sql in enumerate(statements) if sql == "COMMIT")
+        event_reads = [i for i, sql in enumerate(statements) if
+                       "SELECT" in sql and "SECURITY_AUDITEVENT" in sql]
+        self.assertGreaterEqual(len(event_reads), 2)
+        self.assertTrue(all(i < commit_index for i in event_reads))
+        self.assertFalse(connection.in_atomic_block)

@@ -12,7 +12,7 @@ from decimal import Decimal
 from uuid import UUID, uuid4
 
 from django.conf import settings
-from django.db import DatabaseError, connection
+from django.db import DatabaseError, connection, connections, transaction
 from django.utils import timezone
 
 from security.models import AuditChainHead, AuditEvent
@@ -365,14 +365,25 @@ def verify_audit_chain_records(events, *, head_hash: str, last_event_id):
 
 
 def verify_audit_chain(*, using="default") -> dict:
-    from security.models import AuditEvent, AuditChainHead
+    """Verify one consistent ledger snapshot, serialized against appenders.
 
-    events = list(AuditEvent.objects.using(using).all().order_by("pk"))
-    if not AuditChainHead.objects.using(using).filter(pk=1).exists():
-        raise AuditChainVerificationError("audit chain singleton head is missing")
-    head = AuditChainHead.objects.using(using).get(pk=1)
-    return verify_audit_chain_records(
-        events,
-        head_hash=head.head_hash,
-        last_event_id=head.last_event_id,
-    )
+    PostgreSQL locks the singleton before reading any event. SQLite acquires
+    the configured IMMEDIATE reservation at the outer transaction boundary.
+    An enclosing transaction (e.g. audit review/export) retains that boundary
+    until its verified page has been materialized.
+    """
+    db = connections[using]
+    if db.vendor == "sqlite" and str(db.transaction_mode).upper() != "IMMEDIATE":
+        raise AuditChainError("SQLite audit verification requires an IMMEDIATE transaction")
+
+    with transaction.atomic(using=using):
+        try:
+            head = AuditChainHead.objects.using(using).select_for_update().get(pk=1)
+        except AuditChainHead.DoesNotExist as exc:
+            raise AuditChainVerificationError("audit chain singleton head is missing") from exc
+        events = list(AuditEvent.objects.using(using).all().order_by("pk"))
+        return verify_audit_chain_records(
+            events,
+            head_hash=head.head_hash,
+            last_event_id=head.last_event_id,
+        )
