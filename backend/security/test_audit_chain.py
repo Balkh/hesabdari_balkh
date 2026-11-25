@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import re
 from concurrent.futures import ThreadPoolExecutor
-from threading import Event
+from threading import Barrier, Event
+from time import monotonic
 from types import SimpleNamespace
 from datetime import timezone as dt_timezone
 from decimal import Decimal
@@ -10,7 +11,7 @@ from unittest.mock import patch
 from uuid import uuid4
 
 from django.core.management import call_command
-from django.db import DatabaseError, connection, connections, transaction
+from django.db import DatabaseError, OperationalError, connection, connections, transaction
 from unittest import skipUnless
 
 from django.test import TestCase
@@ -480,3 +481,136 @@ class AuditWriterTransactionBoundaryTests(AuditTriggerAwareTransactionTestCase):
             connection.rollback()
             transaction.set_autocommit(True)
         self.assertEqual(verify_audit_chain(), initial)
+
+
+class AuditMultiWriterTests(AuditTriggerAwareTransactionTestCase):
+    """Use real independent database connections and committed transactions."""
+
+    def _write(self, marker):
+        with transaction.atomic():
+            category = Category.objects.create(name=marker)
+            event = record_audit_event(
+                action=AuditAction.CREATE,
+                entity="Category",
+                entity_id=str(category.pk),
+                reference=marker,
+                new_state={"category_id": category.pk, "name": marker},
+            )
+        return category.pk, event.pk
+
+    def test_four_independent_writers_commit_one_linear_chain(self):
+        workers, operations = 4, 8
+        start = Barrier(workers, timeout=15)
+        initial = verify_audit_chain()
+
+        def write_batch(worker):
+            db = connections["default"]
+            try:
+                db.ensure_connection()
+                identity = id(db.connection)
+                if db.vendor == "postgresql":
+                    with db.cursor() as cursor:
+                        cursor.execute("SHOW transaction_isolation")
+                        self.assertEqual(cursor.fetchone()[0], "read committed")
+                start.wait()
+                pairs = [
+                    self._write(f"audit-multiwriter-{worker}-{number}")
+                    for number in range(operations)
+                ]
+                return identity, pairs
+            finally:
+                db.close()
+
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = [executor.submit(write_batch, worker) for worker in range(workers)]
+            results = [future.result(timeout=90) for future in futures]
+
+        self.assertEqual(len({identity for identity, _ in results}), workers)
+        pairs = [pair for _, batch in results for pair in batch]
+        self.assertEqual(len(pairs), workers * operations)
+        category_ids = {category_id for category_id, _ in pairs}
+        event_ids = {event_id for _, event_id in pairs}
+        self.assertEqual(len(category_ids), workers * operations)
+        self.assertEqual(len(event_ids), workers * operations)
+        categories = dict(Category.objects.filter(pk__in=category_ids).values_list("pk", "name"))
+        self.assertEqual(len(categories), workers * operations)
+        events = list(AuditEvent.objects.filter(pk__in=event_ids))
+        self.assertEqual(len(events), workers * operations)
+        for event in events:
+            self.assertEqual(event.entity, "Category")
+            category_id = int(event.entity_id)
+            self.assertIn(category_id, categories)
+            self.assertEqual(event.new_state, {"category_id": category_id, "name": categories[category_id]})
+            self.assertEqual(event.reference, categories[category_id])
+        self.assertEqual({int(event.entity_id) for event in events}, category_ids)
+
+        # Follow the actual hashes, not insertion timestamps or primary-key order.
+        by_previous = {event.prev_event_hash: event for event in events}
+        self.assertEqual(len(by_previous), workers * operations)
+        current = initial["head_hash"]
+        visited = set()
+        last = None
+        for _ in range(workers * operations):
+            self.assertIn(current, by_previous)
+            last = by_previous[current]
+            self.assertNotIn(last.pk, visited)
+            visited.add(last.pk)
+            current = last.event_hash
+        self.assertEqual(visited, event_ids)
+        verified = verify_audit_chain()
+        self.assertTrue(verified["valid"])
+        self.assertEqual(verified["event_count"], initial["event_count"] + workers * operations)
+        self.assertEqual(verified["head_hash"], current)
+        self.assertEqual(verified["last_event_id"], last.pk)
+
+    @skipUnless(connection.vendor == "sqlite", "SQLite-specific busy timeout")
+    def test_sqlite_busy_timeout_rejects_entire_contended_operation(self):
+        initial = verify_audit_chain()
+        ready = Event()
+        attempt = Event()
+
+        def contended_writer():
+            db = connections["default"]
+            try:
+                db.ensure_connection()
+                with db.cursor() as cursor:
+                    cursor.execute("PRAGMA busy_timeout")
+                    configured = cursor.fetchone()[0]
+                    # Shorten only this disposable test connection's timeout;
+                    # the production configuration remains unchanged.
+                    cursor.execute("PRAGMA busy_timeout = 150")
+                ready.set()
+                if not attempt.wait(10):
+                    raise AssertionError("lock holder did not start the contention test")
+                started = monotonic()
+                with CaptureQueriesContext(db) as queries:
+                    with self.assertRaises(OperationalError) as failure:
+                        self._write("audit-timeout-must-not-commit")
+                return configured, monotonic() - started, str(failure.exception), [
+                    query["sql"].upper() for query in queries.captured_queries
+                ]
+            finally:
+                db.close()
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(contended_writer)
+            try:
+                self.assertTrue(ready.wait(10), "writer connection did not initialize")
+                with transaction.atomic():
+                    # BEGIN IMMEDIATE owns the write reservation before any
+                    # business statement, so the contender must fail at BEGIN.
+                    attempt.set()
+                    configured, elapsed, message, statements = future.result(timeout=10)
+                    self.assertEqual(configured, 20000)
+                    self.assertGreaterEqual(elapsed, 0.10)
+                    self.assertIn("locked", message.lower())
+                    self.assertTrue(any("BEGIN IMMEDIATE" in sql for sql in statements))
+                    self.assertFalse(any("INSERT" in sql or "UPDATE" in sql for sql in statements))
+            finally:
+                attempt.set()
+
+        self.assertFalse(Category.objects.filter(name="audit-timeout-must-not-commit").exists())
+        self.assertEqual(verify_audit_chain(), initial)
+        # Prove a subsequent independent operation can commit after release.
+        self._write("audit-after-timeout")
+        self.assertEqual(verify_audit_chain()["event_count"], initial["event_count"] + 1)
