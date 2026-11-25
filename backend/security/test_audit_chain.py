@@ -10,7 +10,9 @@ from unittest.mock import patch
 from uuid import uuid4
 
 from django.core.management import call_command
-from django.db import DatabaseError, connection, transaction
+from django.db import DatabaseError, connection, connections, transaction
+from unittest import skipUnless
+
 from django.test import TestCase
 from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
@@ -394,3 +396,87 @@ class AuditChainSnapshotTests(AuditTriggerAwareTransactionTestCase):
         self.assertGreaterEqual(len(event_reads), 2)
         self.assertTrue(all(i < commit_index for i in event_reads))
         self.assertFalse(connection.in_atomic_block)
+
+
+class AuditWriterTransactionBoundaryTests(AuditTriggerAwareTransactionTestCase):
+    def _append(self, **kwargs):
+        return record_audit_event(
+            action=AuditAction.CREATE,
+            entity="AuditBoundaryTest",
+            entity_id="boundary",
+            **kwargs,
+        )
+
+    def test_append_requires_caller_transaction(self):
+        self.assertFalse(connection.in_atomic_block)
+        with self.assertRaisesMessage(AuditChainError, "caller"):
+            self._append()
+        self.assertEqual(AuditEvent.objects.count(), 0)
+        self.assertTrue(verify_audit_chain()["valid"])
+
+    def test_caught_serialization_failure_marks_business_block_rollback_only(self):
+        initial = verify_audit_chain()
+        with transaction.atomic():
+            Category.objects.create(name="rollback invalid audit payload")
+            with self.assertRaises(TypeError):
+                self._append(new_state={"unsupported": float("nan")})
+            self.assertTrue(transaction.get_rollback())
+        self.assertFalse(Category.objects.filter(name="rollback invalid audit payload").exists())
+        self.assertEqual(verify_audit_chain(), initial)
+
+    def test_caught_head_save_failure_rolls_back_insert_and_business_mutation(self):
+        initial = verify_audit_chain()
+        with transaction.atomic():
+            Category.objects.create(name="rollback failed audit head")
+            with patch.object(AuditChainHead, "save",
+                              side_effect=RuntimeError("injected head save failure")):
+                with self.assertRaisesMessage(RuntimeError, "injected head save failure"):
+                    self._append(new_state={"transactional": True})
+            self.assertTrue(transaction.get_rollback())
+        self.assertFalse(Category.objects.filter(name="rollback failed audit head").exists())
+        self.assertEqual(AuditEvent.objects.count(), initial["event_count"])
+        self.assertEqual(verify_audit_chain(), initial)
+
+    def test_caught_invalid_action_marks_business_block_rollback_only(self):
+        initial = verify_audit_chain()
+        with transaction.atomic():
+            Category.objects.create(name="rollback invalid audit action")
+            with self.assertRaisesMessage(ValueError, "Unknown audit action"):
+                record_audit_event(action="NOT_AN_AUDIT_ACTION", entity="AuditBoundaryTest")
+            self.assertTrue(transaction.get_rollback())
+        self.assertFalse(Category.objects.filter(name="rollback invalid audit action").exists())
+        self.assertEqual(verify_audit_chain(), initial)
+
+    @skipUnless(connection.vendor == "sqlite", "SQLite-specific transaction mode")
+    def test_live_deferred_transaction_rejected_even_when_settings_say_immediate(self):
+        initial = verify_audit_chain()
+        db = connections["default"]
+        self.assertEqual(db.settings_dict["OPTIONS"]["transaction_mode"], "IMMEDIATE")
+        with patch.object(db, "transaction_mode", "DEFERRED"):
+            with CaptureQueriesContext(db) as queries:
+                with transaction.atomic():
+                    # Deliberately read before the attempted append on the
+                    # unsupported transaction; do not allow a late upgrade.
+                    self.assertEqual(AuditEvent.objects.count(), initial["event_count"])
+                    with self.assertRaisesMessage(AuditChainError, "outermost IMMEDIATE"):
+                        self._append()
+                    self.assertTrue(transaction.get_rollback())
+            sql = [q["sql"].upper() for q in queries.captured_queries]
+            self.assertTrue(any("BEGIN DEFERRED" in statement for statement in sql))
+            self.assertFalse(any("UPDATE" in statement and "SECURITY_AUDITCHAINHEAD" in statement
+                                 for statement in sql))
+        self.assertEqual(verify_audit_chain(), initial)
+
+    @skipUnless(connection.vendor == "sqlite", "SQLite-specific transaction mode")
+    def test_manual_autocommit_off_boundary_rejected(self):
+        initial = verify_audit_chain()
+        transaction.set_autocommit(False)
+        try:
+            with transaction.atomic():
+                with self.assertRaisesMessage(AuditChainError, "outermost IMMEDIATE"):
+                    self._append()
+                self.assertTrue(transaction.get_rollback())
+        finally:
+            connection.rollback()
+            transaction.set_autocommit(True)
+        self.assertEqual(verify_audit_chain(), initial)

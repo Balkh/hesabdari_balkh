@@ -276,8 +276,11 @@ def append_audit_event(
     if not connection.in_atomic_block:
         raise AuditChainError("audit events must be appended inside the caller's business transaction")
     if connection.vendor == "sqlite":
-        transaction_mode = connection.settings_dict.get("OPTIONS", {}).get("transaction_mode")
-        if str(transaction_mode).upper() != "IMMEDIATE":
+        # The live Django connection determines BEGIN mode, not a possibly
+        # stale settings dictionary. Manual autocommit-off transactions do
+        # not establish the required outermost Django atomic boundary.
+        if (str(connection.transaction_mode).upper() != "IMMEDIATE"
+                or not connection.commit_on_exit):
             raise AuditChainError("SQLite audit append requires an outermost IMMEDIATE transaction")
 
     now = timezone.now()
