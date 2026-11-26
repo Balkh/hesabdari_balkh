@@ -387,15 +387,8 @@ class WindowsCredentialManagerKeyProvider:
         raw = _read_generic(self._checkpoint_public_target(key_id))
         if raw is None or len(raw) != 32:
             raise KeyUnavailableError("requested Ed25519 checkpoint public key is unavailable or invalid")
-        private = Ed25519PrivateKey.from_private_bytes(
-            self.get_checkpoint_signing_private_key(key_id)
-        )
-        expected = private.public_key().public_bytes(
-            encoding=serialization.Encoding.Raw,
-            format=serialization.PublicFormat.Raw,
-        )
-        if not hmac.compare_digest(raw, expected):
-            raise KeyUnavailableError("checkpoint public key does not match its protected private key")
+        # Trusted public material is independently read from the protected
+        # vault. Signing validates the pair; verification needs no private key.
         return raw
 
     def provision_backup_keys(self) -> dict[str, str]:
@@ -461,10 +454,16 @@ class WindowsCredentialManagerKeyProvider:
                 ):
                     raise KeyUnavailableError("backup/checkpoint key read-back verification failed")
 
-                # Also validate the provider's public/private key-pair check.
+                # Independently validate the provisioned pair.
+                read_private = Ed25519PrivateKey.from_private_bytes(
+                    self.get_checkpoint_signing_private_key(signing_id)
+                )
                 if not hmac.compare_digest(
                     self.get_checkpoint_signing_public_key(signing_id),
-                    public_bytes,
+                    read_private.public_key().public_bytes(
+                        encoding=serialization.Encoding.Raw,
+                        format=serialization.PublicFormat.Raw,
+                    ),
                 ):
                     raise KeyUnavailableError("checkpoint signing key-pair validation failed")
                 return {

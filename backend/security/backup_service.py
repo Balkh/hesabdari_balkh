@@ -144,6 +144,19 @@ def sha256_file(path: str | Path) -> str:
     return digest.hexdigest()
 
 
+def _publish_new_file(temporary: Path, target: Path) -> None:
+    """Publish a complete file without replacing an existing directory entry."""
+    try:
+        if os.name == "nt":
+            os.rename(temporary, target)
+        else:
+            os.link(temporary, target)
+    except FileExistsError as exc:
+        raise BackupError("backup or checkpoint destination already exists; refusing to overwrite") from exc
+    except OSError as exc:
+        raise BackupError("destination does not support safe exclusive publication") from exc
+
+
 def _atomic_write_bytes(path: str | Path, content: bytes) -> None:
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -158,7 +171,7 @@ def _atomic_write_bytes(path: str | Path, content: bytes) -> None:
             stream.write(content)
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temporary, target)
+        _publish_new_file(temporary, target)
     finally:
         try:
             temporary.unlink()
@@ -216,13 +229,12 @@ def encrypt_backup_file(
             output.write(encryptor.tag)
             output.flush()
             os.fsync(output.fileno())
-        os.replace(temporary, target)
-    except Exception:
+        _publish_new_file(temporary, target)
+    finally:
         try:
             temporary.unlink()
         except FileNotFoundError:
             pass
-        raise
 
     return {
         "path": str(target),
@@ -459,8 +471,10 @@ def _assert_backup_destination_is_external(destination: Path) -> None:
         raise BackupError(
             "backup destination must be outside the application/project directory; use separate offline storage"
         )
-    if root == Path(connection.settings_dict.get("NAME", "")).resolve().parent:
-        raise BackupError("backup destination must not be the live database directory")
+    if connection.vendor == "sqlite":
+        live_directory = Path(connection.settings_dict["NAME"]).resolve().parent
+        if root == live_directory or live_directory in root.parents:
+            raise BackupError("backup destination must not be within the live database directory")
 
 
 def _snapshot_sqlite(destination: Path) -> None:
@@ -560,7 +574,10 @@ def create_audit_checkpoint_file(
         raise BackupError("checkpoint cadence must be 'daily' or 'shift'")
     if connection.in_atomic_block:
         raise BackupError("checkpoint creation must start outside an existing transaction")
+    destination_path = Path(destination_path).expanduser()
+    _assert_backup_destination_is_external(destination_path.parent)
     try:
+        assert_audit_trigger_schema()
         chain = verify_audit_chain()
     except AuditChainVerificationError as exc:
         raise BackupError("audit chain must verify before a checkpoint can be created") from exc
@@ -576,14 +593,13 @@ def create_audit_checkpoint_file(
         "last_event_id": chain["last_event_id"],
     }
     result = create_signed_checkpoint(payload, destination_path, provider=provider)
-    _record_checkpoint_event(
-        actor=actor,
-        entity="AUDIT_CHECKPOINT",
-        reference=Path(destination_path).name,
-        digest=result["sha256"],
-        chain=chain,
-        reason=reason,
-    )
+    try:
+        _record_checkpoint_event(
+            actor=actor, entity="AUDIT_CHECKPOINT", reference=destination_path.name,
+            digest=result["sha256"], chain=chain, reason=reason,
+        )
+    except Exception as exc:
+        raise BackupError("signed checkpoint was written, but the required audit event failed; keep the artifact and investigate") from exc
     return result
 
 

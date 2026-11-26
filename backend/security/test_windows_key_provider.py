@@ -151,3 +151,73 @@ def test_provider_refuses_partial_backup_or_checkpoint_key_overwrite():
         assert _read_generic(provider._backup_active_target()) == provider.BACKUP_ENCRYPTION_KEY_ID.encode("ascii")
     finally:
         _cleanup(provider)
+
+
+def test_checkpoint_public_key_survives_private_key_unavailability():
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
+    namespace = "HesabdariBalkh:PublicOnlyTest:" + uuid.uuid4().hex
+    provider = WindowsCredentialManagerKeyProvider(namespace=namespace)
+    try:
+        provider.provision_backup_keys()
+        key_id = provider.CHECKPOINT_SIGNING_KEY_ID
+        private = Ed25519PrivateKey.from_private_bytes(provider.get_checkpoint_signing_private_key(key_id))
+        public = provider.get_checkpoint_signing_public_key(key_id)
+        signature = private.sign(b"synthetic checkpoint")
+        del private
+        assert _delete_generic(provider._checkpoint_private_target(key_id))
+        with pytest.raises(KeyUnavailableError):
+            provider.get_checkpoint_signing_private_key(key_id)
+        with pytest.raises(KeyUnavailableError):
+            provider.active_checkpoint_signing_key_id()
+        assert provider.get_checkpoint_signing_public_key(key_id) == public
+        Ed25519PublicKey.from_public_bytes(public).verify(signature, b"synthetic checkpoint")
+    finally:
+        _cleanup(provider)
+
+
+def test_desktop_profile_migrates_and_commits_audit_on_real_windows(tmp_path):
+    namespace = "HesabdariBalkh:DesktopRuntimeTest:" + uuid.uuid4().hex
+    provider = WindowsCredentialManagerKeyProvider(namespace=namespace)
+    try:
+        provider.provision()
+        env = os.environ.copy()
+        env["DJANGO_SETTINGS_MODULE"] = "config.settings.desktop"
+        env["HESABDARI_DESKTOP_DATABASE_PATH"] = str(tmp_path / "desktop.sqlite3")
+        script = r"""
+import sys
+from unittest.mock import patch
+import django
+from security.windows_key_provider import WindowsCredentialManagerKeyProvider
+provider = WindowsCredentialManagerKeyProvider(namespace=sys.argv[1])
+# Redirect only the vault namespace to a disposable fixture.
+with patch("security.windows_key_provider.WindowsCredentialManagerKeyProvider", return_value=provider):
+    django.setup()
+from django.db import connection, transaction
+from django.core.management import call_command
+from security.audit_chain import verify_audit_chain, assert_audit_trigger_schema
+from security.models import AuditAction
+from security.services import record_audit_event
+call_command("migrate", interactive=False, verbosity=0)
+assert connection.transaction_mode == "IMMEDIATE"
+with connection.cursor() as cursor:
+    cursor.execute("PRAGMA busy_timeout")
+    assert cursor.fetchone()[0] == 20000
+before = verify_audit_chain()
+with transaction.atomic():
+    event = record_audit_event(action=AuditAction.CREATE, entity="DesktopRuntime")
+assert_audit_trigger_schema()
+after = verify_audit_chain()
+assert after["event_count"] == before["event_count"] + 1
+assert after["last_event_id"] == event.pk
+connection.close()
+assert verify_audit_chain() == after
+connection.close()
+print("DESKTOP RUNTIME: actual profile, migrations, committed audit and reconnect verified")
+"""
+        result = subprocess.run([sys.executable, "-c", script, namespace], env=env,
+                                capture_output=True, text=True, timeout=180)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "DESKTOP RUNTIME:" in result.stdout
+        print(result.stdout)
+    finally:
+        _cleanup(provider)
