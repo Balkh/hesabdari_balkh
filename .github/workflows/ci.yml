@@ -69,12 +69,30 @@ jobs:
       - run: python -m venv backend/.venv
       - run: backend/.venv/bin/python -m pip install -r requirements.txt
       - name: Provision matching PostgreSQL 17 client tools
+        shell: bash
         run: |
+          set -euo pipefail
+          # Ubuntu's default repository may ship a different major version.
+          # Use the official PGDG repository and independently check its key.
+          # https://www.postgresql.org/download/linux/ubuntu/
+          . /etc/os-release
+          test "$ID" = ubuntu
+          key=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl --fail --silent --show-error --location \
+            --retry 3 -o "$key" https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          fingerprint="$(gpg --batch --show-keys --with-colons "$key" | awk -F: '$1=="fpr" {print $10; exit}')"
+          test "$fingerprint" = B97B0AFCAA1A47F044F244A07FCC7D46ACCC4CF8
+          printf 'deb [signed-by=%s] https://apt.postgresql.org/pub/repos/apt %s-pgdg main\n' \
+            "$key" "$VERSION_CODENAME" | sudo tee /etc/apt/sources.list.d/hesabdari-pgdg.list
           sudo apt-get update
-          sudo apt-get install -y postgresql-client-17
-          echo "/usr/lib/postgresql/17/bin" >> "$GITHUB_PATH"
-          /usr/lib/postgresql/17/bin/pg_dump --version
-          /usr/lib/postgresql/17/bin/pg_restore --version
+          sudo apt-get install -y --no-install-recommends postgresql-client-17
+          bin=/usr/lib/postgresql/17/bin
+          for tool in pg_dump pg_restore createdb dropdb; do
+            "$bin/$tool" --version | tee /tmp/"$tool"-version
+            grep -Eq 'PostgreSQL\) 17\.' /tmp/"$tool"-version
+          done
+          echo "$bin" >> "$GITHUB_PATH"
       - run: scripts/verify_postgresql.sh
 
 
