@@ -29,7 +29,7 @@ from security.test_support import AuditTriggerAwareTransactionTestCase
 
 PRE_CHAIN = ("security", "0015_login_attempt_account_time_index")
 BACKFILL = ("security", "0016_audit_chain_backfill")
-GUARDED = ("security", "0017_audit_append_only_triggers")
+GUARDED = ("security", "0018_audit_extended_guards")
 LEGACY_FIELDS = (
     "id", "user_id", "action", "entity", "entity_id", "reference",
     "previous_state", "new_state", "reason", "created_at",

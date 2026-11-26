@@ -386,7 +386,6 @@ def append_audit_event(
 
 def verify_audit_chain_records(events, *, head_hash: str, last_event_id):
     """Verify already-loaded event rows; shared by live DB and restored backups."""
-    events = list(events)
     by_previous = {}
     for event in events:
         if event.prev_event_hash in by_previous:
@@ -394,7 +393,8 @@ def verify_audit_chain_records(events, *, head_hash: str, last_event_id):
         by_previous[event.prev_event_hash] = event
 
     current = GENESIS_HASH
-    visited = []
+    visited_count = 0
+    verified_last_id = None
     seen_uuid = set()
     while current in by_previous:
         event = by_previous[current]
@@ -407,17 +407,17 @@ def verify_audit_chain_records(events, *, head_hash: str, last_event_id):
             raise AuditChainVerificationError(
                 f"event hash mismatch at event id {getattr(event, 'pk', getattr(event, 'id', '?'))}"
             )
-        visited.append(event)
+        visited_count += 1
+        verified_last_id = getattr(event, "pk", getattr(event, "id", None))
         current = event.event_hash
 
-    if len(visited) != len(events):
+    if visited_count != len(by_previous):
         raise AuditChainVerificationError("orphan, missing link, or disconnected audit event detected")
-    verified_last_id = getattr(visited[-1], "pk", getattr(visited[-1], "id", None)) if visited else None
     if head_hash != current or last_event_id != verified_last_id:
         raise AuditChainVerificationError("audit chain head does not match the verified final event")
     return {
         "valid": True,
-        "event_count": len(visited),
+        "event_count": visited_count,
         "head_hash": current,
         "last_event_id": verified_last_id,
     }
@@ -436,16 +436,28 @@ def verify_audit_chain(*, using="default") -> dict:
         raise AuditChainError("SQLite audit verification requires an IMMEDIATE transaction")
 
     with transaction.atomic(using=using):
+        if db.vendor == "sqlite" and not db.commit_on_exit:
+            raise AuditChainError("SQLite audit verification requires an outermost Django transaction")
         try:
             head = AuditChainHead.objects.using(using).select_for_update().get(pk=1)
         except AuditChainHead.DoesNotExist as exc:
             raise AuditChainVerificationError("audit chain singleton head is missing") from exc
-        events = list(AuditEvent.objects.using(using).all().order_by("pk"))
+        events = AuditEvent.objects.using(using).all().order_by("pk").iterator(chunk_size=1000)
         return verify_audit_chain_records(
             events,
             head_hash=head.head_hash,
             last_event_id=head.last_event_id,
         )
+
+
+SQLITE_REPLACEMENT_GUARD_SQL = (
+    "CREATE TRIGGER security_auditevent_no_replace BEFORE INSERT ON security_auditevent WHEN EXISTS (SELECT 1 FROM security_auditevent WHERE id = NEW.id OR event_uuid = NEW.event_uuid OR prev_event_hash = NEW.prev_event_hash OR event_hash = NEW.event_hash) BEGIN SELECT RAISE(ABORT, 'security_auditevent replacement is forbidden'); END"
+)
+
+
+def sqlite_replacement_guard_matches(definitions):
+    actual = definitions.get("security_auditevent_no_replace") or ""
+    return " ".join(actual.split()) == " ".join(SQLITE_REPLACEMENT_GUARD_SQL.split())
 
 
 def assert_audit_trigger_schema(*, using="default"):
@@ -470,6 +482,8 @@ def assert_audit_trigger_schema(*, using="default"):
                 )
                 if " ".join((definitions.get(name) or "").split()) != " ".join(expected.split()):
                     raise AuditChainVerificationError(f"missing or unexpected audit trigger: {name}")
+            if not sqlite_replacement_guard_matches(definitions):
+                raise AuditChainVerificationError("missing or unexpected SQLite audit replacement guard")
         elif db.vendor == "postgresql":
             cursor.execute(
                 "SELECT t.tgtype, t.tgenabled, p.proname "
@@ -482,5 +496,14 @@ def assert_audit_trigger_schema(*, using="default"):
             # PostgreSQL trigger type bits: ROW=1, BEFORE=2, DELETE=8, UPDATE=16.
             if row is None or row[0] != 27 or row[1] not in ("O", "A") or row[2] != "security_reject_audit_mutation":
                 raise AuditChainVerificationError("missing, disabled or unexpected PostgreSQL audit trigger")
+            cursor.execute(
+                "SELECT t.tgtype, t.tgenabled, p.proname FROM pg_trigger t "
+                "JOIN pg_proc p ON p.oid=t.tgfoid WHERE t.tgrelid=to_regclass(%s) "
+                "AND t.tgname=%s AND NOT t.tgisinternal",
+                ["security_auditevent", "security_auditevent_no_truncate"],
+            )
+            row = cursor.fetchone()
+            if row is None or row[0] != 34 or row[1] not in ("O", "A") or row[2] != "security_reject_audit_truncate":
+                raise AuditChainVerificationError("missing, disabled or unexpected PostgreSQL audit truncate guard")
         else:
             raise AuditChainVerificationError(f"unsupported audit database vendor: {db.vendor}")

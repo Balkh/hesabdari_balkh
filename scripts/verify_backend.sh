@@ -12,5 +12,7 @@ printf "\nW0-2E Batch C restore checks (SQLite)\n"
 ../backend/.venv/bin/python manage.py test security.test_backup_service.BatchCKeyAndManifestTests security.test_backup_service.BatchCDatabaseRestoreTests --settings=config.settings.test --verbosity=2
 printf "\nW0-2E Batch D audit access and privacy checks (SQLite)\n"
 ../backend/.venv/bin/python manage.py test security.test_audit_views --settings=config.settings.test --verbosity=2
+printf "\nW0-2E final quality gate (SQLite)\n"
+../backend/.venv/bin/python manage.py test security.test_audit_final_gate --settings=config.settings.test --verbosity=2
 ../backend/.venv/bin/python manage.py test --settings=config.settings.test
 ../backend/.venv/bin/pytest

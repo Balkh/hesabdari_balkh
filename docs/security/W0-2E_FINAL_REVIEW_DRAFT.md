@@ -22,3 +22,11 @@ Session/Basic compatibility unchanged. No hawala implementation. No merge, deplo
 ## Final approval gate
 
 Review exact-head CI jobs and raw targeted logs; reconcile residual findings, validate operational custody and deployment prerequisites, and obtain explicit owner decision. This file is a draft evidence matrix, not a release certificate.
+
+## Final quality gate candidate (2026-11-26)
+
+Batch D exact head 9e627dbd2edd24b43bedd539d3e53160ddc5e7af / CI 45884935611: 7/7, 11 targeted tests per engine; SQLite Django 529 run/2 skipped and pytest 1443 passed/19 skipped; PostgreSQL Django 529 run/6 skipped and pytest 1447 passed/15 skipped. All earlier targeted batches also passed.
+
+New forward migration 0018 supplements (does not rewrite) 0017, guards SQLite conflicting INSERT/REPLACE even with recursive triggers off, and rejects PostgreSQL TRUNCATE of nonempty audit history. Empty PostgreSQL truncation is allowed for empty-ledger maintenance; no claim against a privileged DB owner. The live and restored schema checks require the new guards. Downgrade prohibited with history. Old backups lacking 0018 will be rejected by the new guard check; preserve them and use the matching historical verifier in an isolated recovery workflow; never alter signed artifacts. The new verifier uses chunked ORM iteration and removes redundant list copies while retaining all events in its successor map and exact UUID/link validation. This is not constant memory. Five targeted tests cover DB mutation, 1000-event measured full verification, purchase/payment rollback and denial-storage failure. Actual metrics and CI results pending. No production SLA asserted.
+
+The financial tests are representative aggregate controls, not exhaustive audit producer/caller coverage. The storage-outage denial test proves refusal and logged error, not durable audit persistence. Owner operational backup destination, off-device key custody, real-device restore and scheduling/retention decisions remain open. No approval, freeze, merge or deploy.

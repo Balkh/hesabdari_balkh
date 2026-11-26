@@ -40,6 +40,7 @@ from django.utils.module_loading import import_string
 from security.audit_chain import (
     AuditChainVerificationError,
     assert_audit_trigger_schema,
+    sqlite_replacement_guard_matches,
     verify_audit_chain,
     verify_audit_chain_records,
 )
@@ -776,6 +777,8 @@ def _assert_sqlite_restore_guards(db):
         )
         if " ".join((definitions.get(name) or "").split()) != " ".join(expected.split()):
             raise BackupError(f"restored SQLite audit guard missing or unexpected: {name}")
+    if not sqlite_replacement_guard_matches(definitions):
+        raise BackupError("restored SQLite replacement guard missing or unexpected")
 
 
 def _read_postgresql_restore(cursor):
@@ -804,6 +807,15 @@ def _read_postgresql_restore(cursor):
     guard = cursor.fetchone()
     if guard is None or guard[0] != 27 or guard[1] not in ("O", "A") or guard[2] != "security_reject_audit_mutation":
         raise BackupError("restored PostgreSQL audit guard missing, disabled or unexpected")
+    cursor.execute(
+        "SELECT t.tgtype, t.tgenabled, p.proname FROM pg_trigger t "
+        "JOIN pg_proc p ON p.oid=t.tgfoid WHERE t.tgrelid=to_regclass(%s) "
+        "AND t.tgname=%s AND NOT t.tgisinternal",
+        ("security_auditevent", "security_auditevent_no_truncate"),
+    )
+    guard = cursor.fetchone()
+    if guard is None or guard[0] != 34 or guard[1] not in ("O", "A") or guard[2] != "security_reject_audit_truncate":
+        raise BackupError("restored PostgreSQL truncate guard missing, disabled or unexpected")
     return events, head
 
 
