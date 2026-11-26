@@ -26,7 +26,9 @@ printf "\nW0-2E final quality gate (PostgreSQL)\n"
 "$PYTHON" manage.py test security.test_audit_final_gate --verbosity=2
 printf "\nW0-2E final remediation checks (PostgreSQL)\n"
 "$PYTHON" manage.py test security.test_final_remediation --verbosity=2
-"$PYTHON" manage.py test
-DJANGO_SETTINGS_MODULE="$DJANGO_SETTINGS_MODULE" "$PYTHON" -m pytest -q
+printf "\nW0 security acceptance checks (PostgreSQL)\n"
+"$PYTHON" manage.py test goods_in_transit.tests.GoodsInTransitTests.test_acceptance_transit_sale_final_audit_rollback goods_in_transit.tests.GoodsInTransitTests.test_acceptance_transit_delivery_final_audit_rollback goods_in_transit.tests.GoodsInTransitTests.test_acceptance_legacy_transit_bridge_final_audit_rollback sales.sales_tests.SalesImplementationTests.test_acceptance_future_sale_final_audit_rollback security.test_security_acceptance --verbosity=2
+"$PYTHON" manage.py test --verbosity=2
+DJANGO_SETTINGS_MODULE="$DJANGO_SETTINGS_MODULE" "$PYTHON" -m pytest -q -rs
 
 printf '\nPOSTGRESQL VERIFICATION: PASS\n'

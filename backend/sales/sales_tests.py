@@ -185,3 +185,52 @@ class SalesImplementationTests(TestCase):
         self.assertEqual(JournalEntry.objects.filter(source_type="SALES_COGS").count(), 0)
         self.assertEqual(CustomerOwnershipEntitlement.objects.count(), 0)
         self.assertEqual(CustomerCustodyEvent.objects.count(), 0)
+
+
+    def test_acceptance_future_sale_final_audit_rollback(self):
+        from unittest.mock import patch
+        from accounting.models import JournalLine
+        from core.models import IdempotencyRecord
+        from party_ledger.models import PartyLedgerAttribution
+        from security.audit_chain import verify_audit_chain
+        from security.models import AuditAction, AuditChainHead, AuditEvent
+        from security.services import record_audit_event
+        sale = self.future_sale(document_number="SI-ACCEPT-FUTURE")
+        def state():
+            models = (JournalEntry, JournalLine, StockMovement, CustomerOwnershipEntitlement,
+                      CustomerCustodyEvent, PartyLedgerAttribution, IdempotencyRecord)
+            return ([list(model.objects.order_by("pk").values()) for model in models],
+                    verify_audit_chain())
+        before = state()
+        reached = []
+        def final_append(**kwargs):
+            self.assertEqual(kwargs["entity"], "Sale")
+            self.assertEqual(kwargs["action"], AuditAction.POST)
+            def fail(instance, *args, **save_kwargs):
+                self.assertEqual(instance.last_event.entity, "Sale")
+                self.assertTrue(AuditEvent.objects.filter(pk=instance.last_event_id).exists())
+                reached.append(instance.last_event_id)
+                raise RuntimeError("acceptance future audit head failure")
+            with patch.object(AuditChainHead, "save", autospec=True, side_effect=fail):
+                return record_audit_event(**kwargs)
+        with patch("sales.services.record_audit_event", side_effect=final_append):
+            with self.assertRaisesMessage(RuntimeError, "acceptance future audit head failure"):
+                finalize_sale(sale=sale)
+        self.assertEqual(len(reached), 1)
+        sale.refresh_from_db()
+        self.assertEqual(sale.status, SaleStatus.DRAFT)
+        self.assertIsNone(sale.journal_entry_id)
+        self.assertEqual(state(), before)
+        finalize_sale(sale=sale)
+        sale.refresh_from_db()
+        self.assertEqual(sale.status, SaleStatus.FINALIZED)
+        self.assertEqual(sale.journal_entry.lines.get(account__code="1310").debit, Decimal("100.00"))
+        self.assertEqual(sale.journal_entry.lines.get(account__code="4110").credit, Decimal("100.00"))
+        self.assertEqual(StockMovement.objects.count(), 0)
+        self.assertEqual(CustomerOwnershipEntitlement.objects.count(), 0)
+        self.assertEqual(CustomerCustodyEvent.objects.count(), 0)
+        self.assertEqual(JournalEntry.objects.filter(source_type="SALES_COGS").count(), 0)
+        after = state()
+        finalize_sale(sale=sale)
+        self.assertEqual(state(), after)
+        self.assertEqual(AuditEvent.objects.filter(entity="Sale", entity_id=str(sale.pk), action=AuditAction.POST).count(), 1)

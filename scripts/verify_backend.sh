@@ -16,5 +16,7 @@ printf "\nW0-2E final quality gate (SQLite)\n"
 ../backend/.venv/bin/python manage.py test security.test_audit_final_gate --settings=config.settings.test --verbosity=2
 printf "\nW0-2E final remediation checks (SQLite)\n"
 ../backend/.venv/bin/python manage.py test security.test_final_remediation --settings=config.settings.test --verbosity=2
-../backend/.venv/bin/python manage.py test --settings=config.settings.test
-../backend/.venv/bin/pytest
+printf "\nW0 security acceptance checks (SQLite)\n"
+../backend/.venv/bin/python manage.py test goods_in_transit.tests.GoodsInTransitTests.test_acceptance_transit_sale_final_audit_rollback goods_in_transit.tests.GoodsInTransitTests.test_acceptance_transit_delivery_final_audit_rollback goods_in_transit.tests.GoodsInTransitTests.test_acceptance_legacy_transit_bridge_final_audit_rollback sales.sales_tests.SalesImplementationTests.test_acceptance_future_sale_final_audit_rollback security.test_security_acceptance --settings=config.settings.test --verbosity=2
+../backend/.venv/bin/python manage.py test --settings=config.settings.test --verbosity=2
+../backend/.venv/bin/pytest -rs
