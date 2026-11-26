@@ -10,5 +10,7 @@ printf "\nW0-2E Batch B migration checks (SQLite)\n"
 ../backend/.venv/bin/python manage.py test security.test_audit_migrations --settings=config.settings.test --verbosity=2
 printf "\nW0-2E Batch C restore checks (SQLite)\n"
 ../backend/.venv/bin/python manage.py test security.test_backup_service.BatchCKeyAndManifestTests security.test_backup_service.BatchCDatabaseRestoreTests --settings=config.settings.test --verbosity=2
+printf "\nW0-2E Batch D audit access and privacy checks (SQLite)\n"
+../backend/.venv/bin/python manage.py test security.test_audit_views --settings=config.settings.test --verbosity=2
 ../backend/.venv/bin/python manage.py test --settings=config.settings.test
 ../backend/.venv/bin/pytest

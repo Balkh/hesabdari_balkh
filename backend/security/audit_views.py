@@ -8,6 +8,7 @@ import logging
 from django.core.serializers.json import DjangoJSONEncoder
 from django.db import transaction
 from django.http import HttpResponse
+from django.utils.cache import add_never_cache_headers
 from rest_framework import status
 from rest_framework.authentication import SessionAuthentication
 from rest_framework.decorators import api_view, authentication_classes, permission_classes
@@ -15,6 +16,7 @@ from rest_framework.response import Response
 
 from security.audit_chain import (
     AuditChainVerificationError,
+    assert_audit_trigger_schema,
     _redact_sensitive,
     verify_audit_chain,
 )
@@ -36,6 +38,7 @@ logger = logging.getLogger("security.audit")
 
 def _verify_or_unavailable():
     try:
+        assert_audit_trigger_schema()
         return verify_audit_chain()
     except AuditChainVerificationError:
         logger.exception("audit chain verification failed; withholding audit data")
@@ -45,16 +48,8 @@ def _verify_or_unavailable():
         return None
 
 
-@transaction.atomic
 def _build_audit_events_payload(request):
-    """Materialize the verified page before releasing the chain snapshot lock."""
-    integrity = _verify_or_unavailable()
-    if integrity is None:
-        return None, Response(
-            {"error": "audit_integrity_unavailable"},
-            status=status.HTTP_503_SERVICE_UNAVAILABLE,
-        )
-
+    """Reject invalid filters before acquiring the ledger-wide read lock."""
     raw_limit = request.query_params.get("limit", "50")
     try:
         limit = int(raw_limit)
@@ -66,7 +61,7 @@ def _build_audit_events_payload(request):
             status=status.HTTP_400_BAD_REQUEST,
         )
 
-    queryset = AuditEvent.objects.select_related("user").order_by("-id")
+    queryset = AuditEvent.objects.order_by("-id")
     action = request.query_params.get("action")
     if action:
         if action not in AuditAction.values:
@@ -87,6 +82,18 @@ def _build_audit_events_payload(request):
             return None, Response({"error": "invalid_before_id"}, status=status.HTTP_400_BAD_REQUEST)
         queryset = queryset.filter(pk__lt=parsed_before_id)
 
+    return _materialize_verified_page(queryset, limit)
+
+
+@transaction.atomic
+def _materialize_verified_page(queryset, limit):
+    """Materialize the page before releasing the chain snapshot lock."""
+    integrity = _verify_or_unavailable()
+    if integrity is None:
+        return None, Response(
+            {"error": "audit_integrity_unavailable"},
+            status=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
     rows = list(queryset[:limit])
     payload = [
         {
@@ -98,9 +105,9 @@ def _build_audit_events_payload(request):
             "actor": _redact_sensitive(event.actor_snapshot),
             "authorization_context": _redact_sensitive(event.authorization_context),
             "action": event.action,
-            "entity": event.entity,
-            "entity_id": event.entity_id,
-            "reference": event.reference,
+            "entity": _redact_sensitive(event.entity),
+            "entity_id": _redact_sensitive(event.entity_id),
+            "reference": _redact_sensitive(event.reference),
             "previous_state": _redact_sensitive(event.previous_state),
             "new_state": _redact_sensitive(event.new_state),
             "reason": _redact_sensitive(event.reason),
@@ -142,7 +149,9 @@ def audit_events(request):
             status=status.HTTP_400_BAD_REQUEST,
         )
     payload, error = _build_audit_events_payload(request)
-    return error if error is not None else Response(payload)
+    response = error if error is not None else Response(payload)
+    add_never_cache_headers(response)
+    return response
 
 
 @erp_operations(
@@ -166,6 +175,7 @@ def audit_events_export(request):
         content_type="application/json; charset=utf-8",
     )
     response["Content-Disposition"] = 'attachment; filename="hesabdari-audit-events.json"'
+    add_never_cache_headers(response)
     return response
 
 
@@ -189,4 +199,6 @@ def audit_integrity(request):
             {"status": "INVALID_OR_UNAVAILABLE"},
             status=status.HTTP_503_SERVICE_UNAVAILABLE,
         )
-    return Response({"status": "VALID", **integrity})
+    response = Response({"status": "VALID", **integrity})
+    add_never_cache_headers(response)
+    return response

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import ipaddress
 import json
 import math
 import re
@@ -117,6 +118,12 @@ _SENSITIVE_AUDIT_KEYS = {
     "ownerkey", "encryptionkey", "privatekey", "ciphertext",
     "nonce", "credential", "credentials", "authorizationheader",
     "accesstoken", "refreshtoken", "apikey",
+    "ip", "ipaddress", "rawip", "remoteaddr", "remoteip", "clientip", "sourceip",
+    "forwarded", "forwardedfor", "xforwardedfor", "xrealip", "realip",
+    "useragent", "httpuseragent", "headers", "requestheaders", "rawheaders",
+    "httpheaders", "authorization", "httpauthorization", "cookie", "cookies",
+    "httpcookie", "setcookie", "sessionkey", "sessiontoken", "csrftoken",
+    "backupencryptionkey", "signingprivatekey",
 }
 _INLINE_SECRET_PATTERN = re.compile(
     r"(?i)(\b(?:password|passwd|passphrase|totp(?:[\s_-]*code)?|"
@@ -128,12 +135,37 @@ _BEARER_SECRET_PATTERN = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/-]+=*")
 _OTP_URI_SECRET_PATTERN = re.compile(r"(?i)(otpauth://totp/[^?\s]+\?secret=)[^&\s]+")
 
 
+# Structured network fields are removed in full. Free-text matching is
+# deliberately limited to labelled fields and validated IP literals.
+_IP_LITERAL_PATTERN = re.compile(
+    r"(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?![\w.])"
+    r"|(?<![\w:])(?:[0-9A-Fa-f]{0,4}:){2,}[0-9A-Fa-f:.]+(?![\w:])"
+)
+_INLINE_NETWORK_PATTERN = re.compile(
+    r"(?i)(\b(?:user[\s_-]*agent|x[\s_-]*forwarded[\s_-]*for|"
+    r"forwarded|authorization|cookie|set[\s_-]*cookie|"
+    r"(?:remote|client|source|raw)[\s_-]*(?:ip|addr(?:ess)?)|"
+    r"ip[\s_-]*address|encryption[\s_-]*key|private[\s_-]*key|"
+    r"session[\s_-]*(?:key|token))\s*[:=]\s*).*"
+)
+
+
+def _mask_ip_literal(match):
+    try:
+        ipaddress.ip_address(match.group(0))
+    except ValueError:
+        return match.group(0)
+    return "[REDACTED]"
+
+
 def _redact_text(value):
     if not isinstance(value, str):
         return value
     value = _INLINE_SECRET_PATTERN.sub(r"\1[REDACTED]", value)
     value = _BEARER_SECRET_PATTERN.sub("Bearer [REDACTED]", value)
-    return _OTP_URI_SECRET_PATTERN.sub(r"\1[REDACTED]", value)
+    value = _OTP_URI_SECRET_PATTERN.sub(r"\1[REDACTED]", value)
+    value = _INLINE_NETWORK_PATTERN.sub(r"\1[REDACTED]", value)
+    return _IP_LITERAL_PATTERN.sub(_mask_ip_literal, value)
 
 
 def _redact_sensitive(value):
@@ -146,7 +178,9 @@ def _redact_sensitive(value):
             normalized = "".join(ch for ch in key.lower() if ch.isalnum())
             if normalized in _SENSITIVE_AUDIT_KEYS or any(
                 marker in normalized
-                for marker in ("password", "totp", "recoverycode", "privatekey", "ciphertext")
+                for marker in ("password", "totp", "recoverycode", "privatekey", "ciphertext",
+                               "useragent", "forwardedfor", "remoteaddr", "encryptionkey",
+                               "authorizationheader", "httpauthorization")
             ):
                 result[str(key)] = "[REDACTED]"
             else:
@@ -321,7 +355,7 @@ def append_audit_event(
     event = AuditEvent(
         user=user,
         action=action,
-        entity=entity,
+        entity=_redact_text(entity),
         entity_id=_redact_text(str(entity_id)),
         reference=_redact_text(reference or ""),
         # Normalize JSONField payloads to their exact persisted representation
