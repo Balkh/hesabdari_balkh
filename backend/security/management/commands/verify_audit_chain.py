@@ -2,6 +2,7 @@ from django.core.management.base import BaseCommand, CommandError
 
 from security.audit_chain import (
     AuditChainVerificationError,
+    assert_audit_trigger_schema,
     verify_audit_chain,
 )
 
@@ -11,6 +12,7 @@ class Command(BaseCommand):
 
     def handle(self, *args, **options):
         try:
+            assert_audit_trigger_schema()
             result = verify_audit_chain()
         except AuditChainVerificationError as exc:
             raise CommandError(f"AUDIT CHAIN INVALID: {exc}") from None

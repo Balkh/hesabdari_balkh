@@ -412,3 +412,41 @@ def verify_audit_chain(*, using="default") -> dict:
             head_hash=head.head_hash,
             last_event_id=head.last_event_id,
         )
+
+
+def assert_audit_trigger_schema(*, using="default"):
+    """Read-only structural check for installed append-only guards.
+
+    This is not proof against a privileged database owner replacing trigger
+    bodies. Actual UPDATE/DELETE rejection is covered by integration tests.
+    """
+    db = connections[using]
+    with db.cursor() as cursor:
+        if db.vendor == "sqlite":
+            cursor.execute(
+                "SELECT name, sql FROM sqlite_master WHERE type = 'trigger' "
+                "AND tbl_name = %s", ["security_auditevent"]
+            )
+            definitions = dict(cursor.fetchall())
+            for operation in ("update", "delete"):
+                name = f"security_auditevent_no_{operation}"
+                expected = (
+                    f"CREATE TRIGGER {name} BEFORE {operation.upper()} ON security_auditevent "
+                    "BEGIN SELECT RAISE(ABORT, 'security_auditevent is append-only'); END"
+                )
+                if " ".join((definitions.get(name) or "").split()) != " ".join(expected.split()):
+                    raise AuditChainVerificationError(f"missing or unexpected audit trigger: {name}")
+        elif db.vendor == "postgresql":
+            cursor.execute(
+                "SELECT t.tgtype, t.tgenabled, p.proname "
+                "FROM pg_trigger t JOIN pg_proc p ON p.oid = t.tgfoid "
+                "WHERE t.tgrelid = to_regclass(%s) AND t.tgname = %s "
+                "AND NOT t.tgisinternal",
+                ["security_auditevent", "security_auditevent_no_update_delete"],
+            )
+            row = cursor.fetchone()
+            # PostgreSQL trigger type bits: ROW=1, BEFORE=2, DELETE=8, UPDATE=16.
+            if row is None or row[0] != 27 or row[1] not in ("O", "A") or row[2] != "security_reject_audit_mutation":
+                raise AuditChainVerificationError("missing, disabled or unexpected PostgreSQL audit trigger")
+        else:
+            raise AuditChainVerificationError(f"unsupported audit database vendor: {db.vendor}")

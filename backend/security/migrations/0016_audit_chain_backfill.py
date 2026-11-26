@@ -28,10 +28,13 @@ def _normalize(value):
     if isinstance(value, Decimal):
         if not value.is_finite():
             raise ValueError("non-finite Decimal in legacy audit row")
-        return "0" if value == 0 else format(value.normalize(), "f")
+        if value == 0:
+            return "0"
+        fixed = format(value, "f")
+        return fixed.rstrip("0").rstrip(".") if "." in fixed else fixed
     if isinstance(value, datetime):
         if timezone.is_naive(value):
-            value = timezone.make_aware(value, dt_timezone.utc)
+            raise ValueError("naive datetime in legacy audit row")
         return value.astimezone(dt_timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
     if isinstance(value, date):
         return value.isoformat()
@@ -89,13 +92,21 @@ def backfill_audit_chain(apps, schema_editor):
         }
         row.source_fingerprint = ""
         row.prev_event_hash = previous
-        data = json.dumps(
-            _normalize(_payload(row)),
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
-        ).encode("utf-8")
+        try:
+            data = json.dumps(
+                _normalize(_payload(row)),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+        except (TypeError, ValueError, ArithmeticError, UnicodeError):
+            # Never echo historical payloads or guess missing values. Django's
+            # atomic migration rolls back the entire schema/data operation.
+            raise RuntimeError(
+                f"W0-2E cannot canonicalize legacy audit row id={row.pk}; "
+                "migration aborted; review the historical data offline."
+            ) from None
         row.event_hash = hashlib.sha256(
             DOMAIN + bytes.fromhex(previous) + data
         ).hexdigest()
