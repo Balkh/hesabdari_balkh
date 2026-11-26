@@ -3,9 +3,12 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import sqlite3
 import tempfile
 from pathlib import Path
+from decimal import Decimal
 from unittest import skipUnless
+from unittest.mock import patch
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -14,6 +17,7 @@ from django.test import SimpleTestCase
 
 from security.backup_service import (
     BackupError,
+    BackupKeyUnavailable,
     create_audit_checkpoint_file,
     create_encrypted_database_backup,
     decrypt_backup_file,
@@ -223,3 +227,156 @@ class SQLiteDatabaseBackupTests(AuditTriggerAwareTransactionTestCase):
         self.assertEqual(daily["signing_key_id"], "test-audit-ed25519-v1")
         self.assertEqual(shift["signing_key_id"], "test-audit-ed25519-v1")
         self.assertEqual(verify_audit_chain()["event_count"], 3)
+
+
+class BatchCKeyAndManifestTests(SimpleTestCase):
+    setUp = BackupCryptographicTests.setUp
+    tearDown = BackupCryptographicTests.tearDown
+
+    def test_wrong_encryption_key_and_missing_key_fail_without_plaintext(self):
+        plain = self.root / "plain"
+        encrypted = self.root / "backup.hbak"
+        restored = self.root / "restored"
+        plain.write_bytes(b"financial backup")
+        encrypt_backup_file(plain, encrypted, provider=self.provider)
+        with self.assertRaisesMessage(BackupError, "authentication failed"):
+            decrypt_backup_file(encrypted, restored, provider=StaticBackupKeyProvider(encryption_key=b"X" * 32))
+        self.assertFalse(restored.exists())
+        with patch.object(self.provider, "get_backup_encryption_key", side_effect=KeyError("missing")):
+            with self.assertRaises(BackupKeyUnavailable):
+                decrypt_backup_file(encrypted, restored, provider=self.provider)
+        self.assertFalse(restored.exists())
+
+    def test_truncated_envelope_cannot_publish_plaintext(self):
+        plain = self.root / "plain"
+        encrypted = self.root / "backup.hbak"
+        restored = self.root / "restored"
+        plain.write_bytes(b"financial backup")
+        encrypt_backup_file(plain, encrypted, provider=self.provider)
+        encrypted.write_bytes(encrypted.read_bytes()[:10])
+        with self.assertRaises(BackupError):
+            decrypt_backup_file(encrypted, restored, provider=self.provider)
+        self.assertFalse(restored.exists())
+
+
+class BatchCDatabaseRestoreTests(AuditTriggerAwareTransactionTestCase):
+    def setUp(self):
+        from accounting.models import Account, AccountType
+        from accounting.services import post_journal
+        from currencies.models import Currency
+
+        self.provider = StaticBackupKeyProvider()
+        self.temp = tempfile.TemporaryDirectory(prefix="hesabdari-batch-c-")
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        cash = Account.objects.create(code="1100", name="Cash", account_type=AccountType.ASSET)
+        revenue = Account.objects.create(code="4100", name="Revenue", account_type=AccountType.REVENUE)
+        afn = Currency.objects.create(code="AFN", name="Afghani", is_base=True)
+        self.entry = post_journal(
+            number="JE-1405-99001", posting_date="2026-09-06",
+            description="Batch C restore evidence", currency=afn,
+            lines=[{"account": cash, "debit": "125.50"}, {"account": revenue, "credit": "125.50"}],
+            idempotency_key="batch-c-financial-restore",
+        )
+        with transaction.atomic():
+            record_audit_event(action=AuditAction.CREATE, entity="BatchCScalar",
+                               new_state="plain JSON string", previous_state="123")
+        self.initial = verify_audit_chain()
+
+    def _backup(self):
+        return create_encrypted_database_backup(self.root, provider=self.provider, retention_class="pre_upgrade")
+
+    def _assert_financial(self, cursor, placeholder):
+        cursor.execute(
+            "SELECT number, status, total_debit, total_credit FROM accounting_journalentry WHERE id = " + placeholder,
+            [self.entry.pk],
+        )
+        row = cursor.fetchone()
+        self.assertEqual(row[:2], (self.entry.number, "POSTED"))
+        self.assertEqual(tuple(Decimal(str(value)) for value in row[2:]), (Decimal("125.50"), Decimal("125.50")))
+        cursor.execute(
+            "SELECT debit, credit FROM accounting_journalline WHERE entry_id = " + placeholder + " ORDER BY id",
+            [self.entry.pk],
+        )
+        self.assertEqual([tuple(Decimal(str(value)) for value in row) for row in cursor.fetchall()],
+                         [(Decimal("125.50"), Decimal("0")), (Decimal("0"), Decimal("125.50"))])
+        cursor.execute("SELECT COUNT(*) FROM core_idempotencyrecord WHERE key = " + placeholder,
+                       ["batch-c-financial-restore"])
+        self.assertEqual(cursor.fetchone()[0], 1)
+
+    def _temporary_databases(self):
+        if connection.vendor != "postgresql":
+            return set()
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT datname FROM pg_database WHERE left(datname, 18) = 'hb_restore_verify_'")
+            return {row[0] for row in cursor.fetchall()}
+
+    def test_real_restore_financial_rows_audit_guards_and_cleanup(self):
+        from security import backup_service as service
+
+        before_dbs = self._temporary_databases()
+        result = self._backup()
+        live = verify_audit_chain()
+        self.assertEqual(live["event_count"], self.initial["event_count"] + 1)
+        observed = []
+        if connection.vendor == "sqlite":
+            original = service._verify_sqlite_snapshot
+
+            def inspect(path, payload):
+                db = sqlite3.connect(str(path))
+                try:
+                    self._assert_financial(db.cursor(), "?")
+                    for sql in (
+                        "UPDATE security_auditevent SET reason='forbidden'",
+                        "DELETE FROM security_auditevent",
+                    ):
+                        with self.assertRaises(sqlite3.DatabaseError):
+                            db.execute(sql)
+                        db.rollback()
+                    observed.append(str(path))
+                finally:
+                    db.close()
+                return original(path, payload)
+
+            target = "_verify_sqlite_snapshot"
+        else:
+            import psycopg
+            original = service._read_postgresql_restore
+
+            def inspect(cursor):
+                self._assert_financial(cursor, "%s")
+                for sql in (
+                    "UPDATE security_auditevent SET reason='forbidden'",
+                    "DELETE FROM security_auditevent",
+                ):
+                    with self.assertRaises(psycopg.Error):
+                        with cursor.connection.transaction():
+                            cursor.execute(sql)
+                observed.append(cursor.connection.info.dbname)
+                return original(cursor)
+
+            target = "_read_postgresql_restore"
+
+        with patch.object(service, target, side_effect=inspect):
+            restored = verify_encrypted_database_backup(result["backup_path"], result["checkpoint_path"],
+                                                        provider=self.provider)
+        self.assertEqual(len(observed), 1)
+        self.assertTrue(restored["valid"])
+        for field in ("event_count", "head_hash", "last_event_id"):
+            self.assertEqual(restored[field], self.initial[field])
+        self.assertEqual(verify_audit_chain(), live)
+        self.assertEqual(self._temporary_databases(), before_dbs)
+        if connection.vendor == "sqlite":
+            self.assertFalse(Path(observed[0]).exists())
+        print(f"BATCH C RESTORE [{connection.vendor}]: balanced 125.50 AFN; chain and guards verified; temporary restore removed")
+
+    def test_signed_manifest_key_mismatch_rejected_before_restore(self):
+        result = self._backup()
+        live = verify_audit_chain()
+        payload = verify_signed_checkpoint(result["checkpoint_path"], provider=self.provider)
+        payload["backup_encryption_key_id"] = "different-key-id"
+        checkpoint = self.root / "mismatched.checkpoint.json"
+        create_signed_checkpoint(payload, checkpoint, provider=self.provider)
+        with self.assertRaisesMessage(BackupError, "encryption key does not match signed checkpoint"):
+            verify_encrypted_database_backup(result["backup_path"], checkpoint, provider=self.provider)
+        self.assertEqual(verify_audit_chain(), live)

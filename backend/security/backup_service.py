@@ -39,6 +39,7 @@ from django.utils.module_loading import import_string
 
 from security.audit_chain import (
     AuditChainVerificationError,
+    assert_audit_trigger_schema,
     verify_audit_chain,
     verify_audit_chain_records,
 )
@@ -419,6 +420,8 @@ def _postgres_password_file(settings_dict: dict):
             stream.write(":".join(_pgpass_escape(v) for v in (host, port, name, user, password)))
             stream.write("\n")
         env = os.environ.copy()
+        # An inherited PGPASSWORD takes precedence over the private passfile.
+        env.pop("PGPASSWORD", None)
         env.update({
             "PGHOST": host,
             "PGPORT": port,
@@ -597,10 +600,11 @@ def create_encrypted_database_backup(
         raise BackupError("retention class must be daily, pre_upgrade, or month_end")
 
     destination_directory = Path(destination_directory).expanduser()
-    destination_directory.mkdir(parents=True, exist_ok=True)
     _assert_backup_destination_is_external(destination_directory)
+    destination_directory.mkdir(parents=True, exist_ok=True)
 
     try:
+        assert_audit_trigger_schema()
         before = verify_audit_chain()
     except AuditChainVerificationError as exc:
         raise BackupError("audit chain must verify before a database backup can be created") from exc
@@ -621,6 +625,7 @@ def create_encrypted_database_backup(
             raise BackupError(f"unsupported database engine for backup: {connection.vendor}")
 
         try:
+            assert_audit_trigger_schema()
             after = verify_audit_chain()
         except AuditChainVerificationError as exc:
             raise BackupError("audit chain became invalid during database backup") from exc
@@ -758,13 +763,60 @@ def _verify_restored_rows(events, head_row, expected_payload: dict) -> dict:
     return result
 
 
+def _assert_sqlite_restore_guards(db):
+    definitions = dict(db.execute(
+        "SELECT name, sql FROM sqlite_master WHERE type='trigger' AND tbl_name=?",
+        ("security_auditevent",),
+    ).fetchall())
+    for operation in ("update", "delete"):
+        name = f"security_auditevent_no_{operation}"
+        expected = (
+            f"CREATE TRIGGER {name} BEFORE {operation.upper()} ON security_auditevent "
+            "BEGIN SELECT RAISE(ABORT, 'security_auditevent is append-only'); END"
+        )
+        if " ".join((definitions.get(name) or "").split()) != " ".join(expected.split()):
+            raise BackupError(f"restored SQLite audit guard missing or unexpected: {name}")
+
+
+def _read_postgresql_restore(cursor):
+    # psycopg decodes JSONB into Python objects; JSON scalar strings would
+    # otherwise be mistaken for raw JSON text by the shared row adapter.
+    cursor.execute(
+        "SELECT id, event_uuid, user_id, action, entity, entity_id, reference, "
+        "previous_state::text AS previous_state, new_state::text AS new_state, "
+        "reason, created_at, actor_snapshot::text AS actor_snapshot, "
+        "authorization_context::text AS authorization_context, source_fingerprint, "
+        "prev_event_hash, event_hash FROM security_auditevent ORDER BY id"
+    )
+    names = [item.name for item in cursor.description]
+    events = [dict(zip(names, row)) for row in cursor.fetchall()]
+    cursor.execute(
+        "SELECT id, head_hash, last_event_id FROM security_auditchainhead WHERE id = 1"
+    )
+    row = cursor.fetchone()
+    head = dict(zip([item.name for item in cursor.description], row)) if row else None
+    cursor.execute(
+        "SELECT t.tgtype, t.tgenabled, p.proname FROM pg_trigger t "
+        "JOIN pg_proc p ON p.oid=t.tgfoid WHERE t.tgrelid=to_regclass(%s) "
+        "AND t.tgname=%s AND NOT t.tgisinternal",
+        ("security_auditevent", "security_auditevent_no_update_delete"),
+    )
+    guard = cursor.fetchone()
+    if guard is None or guard[0] != 27 or guard[1] not in ("O", "A") or guard[2] != "security_reject_audit_mutation":
+        raise BackupError("restored PostgreSQL audit guard missing, disabled or unexpected")
+    return events, head
+
+
 def _verify_sqlite_snapshot(snapshot_path: Path, expected_payload: dict) -> dict:
-    db = sqlite3.connect(f"file:{snapshot_path}?mode=ro", uri=True)
+    db = sqlite3.connect(snapshot_path.resolve().as_uri() + "?mode=ro", uri=True)
     db.row_factory = sqlite3.Row
     try:
         check = db.execute("PRAGMA integrity_check").fetchone()
         if not check or check[0] != "ok":
             raise BackupError("restored SQLite database failed PRAGMA integrity_check")
+        if db.execute("PRAGMA foreign_key_check").fetchone() is not None:
+            raise BackupError("restored SQLite database has foreign-key violations")
+        _assert_sqlite_restore_guards(db)
         events = [dict(row) for row in db.execute(_AUDIT_SELECT).fetchall()]
         head_rows = db.execute(
             "SELECT id, head_hash, last_event_id FROM security_auditchainhead WHERE id = 1"
@@ -822,15 +874,7 @@ def _verify_postgresql_snapshot(snapshot_path: Path, expected_payload: dict) -> 
                 port=int(db.get("PORT") or 5432),
             ) as restored:
                 with restored.cursor() as cursor:
-                    cursor.execute(_AUDIT_SELECT)
-                    names = [item.name for item in cursor.description]
-                    events = [dict(zip(names, row)) for row in cursor.fetchall()]
-                    cursor.execute(
-                        "SELECT id, head_hash, last_event_id "
-                        "FROM security_auditchainhead WHERE id = 1"
-                    )
-                    row = cursor.fetchone()
-                    head = dict(zip([item.name for item in cursor.description], row)) if row else None
+                    events, head = _read_postgresql_restore(cursor)
             return _verify_restored_rows(events, head, expected_payload)
         except BackupError:
             raise
@@ -871,10 +915,33 @@ def verify_encrypted_database_backup(
     if raw_backup_path.is_symlink():
         raise BackupError("symbolic-link backup paths are not accepted")
     backup_path = raw_backup_path.resolve()
-    checkpoint_path = Path(checkpoint_path).resolve()
+    raw_checkpoint_path = Path(checkpoint_path)
+    if raw_checkpoint_path.is_symlink():
+        raise BackupError("symbolic-link checkpoint paths are not accepted")
+    checkpoint_path = raw_checkpoint_path.resolve()
     payload = verify_signed_checkpoint(checkpoint_path, provider=provider)
     if payload.get("schema") != BACKUP_SCHEMA:
         raise BackupError("signed checkpoint is not a database-backup manifest")
+    if (
+        payload.get("database_vendor") not in {"sqlite", "postgresql"}
+        or payload.get("artifact_type") != "encrypted_database_backup"
+        or type(payload.get("backup_size")) is not int
+        or payload["backup_size"] <= 0
+        or type(payload.get("chain_event_count")) is not int
+        or payload["chain_event_count"] < 0
+        or payload.get("retention_class") not in {"daily", "pre_upgrade", "month_end"}
+        or not isinstance(payload.get("backup_encryption_key_id"), str)
+        or not payload["backup_encryption_key_id"]
+        or any(not isinstance(payload.get(field), str)
+               or len(payload[field]) != 64
+               or any(c not in "0123456789abcdef" for c in payload[field])
+               for field in ("backup_sha256", "chain_head_hash"))
+        or "chain_last_event_id" not in payload
+        or (payload["chain_last_event_id"] is not None
+            and (type(payload["chain_last_event_id"]) is not int or payload["chain_last_event_id"] <= 0))
+        or (payload["chain_event_count"] == 0) != (payload["chain_last_event_id"] is None)
+    ):
+        raise BackupError("signed database backup manifest has invalid fields")
     backup_filename = payload.get("backup_filename", "")
     if (
         not isinstance(backup_filename, str)
@@ -890,16 +957,24 @@ def verify_encrypted_database_backup(
         raise BackupError("encrypted backup file is missing")
     if backup_path.stat().st_size != payload.get("backup_size"):
         raise BackupError("encrypted backup size does not match signed checkpoint")
-    if not hmac.compare_digest(sha256_file(backup_path), payload["backup_sha256"]):
-        raise BackupError("encrypted backup digest does not match signed checkpoint")
-
     with tempfile.TemporaryDirectory(prefix="hesabdari-restore-verify-") as temp_dir:
+        # Authenticate a private stable copy, not a path that can be replaced
+        # between digest verification and decryption.
+        private_backup = Path(temp_dir) / "authenticated.hbak"
+        with backup_path.open("rb") as source, private_backup.open("xb") as output:
+            shutil.copyfileobj(source, output, length=CHUNK_SIZE)
+        if private_backup.stat().st_size != payload["backup_size"]:
+            raise BackupError("encrypted backup size does not match signed checkpoint")
+        if not hmac.compare_digest(sha256_file(private_backup), payload["backup_sha256"]):
+            raise BackupError("encrypted backup digest does not match signed checkpoint")
         snapshot_path = Path(temp_dir) / (
             "restored.sqlite3"
             if payload["database_vendor"] == "sqlite"
             else "restored.pgdump"
         )
-        decrypt_backup_file(backup_path, snapshot_path, provider=provider)
+        decrypted = decrypt_backup_file(private_backup, snapshot_path, provider=provider)
+        if decrypted["key_id"] != payload["backup_encryption_key_id"]:
+            raise BackupError("backup encryption key does not match signed checkpoint")
         if payload["database_vendor"] == "sqlite":
             result = _verify_sqlite_snapshot(snapshot_path, payload)
         elif payload["database_vendor"] == "postgresql":

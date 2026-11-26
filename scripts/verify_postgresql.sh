@@ -18,6 +18,8 @@ printf "\nW0-2E Batch A targeted checks (PostgreSQL)\n"
 printf "\nW0-2E Batch B migration checks (PostgreSQL)\n"
 "$PYTHON" manage.py makemigrations --check --dry-run
 "$PYTHON" manage.py test security.test_audit_migrations --verbosity=2
+printf "\nW0-2E Batch C restore checks (PostgreSQL)\n"
+"$PYTHON" manage.py test security.test_backup_service.BatchCKeyAndManifestTests security.test_backup_service.BatchCDatabaseRestoreTests --verbosity=2
 "$PYTHON" manage.py test
 DJANGO_SETTINGS_MODULE="$DJANGO_SETTINGS_MODULE" "$PYTHON" -m pytest -q
 
