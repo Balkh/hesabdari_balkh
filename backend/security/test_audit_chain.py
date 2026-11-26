@@ -5,10 +5,11 @@ from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier, Event
 from time import monotonic
 from types import SimpleNamespace
-from datetime import timezone as dt_timezone
-from decimal import Decimal
+from copy import copy
+from datetime import datetime, timezone as dt_timezone
+from decimal import Decimal, localcontext
 from unittest.mock import patch
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from django.core.management import call_command
 from django.db import DatabaseError, OperationalError, connection, connections, transaction
@@ -24,7 +25,9 @@ from security.audit_chain import (
     AuditChainVerificationError,
     calculate_event_hash,
     canonical_json_bytes,
+    immutable_event_payload,
     verify_audit_chain,
+    verify_audit_chain_records,
 )
 from security.models import AuditAction, AuditChainHead, AuditEvent
 from security.services import record_audit_event
@@ -613,4 +616,186 @@ class AuditMultiWriterTests(AuditTriggerAwareTransactionTestCase):
         self.assertEqual(verify_audit_chain(), initial)
         # Prove a subsequent independent operation can commit after release.
         self._write("audit-after-timeout")
+        self.assertEqual(verify_audit_chain()["event_count"], initial["event_count"] + 1)
+
+
+class AuditBatchAIntegrityTests(TestCase):
+    """Deterministic cross-engine vectors and failure/rollback controls."""
+
+    def _append(self, entity_id="a", **kwargs):
+        return record_audit_event(
+            action=AuditAction.CREATE, entity="BatchA", entity_id=entity_id, **kwargs
+        )
+
+    def test_decimal_canonicalization_is_exact_at_different_context_precisions(self):
+        amount = Decimal("123456789012345678901234567890.1234500")
+        expected = b'{"amount":"123456789012345678901234567890.12345"}'
+        for precision in (6, 28, 80):
+            with self.subTest(precision=precision), localcontext() as context:
+                context.prec = precision
+                self.assertEqual(canonical_json_bytes({"amount": amount}), expected)
+        self.assertEqual(canonical_json_bytes({"value": Decimal("1000")}), b'{"value":"1000"}')
+
+    def test_non_string_keys_rejected_before_redaction_can_collapse_them(self):
+        initial = verify_audit_chain()
+        with self.assertRaisesMessage(TypeError, "keys must be strings"):
+            with transaction.atomic():
+                self._append(new_state={1: "first", "1": "second"})
+        self.assertEqual(verify_audit_chain(), initial)
+
+    def test_fixed_vector_persists_identical_v1_digest_on_both_engines(self):
+        initial = verify_audit_chain()
+        self.assertEqual(initial["event_count"], 0)
+        moment = datetime(2026, 11, 23, 12, 34, 56, 123456, tzinfo=dt_timezone.utc)
+        identifier = UUID("12345678-1234-5678-1234-567812345678")
+        with (
+            patch("security.audit_chain.uuid4", return_value=identifier),
+            patch("security.audit_chain.timezone.now", return_value=moment),
+            patch("security.audit_chain._request_context", return_value=None),
+            localcontext() as context,
+        ):
+            context.prec = 6
+            event = record_audit_event(
+                action=AuditAction.CREATE, entity="GoldenAuditVector",
+                entity_id="vector-1", reference="AFN",
+                new_state={
+                    "amount": Decimal("123456789012345678901234567890.1234500"),
+                    "moment": moment,
+                    "identifier": UUID("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"),
+                    "label": "بلخ", "integral": 1e20, "zero": -0.0, "fraction": 1.25,
+                },
+                authorization_context={"operation_id": "golden.vector"},
+            )
+        event.refresh_from_db()
+        self.assertEqual(event.new_state["amount"], "123456789012345678901234567890.12345")
+        self.assertIs(type(event.new_state["integral"]), int)
+        self.assertEqual(event.new_state["integral"], 100000000000000000000)
+        self.assertIs(type(event.new_state["zero"]), int)
+        self.assertEqual(event.new_state["zero"], 0)
+        self.assertEqual(event.new_state["fraction"], 1.25)
+        # Independent fixed fixture: SHA256(domain + 32 zero bytes + canonical
+        # UTF-8 JSON). Do not derive expected digest using the code under test.
+        expected = "f5ee217e5676b266a7f4d2af275a320d99938e2b3e7ebb86e9600130d0811d90"
+        self.assertEqual(event.event_hash, expected)
+        self.assertEqual(calculate_event_hash(event.prev_event_hash, immutable_event_payload(event)), expected)
+        self.assertEqual(verify_audit_chain()["head_hash"], expected)
+        print(f"BATCH A GOLDEN DIGEST [{connection.vendor}]: {expected}")
+
+    def test_legacy_v1_float_bytes_are_not_rewritten_by_new_write_normalization(self):
+        self.assertEqual(canonical_json_bytes({"n": 1e20, "z": -0.0}), b'{"n":1e+20,"z":-0.0}')
+
+    def test_verifier_rejects_tampered_hash_link_fork_duplicate_uuid_and_head(self):
+        first = self._append("first")
+        second = self._append("second")
+        third = self._append("third")
+        original = verify_audit_chain()
+        # Use detached in-memory copies: no trigger removal or persistent
+        # mutation is needed to exercise these negative verifier paths.
+        for name in ("hash", "link", "fork", "uuid", "head", "head_locator", "tail"):
+            with self.subTest(name=name):
+                rows = [copy(first), copy(second), copy(third)]
+                head_hash = original["head_hash"]
+                last_id = original["last_event_id"]
+                if name == "hash":
+                    rows[1].event_hash = "f" * 64
+                elif name == "link":
+                    rows[1].prev_event_hash = "e" * 64
+                elif name == "fork":
+                    rows[2].prev_event_hash = rows[1].prev_event_hash
+                elif name == "uuid":
+                    rows[1].event_uuid = rows[0].event_uuid
+                    rows[1].event_hash = calculate_event_hash(rows[1].prev_event_hash, immutable_event_payload(rows[1]))
+                elif name == "head":
+                    head_hash = "0" * 64
+                elif name == "head_locator":
+                    last_id = first.pk
+                elif name == "tail":
+                    rows.pop()
+                with self.assertRaises(AuditChainVerificationError):
+                    verify_audit_chain_records(rows, head_hash=head_hash, last_event_id=last_id)
+        self.assertEqual(verify_audit_chain(), original)
+
+    def test_nested_business_failure_propagates_and_rolls_back_earlier_work(self):
+        initial = verify_audit_chain()
+        with self.assertRaisesMessage(RuntimeError, "nested audit failure"):
+            with transaction.atomic():
+                Category.objects.create(name="batch-a-outer")
+                self._append("outer")
+                with transaction.atomic():
+                    Category.objects.create(name="batch-a-inner")
+                    with patch.object(AuditChainHead, "save", side_effect=RuntimeError("nested audit failure")):
+                        self._append("inner")
+        self.assertFalse(Category.objects.filter(name__startswith="batch-a-").exists())
+        self.assertEqual(verify_audit_chain(), initial)
+
+
+class AuditBatchAFinancialRollbackTests(TestCase):
+    def setUp(self):
+        from accounting.models import Account, AccountType
+        from currencies.models import Currency
+        self.cash = Account.objects.create(code="1100", name="Cash", account_type=AccountType.ASSET)
+        self.revenue = Account.objects.create(code="4100", name="Revenue", account_type=AccountType.REVENUE)
+        self.afn = Currency.objects.create(code="AFN", name="Afghani", is_base=True)
+
+    def _post(self, key):
+        from accounting.services import post_journal
+        return post_journal(
+            number="JE-1405-90001", posting_date="2026-09-06",
+            description="Batch A audited balanced journal", currency=self.afn,
+            lines=[{"account": self.cash, "debit": "125.50"},
+                   {"account": self.revenue, "credit": "125.50"}],
+            idempotency_key=key,
+        )
+
+    def test_post_failure_rolls_back_lines_idempotency_and_chain_then_retry_is_exact(self):
+        from accounting.models import JournalEntry, JournalLine
+        from accounting.services import verify_entry_totals
+        from core.idempotency import IdempotencyRecord
+
+        initial = verify_audit_chain()
+        key = "batch-a-journal-post"
+        before_entries, before_lines = JournalEntry.objects.count(), JournalLine.objects.count()
+        with patch.object(AuditChainHead, "save", side_effect=RuntimeError("financial audit failure")):
+            with self.assertRaisesMessage(RuntimeError, "financial audit failure"):
+                self._post(key)
+        self.assertEqual(JournalEntry.objects.count(), before_entries)
+        self.assertEqual(JournalLine.objects.count(), before_lines)
+        self.assertFalse(IdempotencyRecord.objects.filter(key=key).exists())
+        self.assertEqual(verify_audit_chain(), initial)
+        posted = self._post(key)
+        self.assertEqual(self._post(key).pk, posted.pk)
+        self.assertEqual(JournalEntry.objects.count(), before_entries + 1)
+        self.assertEqual(JournalLine.objects.count(), before_lines + 2)
+        self.assertEqual(verify_entry_totals(posted)["total_debit"], Decimal("125.50"))
+        self.assertEqual(posted.total_debit, posted.total_credit)
+        self.assertEqual(verify_audit_chain()["event_count"], initial["event_count"] + 1)
+
+    def test_reversal_failure_preserves_original_lines_status_sequence_and_chain(self):
+        from accounting.models import JournalEntry, JournalLine, JournalStatus
+        from accounting.services import reverse_journal, verify_entry_totals
+        from documents.models import NumberSequence
+
+        entry = self._post("batch-a-reverse-post")
+        initial = verify_audit_chain()
+        original_lines = list(entry.lines.order_by("pk").values("pk", "account_id", "debit", "credit"))
+        before_entries, before_lines = JournalEntry.objects.count(), JournalLine.objects.count()
+        sequences = list(NumberSequence.objects.order_by("pk").values())
+        with patch.object(AuditChainHead, "save", side_effect=RuntimeError("reversal audit failure")):
+            with self.assertRaisesMessage(RuntimeError, "reversal audit failure"):
+                reverse_journal(entry, "Batch A correction", None)
+        entry.refresh_from_db()
+        self.assertEqual(entry.status, JournalStatus.POSTED)
+        self.assertEqual(list(entry.lines.order_by("pk").values("pk", "account_id", "debit", "credit")), original_lines)
+        self.assertEqual(JournalEntry.objects.count(), before_entries)
+        self.assertEqual(JournalLine.objects.count(), before_lines)
+        self.assertEqual(list(NumberSequence.objects.order_by("pk").values()), sequences)
+        self.assertEqual(verify_audit_chain(), initial)
+        reversal = reverse_journal(entry, "Batch A correction", None)
+        entry.refresh_from_db()
+        self.assertEqual(entry.status, JournalStatus.REVERSED)
+        self.assertEqual(reversal.reverses_id, entry.pk)
+        self.assertEqual(verify_entry_totals(reversal)["total_debit"], Decimal("125.50"))
+        self.assertEqual(reversal.total_debit, reversal.total_credit)
+        self.assertEqual(list(reversal.lines.order_by("pk").values_list("account_id", "debit", "credit")),
+                         [(line["account_id"], line["credit"], line["debit"]) for line in original_lines])
         self.assertEqual(verify_audit_chain()["event_count"], initial["event_count"] + 1)

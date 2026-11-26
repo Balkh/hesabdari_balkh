@@ -44,7 +44,10 @@ def _canonical_value(value):
             raise TypeError("non-finite Decimal values are not permitted in audit metadata")
         if value == 0:
             return "0"
-        return format(value.normalize(), "f")
+        # Decimal.normalize() rounds using the ambient decimal context.
+        # Fixed-point formatting preserves every digit regardless of precision.
+        fixed = format(value, "f")
+        return fixed.rstrip("0").rstrip(".") if "." in fixed else fixed
     if isinstance(value, datetime):
         if timezone.is_naive(value):
             raise TypeError("naive datetimes are not permitted in audit metadata")
@@ -138,7 +141,9 @@ def _redact_sensitive(value):
     if isinstance(value, dict):
         result = {}
         for key, item in value.items():
-            normalized = "".join(ch for ch in str(key).lower() if ch.isalnum())
+            if not isinstance(key, str):
+                raise TypeError("audit metadata object keys must be strings")
+            normalized = "".join(ch for ch in key.lower() if ch.isalnum())
             if normalized in _SENSITIVE_AUDIT_KEYS or any(
                 marker in normalized
                 for marker in ("password", "totp", "recoverycode", "privatekey", "ciphertext")
@@ -152,6 +157,23 @@ def _redact_sensitive(value):
     if isinstance(value, str):
         return _redact_text(value)
     return value
+
+
+def _persisted_metadata(value):
+    """Normalize new JSON metadata before hashing and persistence.
+
+    JSONB can turn integral floats (notably exponent notation and signed
+    zero) into integers. Normalize those numbers before INSERT on both
+    engines. Do not apply this new-write rule when hashing historical rows:
+    their stored v1 representation must remain verifiable.
+    """
+    if isinstance(value, float) and math.isfinite(value) and value.is_integer():
+        return int(value)
+    if isinstance(value, dict):
+        return {key: _persisted_metadata(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_persisted_metadata(item) for item in value]
+    return _canonical_value(value)
 
 
 def _request_context():
@@ -305,13 +327,13 @@ def append_audit_event(
         # Normalize JSONField payloads to their exact persisted representation
         # before hashing; the JSON encoder must not transform Decimal, UUID or
         # datetime values after the digest has been calculated.
-        previous_state=_canonical_value(_redact_sensitive(previous_state)),
-        new_state=_canonical_value(_redact_sensitive(new_state)),
+        previous_state=_persisted_metadata(_redact_sensitive(previous_state)),
+        new_state=_persisted_metadata(_redact_sensitive(new_state)),
         reason=_redact_text(reason or ""),
         event_uuid=uuid4(),
         prev_event_hash=head.head_hash,
-        actor_snapshot=_canonical_value(_redact_sensitive(_actor_snapshot(user, now))),
-        authorization_context=_canonical_value(
+        actor_snapshot=_persisted_metadata(_redact_sensitive(_actor_snapshot(user, now))),
+        authorization_context=_persisted_metadata(
             _redact_sensitive(_authorization_snapshot(request, authorization_context))
         ),
         source_fingerprint=_source_fingerprint(request),

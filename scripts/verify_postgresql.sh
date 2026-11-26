@@ -13,6 +13,8 @@ printf 'PostgreSQL verification (DJANGO_SETTINGS_MODULE=%s)\n' "$DJANGO_SETTINGS
 
 "$PYTHON" manage.py check
 "$PYTHON" manage.py migrate --no-input
+printf "\nW0-2E Batch A targeted checks (PostgreSQL)\n"
+"$PYTHON" manage.py test security.test_audit_chain.AuditBatchAIntegrityTests security.test_audit_chain.AuditBatchAFinancialRollbackTests --verbosity=2
 "$PYTHON" manage.py test
 DJANGO_SETTINGS_MODULE="$DJANGO_SETTINGS_MODULE" "$PYTHON" -m pytest -q
 
