@@ -142,6 +142,37 @@ def _line_rows(lines):
     return rows
 
 
+def _sale_audit_snapshot(sale):
+    return {
+        "status": sale.status, "customer_id": sale.customer_id,
+        "sale_date": sale.sale_date, "currency_id": sale.currency_id,
+        "exchange_rate": sale.exchange_rate, "rate_date": sale.rate_date,
+        "sale_type": sale.sale_type, "channel": sale.channel, "payment_mode": sale.payment_mode,
+        "subtotal": sale.subtotal, "total_discount": sale.total_discount, "total": sale.total,
+        "journal_entry_id": sale.journal_entry_id, "finalized_at": sale.finalized_at,
+        "lines": list(sale.lines.order_by("pk").values("id", "product_id", "unit_id",
+                      "quantity", "unit_price", "discount", "line_total", "net_total", "transit_lot_id")),
+        "allocations": list(SaleLineWarehouseAllocation.objects.filter(sale_line__sale=sale)
+                            .order_by("pk").values("sale_line_id", "warehouse_id", "quantity",
+                                                   "stock_movement_id", "cogs_journal_id")),
+    }
+
+
+def _check_audit_snapshot(check):
+    return {
+        "status": check.status, "sale_id": check.sale_id, "sale_line_id": check.sale_line_id,
+        "warehouse_id": check.warehouse_id, "quantity": check.quantity,
+        "stock_movement_id": check.stock_movement_id, "cogs_journal_id": check.cogs_journal_id,
+        "finalized_at": check.finalized_at,
+    }
+
+
+def _record_check_post(check, actor, before):
+    record_audit_event(user=actor, action=AuditAction.POST, entity="WarehouseCheck",
+                       entity_id=check.pk, reference=check.number,
+                       previous_state=before, new_state=_check_audit_snapshot(check))
+
+
 def create_sale(*, customer, sale_date, currency, channel, payment_mode,
                 lines, sale_type=SaleType.AVAILABLE, rate=None, rate_date=None,
                 user=None, document_number=None):
@@ -159,11 +190,11 @@ def create_sale(*, customer, sale_date, currency, channel, payment_mode,
     rows = _line_rows(lines)
     if sale_type == SaleType.FUTURE and any(row["transit_lot"] is not None for row in rows):
         raise SalesValidationError("A Future sale cannot consume company-owned Transit goods.")
-    if not document_number:
-        from documents.services import next_document_number
-        from core.dates import gregorian_to_jalali
-        document_number = next_document_number("SI", int(gregorian_to_jalali(sale_day).split("/")[0]))
     with transaction.atomic():
+        if not document_number:
+            from documents.services import next_document_number
+            from core.dates import gregorian_to_jalali
+            document_number = next_document_number("SI", int(gregorian_to_jalali(sale_day).split("/")[0]))
         sale = Sale.objects.create(
             document_number=document_number, customer=customer, sale_date=sale_day,
             currency=currency, exchange_rate=rate_value, rate_date=rate_day,
@@ -183,6 +214,9 @@ def create_sale(*, customer, sale_date, currency, channel, payment_mode,
                     quantity=alloc["quantity"],
                     idempotency_key=f"sale-line-intent:{line.pk}:{alloc['warehouse'].pk}",
                 )
+        record_audit_event(user=actor, action=AuditAction.CREATE, entity="Sale",
+                           entity_id=sale.pk, reference=sale.document_number,
+                           new_state=_sale_audit_snapshot(sale))
     return sale
 
 
@@ -207,6 +241,7 @@ def finalize_sale(*, sale, user=None, idempotency_key=None, allocations=None,
             return sale
         if sale.status != SaleStatus.DRAFT:
             raise SalesValidationError("Only draft Sales can be finalized")
+        before = _sale_audit_snapshot(sale)
         assert_posting_date_open(sale.sale_date)
         revenue = Account.objects.get(code=REVENUE_ACCOUNTS[sale.channel])
         debit = Account.objects.get(code=CASH_ACCOUNT if sale.payment_mode == PaymentMode.CASH else RECEIVABLE_ACCOUNT)
@@ -371,6 +406,9 @@ def finalize_sale(*, sale, user=None, idempotency_key=None, allocations=None,
                     user=actor,
                     idempotency_key=f"sale:{sale.pk}:line:{line.pk}:ownership",
                 )
+        record_audit_event(user=actor, action=AuditAction.POST, entity="Sale",
+                           entity_id=sale.pk, reference=sale.document_number,
+                           previous_state=before, new_state=_sale_audit_snapshot(sale))
     return sale
 
 
@@ -381,8 +419,10 @@ def remaining_quantity(line):
     return line.quantity - used
 
 
-def prepare_warehouse_check(*, sale_line, warehouse, quantity=None, number=None):
-    line = SaleLine.objects.select_related("sale", "product", "unit").get(pk=getattr(sale_line, "pk", sale_line))
+@transaction.atomic
+def prepare_warehouse_check(*, sale_line, warehouse, quantity=None, number=None, user=None):
+    actor = _actor(user)
+    line = SaleLine.objects.select_for_update().get(pk=getattr(sale_line, "pk", sale_line))
     warehouse = resolve_warehouse(warehouse)
     if not warehouse.is_active:
         raise SalesValidationError("Warehouse is inactive")
@@ -395,8 +435,12 @@ def prepare_warehouse_check(*, sale_line, warehouse, quantity=None, number=None)
         raise SalesValidationError("Check quantity exceeds the remaining Invoice Line quantity")
     if not number:
         number = f"WC-{line.sale.document_number}-{line.pk}-{line.warehouse_checks.count()+1}"
-    return WarehouseCheck.objects.create(number=number, sale=line.sale, sale_line=line,
-                                         warehouse=warehouse, quantity=quantity)
+    check = WarehouseCheck.objects.create(number=number, sale=line.sale, sale_line=line,
+                                          warehouse=warehouse, quantity=quantity)
+    record_audit_event(user=actor, action=AuditAction.CREATE, entity="WarehouseCheck",
+                       entity_id=check.pk, reference=check.number,
+                       new_state=_check_audit_snapshot(check))
+    return check
 
 
 def finalize_warehouse_check(*, check, user=None, acknowledge_negative=False,
@@ -412,6 +456,7 @@ def finalize_warehouse_check(*, check, user=None, acknowledge_negative=False,
             raise SalesValidationError("A reversed Warehouse Check cannot be finalized again")
         if check.status == CheckStatus.FINALIZED:
             return check
+        before = _check_audit_snapshot(check)
         line = SaleLine.objects.select_for_update().get(pk=check.sale_line_id)
         if check.sale_id != line.sale_id:
             raise SalesValidationError("Warehouse Check must belong to its Sales Invoice Line")
@@ -470,6 +515,7 @@ def finalize_warehouse_check(*, check, user=None, acknowledge_negative=False,
             check.status = CheckStatus.FINALIZED
             check.finalized_at = timezone.now()
             check.save(update_fields=["status", "finalized_at"])
+            _record_check_post(check, actor, before)
             return check
 
         if SaleLineWarehouseAllocation.objects.filter(sale_line=line).exists():
@@ -509,6 +555,7 @@ def finalize_warehouse_check(*, check, user=None, acknowledge_negative=False,
             check.status = CheckStatus.FINALIZED
             check.finalized_at = timezone.now()
             check.save(update_fields=["status", "finalized_at"])
+            _record_check_post(check, actor, before)
             return check
 
         movement_holder = {}
@@ -565,6 +612,7 @@ def finalize_warehouse_check(*, check, user=None, acknowledge_negative=False,
                 warehouse=check.warehouse, original_quantity=check.quantity,
                 temporary_unit_cost_afn=movement.unit_cost_afn, movement_date=check.sale.sale_date,
             )
+        _record_check_post(check, actor, before)
     return check
 
 

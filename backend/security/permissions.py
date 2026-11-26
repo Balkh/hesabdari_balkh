@@ -34,6 +34,19 @@ class HasErpOperation(BasePermission):
                 settings, "ERP_RBAC_ALLOW_AUTHENTICATED_ONLY", False
             )
             if auth_only_bypass is True:
+                operation_map = getattr(view.__class__, "erp_operation_specs", {})
+                method = request.method.upper()
+                if method == "HEAD":
+                    method = "GET"
+                operation = operation_map.get(method)
+                raw_request = getattr(request, "_request", request)
+                raw_request._erp_authorization_audit_context = {
+                    "mode": "AUTHENTICATED_COMPATIBILITY",
+                    "operation_id": getattr(operation, "operation_id", None),
+                    "permission_key": getattr(operation, "permission_key", None),
+                    "method": method,
+                    "decision": "ALLOW_AUTHENTICATED_COMPATIBILITY",
+                }
                 return True
             logger.error(
                 "ERP_RBAC_ENFORCEMENT is disabled and authenticated-only bypass is not enabled"
@@ -81,12 +94,59 @@ class HasErpOperation(BasePermission):
             return False
 
         if not decision.allowed:
-            request._erp_authorization_denial = {
+            denial = {
                 "operation_id": operation.operation_id,
                 "permission_key": operation.permission_key,
                 "reason": decision.reason,
             }
+            request._erp_authorization_denial = denial
+            raw_request = getattr(request, "_request", request)
+            audit_context = {
+                "mode": "RBAC",
+                "operation_id": operation.operation_id,
+                "permission_key": operation.permission_key,
+                "method": method,
+                "decision": "DENY",
+                "decision_reason": decision.reason,
+                "decision_source": decision.source,
+                "target_kind": getattr(target_reference, "target_kind", None),
+                "target_id": str(getattr(target_reference, "pk", "")) if target_reference else None,
+            }
+            raw_request._erp_authorization_audit_context = audit_context
+            try:
+                from django.db import transaction
+                from security.models import AuditAction
+                from security.services import record_audit_event
+
+                with transaction.atomic():
+                    record_audit_event(
+                        user=user,
+                        action=AuditAction.PERMISSION_DENIED,
+                        entity="AUTHORIZATION",
+                        entity_id=operation.operation_id,
+                        new_state=denial,
+                        reason=decision.reason,
+                        authorization_context=audit_context,
+                    )
+            except Exception:
+                logger.exception(
+                    "permission denial could not be written to the audit chain",
+                    extra={"operation_id": operation.operation_id},
+                )
             return False
+
+        raw_request = getattr(request, "_request", request)
+        raw_request._erp_authorization_audit_context = {
+            "mode": "RBAC",
+            "operation_id": operation.operation_id,
+            "permission_key": operation.permission_key,
+            "method": method,
+            "decision": "ALLOW",
+            "decision_reason": decision.reason,
+            "decision_source": decision.source,
+            "target_kind": getattr(target_reference, "target_kind", None),
+            "target_id": str(getattr(target_reference, "pk", "")) if target_reference else None,
+        }
         return True
 
 

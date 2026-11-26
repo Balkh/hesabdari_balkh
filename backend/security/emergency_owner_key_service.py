@@ -34,10 +34,11 @@ from security.mfa_models import (
 )
 from security.models import (
     AuditAction,
-    AuditEvent,
     GMRoleSlot,
     UserRoleAssignment,
 )
+
+from security.services import record_audit_event
 
 OWNER_KEY_SCOPE = SecurityEmergencyOwnerKey.GM_RECOVERY
 OWNER_KEY_SOURCE_INITIAL = SecurityEmergencyOwnerKey.SOURCE_INITIAL_BOOTSTRAP
@@ -218,7 +219,7 @@ def issue_gm_emergency_owner_key(
             issued_at=now,
             issued_by=current_user,
         )
-        AuditEvent.objects.create(
+        record_audit_event(
             user=current_user,
             action=AuditAction.UPDATE,
             entity="GM_EMERGENCY_OWNER_KEY",
@@ -341,9 +342,9 @@ def recover_existing_gm_offline(
             issued_at=now,
             issued_by=gm_user,
         )
-        AuditEvent.objects.create(
+        record_audit_event(
             user=gm_user,
-            action=AuditAction.UPDATE,
+            action=AuditAction.ACCOUNT_EMERGENCY_RECOVERY,
             entity="GM_EMERGENCY_RECOVERY",
             entity_id=str(gm_user.pk),
             previous_state={

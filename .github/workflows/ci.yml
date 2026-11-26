@@ -68,6 +68,31 @@ jobs:
           python-version: "3.13"
       - run: python -m venv backend/.venv
       - run: backend/.venv/bin/python -m pip install -r requirements.txt
+      - name: Provision matching PostgreSQL 17 client tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Ubuntu's default repository may ship a different major version.
+          # Use the official PGDG repository and independently check its key.
+          # https://www.postgresql.org/download/linux/ubuntu/
+          . /etc/os-release
+          test "$ID" = ubuntu
+          key=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl --fail --silent --show-error --location \
+            --retry 3 -o "$key" https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          fingerprint="$(gpg --batch --show-keys --with-colons "$key" | awk -F: '$1=="fpr" {print $10; exit}')"
+          test "$fingerprint" = B97B0AFCAA1A47F044F244A07FCC7D46ACCC4CF8
+          printf 'deb [signed-by=%s] https://apt.postgresql.org/pub/repos/apt %s-pgdg main\n' \
+            "$key" "$VERSION_CODENAME" | sudo tee /etc/apt/sources.list.d/hesabdari-pgdg.list
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends postgresql-client-17
+          bin=/usr/lib/postgresql/17/bin
+          for tool in pg_dump pg_restore createdb dropdb; do
+            "$bin/$tool" --version | tee /tmp/"$tool"-version
+            grep -Eq 'PostgreSQL\) 17\.' /tmp/"$tool"-version
+          done
+          echo "$bin" >> "$GITHUB_PATH"
       - run: scripts/verify_postgresql.sh
 
 
@@ -87,15 +112,38 @@ jobs:
         run: |
           python -c "import getpass, platform, sys; print(platform.platform()); print('Python:', sys.version); print('Process user:', getpass.getuser())"
           whoami /user
+      # cryptography >=46.0.4 no longer publishes win_arm64 wheels.
+      # Provide native ARM64 OpenSSL for its source build, without changing runtime constraints.
+      - name: Provision native ARM64 OpenSSL for source build
+        if: matrix.runner == 'windows-11-arm'
+        shell: pwsh
+        run: |
+          python -c "import platform; assert platform.machine().lower() == 'arm64', platform.machine()"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $root = Join-Path $env:RUNNER_TEMP "vcpkg-arm64"
+          git clone --depth 1 --branch 2026.10.16 https://github.com/microsoft/vcpkg.git $root
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & (Join-Path $root "bootstrap-vcpkg.bat") -disableMetrics
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & (Join-Path $root "vcpkg.exe") install openssl:arm64-windows-static-md --host-triplet arm64-windows --classic
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "VCPKG_ROOT=$root" >> $env:GITHUB_ENV
+          "VCPKGRS_TRIPLET=arm64-windows-static-md" >> $env:GITHUB_ENV
+          & (Join-Path $root "vcpkg.exe") list
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Install isolated evaluation dependency
-        run: python -m pip install --disable-pip-version-check "pytest>=8.0,<9.0"
+        run: python -m pip install --disable-pip-version-check "pytest>=8.0,<9.0" "cryptography>=44,<47"
+      - name: Install desktop SQLite runtime test dependencies
+        run: python -m pip install --disable-pip-version-check "Django>=5.2,<6.0" "djangorestframework>=3.16,<4.0" "jdatetime>=5.2,<6.0"
+      - name: Verify installed cryptography backend
+        run: python -c "import platform, cryptography; from cryptography.hazmat.backends.openssl.backend import backend; print(platform.machine(), cryptography.__version__, backend.openssl_version_text())"
       - name: Probe DPAPI CurrentUser and Credential Manager
         shell: pwsh
         working-directory: backend
         run: |
           $config = Join-Path $env:RUNNER_TEMP "pytest-windows.ini"
           Set-Content -Path $config -Value "[pytest]" -Encoding ascii
-          python -m pytest -c $config -q security/test_windows_key_custody_eval.py security/test_windows_key_provider.py security/test_windows_session_probe.py
+          python -m pytest -c $config -q -s security/test_windows_key_custody_eval.py security/test_windows_key_provider.py security/test_windows_session_probe.py
   tauri:
     runs-on: ubuntu-latest
     steps:

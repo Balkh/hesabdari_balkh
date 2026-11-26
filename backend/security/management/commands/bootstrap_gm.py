@@ -42,11 +42,12 @@ from security.mfa_models import (
 )
 from security.models import (
     AuditAction,
-    AuditEvent,
     GMRoleSlot,
     Role,
     UserRoleAssignment,
 )
+
+from security.services import record_audit_event
 
 TOTP_PURPOSE = "totp"
 
@@ -251,9 +252,9 @@ class Command(BaseCommand):
 
             token_row.consumed_at = now
             token_row.save(update_fields=["consumed_at"])
-            AuditEvent.objects.create(
+            record_audit_event(
                 user=user,
-                action=AuditAction.CREATE,
+                action=AuditAction.ACCOUNT_BOOTSTRAP,
                 entity="GM_BOOTSTRAP",
                 entity_id=str(user.pk),
                 new_state={

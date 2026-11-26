@@ -8,7 +8,8 @@ from django.utils import timezone
 
 from security.gm_slot import GM_SLOT_CODE, load_singleton_slot
 from security.mfa_models import MFADeviceStatus, SecurityMFADevice, SecurityMFARequirement
-from security.models import AuditAction, AuditEvent
+from security.models import AuditAction
+from security.services import record_audit_event
 
 
 def is_active_gm_holder(user, *, at=None) -> bool:
@@ -99,7 +100,7 @@ def set_employee_mfa_requirement(actor, target, *, required: bool, reason: str, 
                 policy.updated_by = locked_actor
                 policy.reason = clean_reason
                 policy.save(update_fields=["is_required", "updated_by", "reason", "updated_at"])
-            AuditEvent.objects.create(
+            record_audit_event(
                 user=locked_actor,
                 action=AuditAction.UPDATE,
                 entity="MFA_REQUIREMENT",

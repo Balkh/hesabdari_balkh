@@ -29,7 +29,9 @@ from django.contrib.auth import get_user_model
 from django.core.management import call_command
 from django.core.management.base import CommandError
 from django.db import connection, transaction
-from django.test import TestCase, TransactionTestCase
+from django.db.models import Q
+from django.test import TestCase
+from security.test_support import AuditTriggerAwareTransactionTestCase
 from django.utils import timezone
 
 from security import authorization
@@ -353,7 +355,7 @@ class SlotClaimCardinalityTests(TestCase):
 # ---------------------------------------------------------------------------
 # Concurrency — two real competing claims (separate connections/threads)
 # ---------------------------------------------------------------------------
-class ConcurrentSlotClaimTests(TransactionTestCase):
+class ConcurrentSlotClaimTests(AuditTriggerAwareTransactionTestCase):
     def setUp(self):
         _reseed_rbac_catalog()
 
@@ -421,7 +423,7 @@ class ConcurrentSlotClaimTests(TransactionTestCase):
     "Row-lock CAS conflict evidence is verified on PostgreSQL 17.11 "
     "(repo concurrency-test convention); SQLite cannot provide it",
 )
-class PostgreSQLConcurrentSlotClaimTests(TransactionTestCase):
+class PostgreSQLConcurrentSlotClaimTests(AuditTriggerAwareTransactionTestCase):
     """Strict PostgreSQL evidence: two independent connections race the
     compare-and-set claim. On PostgreSQL the loser MUST receive the clean
     domain conflict (the winner's row lock blocks the loser's CAS UPDATE,
@@ -477,7 +479,7 @@ class PostgreSQLConcurrentSlotClaimTests(TransactionTestCase):
 # ---------------------------------------------------------------------------
 # Migration 0005 behavior
 # ---------------------------------------------------------------------------
-class SingletonSlotMigrationTests(TransactionTestCase):
+class SingletonSlotMigrationTests(AuditTriggerAwareTransactionTestCase):
     """Migration 0005 behavior against the real migration runner.
 
     ``TransactionTestCase`` is required: reversing/applying migrations
@@ -491,6 +493,12 @@ class SingletonSlotMigrationTests(TransactionTestCase):
         _reseed_rbac_catalog()
 
     def _reverse_to_0004(self):
+        # This test must exercise the legacy GM-slot migration on an empty,
+        # disposable pre-W0-2E audit history. The chain backfill is intentionally
+        # irreversible once any event exists, so recreate the test DB rather
+        # than deleting or bypassing audit rows.
+        self.reset_test_database()
+        _reseed_rbac_catalog()
         call_command("migrate", "security", "0004", verbosity=0, interactive=False)
 
     def _apply_all(self):
@@ -511,8 +519,27 @@ class SingletonSlotMigrationTests(TransactionTestCase):
 
     def test_exactly_one_candidate_is_linked_automatically(self):
         self._reverse_to_0004()
+        at = timezone.now()
+        preexisting = list(
+            UserRoleAssignment.objects.filter(
+                role__code=GM_SLOT_CODE,
+                revoked_at__isnull=True,
+                start_at__lte=at,
+            ).filter(Q(end_at__isnull=True) | Q(end_at__gt=at))
+            .values_list("pk", "user_id", "reason")
+        )
+        self.assertEqual(preexisting, [], f"unexpected active GM assignments before fixture: {preexisting}")
         user = User.objects.create_user(username="legacy-super", is_superuser=True)
         assignment = _unlinked_gm_assignment(user)
+        at = timezone.now()
+        self.assertEqual(
+            UserRoleAssignment.objects.filter(
+                role__code=GM_SLOT_CODE,
+                revoked_at__isnull=True,
+                start_at__lte=at,
+            ).filter(Q(end_at__isnull=True) | Q(end_at__gt=at)).count(),
+            1,
+        )
         # Pre-migration state is unmigrated state, not an inconsistency:
         # E004 must not pre-block the migration that owns the linking.
         self.assertEqual(check_gm_singleton_slot_for_alias("default"), [])
@@ -622,12 +649,22 @@ class SingletonSlotMigrationTests(TransactionTestCase):
         self.assertEqual(GMRoleSlot.objects.get().assignment_id, a1.pk)
 
     def test_reverse_preserves_assignment_history_and_reapplies(self):
+        # W0-2E note: the append-only guards intentionally REFUSE downgrades
+        # once any audit event exists (migration 0017 reverse guard + the
+        # irreversible chain backfill), so the historical "claim, then
+        # reverse" flow can no longer run against a history-bearing ledger.
+        # This test therefore exercises the still-supported empty-ledger
+        # downgrade path: a freshly rebuilt database (zero audit events) is
+        # downgraded to 0004, pre-existing assignment rows must survive the
+        # downgrade verbatim, and re-application must reconcile the same
+        # single candidate again. History-bearing downgrade refusal is
+        # covered by security.test_audit_chain.AuditChainReversalGuardTests.
+        self.reset_test_database()
+        _reseed_rbac_catalog()
         user = User.objects.create_user(username="reverse-holder", is_superuser=True)
         assignment = _unlinked_gm_assignment(user)
-        claim_gm_slot(assignment)
-        self.assertEqual(GMRoleSlot.objects.get().assignment_id, assignment.pk)
 
-        self._reverse_to_0004()
+        call_command("migrate", "security", "0004", verbosity=0, interactive=False)
         self.assertFalse(self._slot_table_exists())
         # Every pre-existing UserRoleAssignment row is preserved exactly.
         self.assertTrue(

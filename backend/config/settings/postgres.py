@@ -12,6 +12,10 @@ import os
 
 from .base import *
 
+ERP_TEST_ORIGINAL_DATABASE_NAMES = {
+    "default": os.getenv("POSTGRES_DB", "erp_afghanistan"),
+}
+
 DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.postgresql",

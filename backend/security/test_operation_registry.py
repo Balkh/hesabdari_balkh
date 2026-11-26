@@ -6,6 +6,7 @@ from django.test import SimpleTestCase
 import security.views
 import security.auth_views
 import security.mfa_views
+import security.audit_views
 import fiscal_periods.views
 import purchases.landed_cost_views
 
@@ -93,10 +94,12 @@ class OperationSpecValidationTests(SimpleTestCase):
         self.assertEqual(operation.target_source, TARGET_URL_KWARG)
         self.assertEqual(operation.target_kwarg, "user_id")
 
-    def test_mounted_route_inventory_has_eighteen_unique_operations(self):
+    def test_mounted_route_inventory_has_twenty_three_unique_operations(self):
         expected = {
             "security.me.retrieve",
             "security.auth.logout_own",
+            "security.lockout.review",
+            "security.account.unlock",
             "security.mfa.policy.update_employee",
             "security.mfa.enroll.start_own",
             "security.mfa.enroll.confirm_own",
@@ -113,9 +116,12 @@ class OperationSpecValidationTests(SimpleTestCase):
             "purchases.landedcost.object.retrieve",
             "purchases.landedcost.object.post",
             "purchases.landedcost.object.reverse",
+            "security.audit.events.list",
+            "security.audit.integrity.view",
+            "security.audit.events.export",
         }
         self.assertEqual(set(OPERATION_SPECS), expected)
-        self.assertEqual(len(OPERATION_SPECS), 18)
+        self.assertEqual(len(OPERATION_SPECS), 23)
 
     def test_shared_permission_key_can_have_distinct_collection_and_object_operations(self):
         collection = OPERATION_SPECS["purchases.landedcost.collection.list"]

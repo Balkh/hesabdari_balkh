@@ -12,7 +12,8 @@ from django.db import transaction
 from django.utils import timezone
 
 from security.gm_slot import GM_SLOT_CODE, inspect_slot_consistency
-from security.models import AuditAction, AuditEvent, GMRoleSlot, UserRoleAssignment
+from security.models import AuditAction, GMRoleSlot, UserRoleAssignment
+from security.services import record_audit_event
 from security.mfa_models import SecurityBootstrapToken
 
 TOKEN_LIFETIME = timedelta(minutes=10)
@@ -66,9 +67,9 @@ class Command(BaseCommand):
                 issued_at=now,
                 expires_at=now + TOKEN_LIFETIME,
             )
-            AuditEvent.objects.create(
+            record_audit_event(
                 user=None,
-                action=AuditAction.CREATE,
+                action=AuditAction.ACCOUNT_BOOTSTRAP,
                 entity="GM_BOOTSTRAP_TOKEN",
                 entity_id=str(record.pk),
                 new_state={"purpose": SecurityBootstrapToken.INITIAL_GM, "expires_at": record.expires_at.isoformat()},

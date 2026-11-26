@@ -21,7 +21,8 @@ from security.mfa import (
     matching_totp_counter,
     verify_recovery_code,
 )
-from security.models import AuditAction, AuditEvent
+from security.models import AuditAction
+from security.services import record_audit_event
 from security.mfa_models import (
     MFADeviceStatus,
     SecurityMFADevice,
@@ -109,7 +110,7 @@ def begin_mfa_enrollment(user, *, provider: KeyProvider, issuer: str = "Hesabdar
             secret_nonce=envelope.nonce,
             secret_ciphertext=envelope.ciphertext,
         )
-        AuditEvent.objects.create(
+        record_audit_event(
             user=user,
             action=AuditAction.CREATE,
             entity="MFA_DEVICE",
@@ -181,9 +182,9 @@ def confirm_mfa_enrollment(
                         SecurityRecoveryCode(user=user, code_hash=hash_recovery_code(raw))
                         for raw in recovery_codes
                     ])
-                    AuditEvent.objects.create(
+                    record_audit_event(
                         user=user,
-                        action=AuditAction.UPDATE,
+                        action=AuditAction.MFA_ENROLLED,
                         entity="MFA_DEVICE",
                         entity_id=str(device.pk),
                         previous_state={"status": MFADeviceStatus.PENDING},
@@ -289,9 +290,9 @@ def rotate_recovery_codes(user, *, password, totp_code=None, recovery_code=None,
             SecurityRecoveryCode(user=locked_user, code_hash=hash_recovery_code(raw))
             for raw in codes
         ])
-        AuditEvent.objects.create(
+        record_audit_event(
             user=locked_user,
-            action=AuditAction.UPDATE,
+            action=AuditAction.RECOVERY_CODES_ROTATED,
             entity="MFA_RECOVERY_CODES",
             entity_id=str(locked_user.pk),
             new_state={"active_code_count": 10},
@@ -345,9 +346,9 @@ def disable_employee_mfa(
             user=locked_user, used_at__isnull=True
         ).update(used_at=now)
         revoked = revoke_all_login_sessions(locked_user, reason="MFA_DISABLED", at=now)
-        AuditEvent.objects.create(
+        record_audit_event(
             user=locked_user,
-            action=AuditAction.UPDATE,
+            action=AuditAction.MFA_REVOKED,
             entity="MFA_DEVICE",
             entity_id=str(device.pk),
             previous_state={"status": MFADeviceStatus.ACTIVE},
