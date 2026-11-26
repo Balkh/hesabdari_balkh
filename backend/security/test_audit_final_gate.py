@@ -21,20 +21,29 @@ from payments.services import create_payment
 from security.audit_chain import assert_audit_trigger_schema, verify_audit_chain
 from security.models import AuditAction, AuditChainHead, AuditEvent
 from security.services import record_audit_event
+from security.test_support import AuditTriggerAwareTransactionTestCase
 
 
-class FinalAuditGuardTests(TestCase):
+class FinalAuditGuardTests(AuditTriggerAwareTransactionTestCase):
     def test_database_rejects_replacement_or_truncate_and_bulk_mutation(self):
-        first = record_audit_event(action=AuditAction.CREATE, entity="FinalGate", entity_id="1")
-        second = record_audit_event(action=AuditAction.CREATE, entity="FinalGate", entity_id="2")
+        # Commit the fixture before testing destructive SQL. Django TestCase
+        # leaves deferred FK trigger events pending in its outer transaction;
+        # PostgreSQL would reject TRUNCATE before reaching our security guard.
+        # The disposable DB is recreated by the trigger-aware fixture.
+        with transaction.atomic():
+            first = record_audit_event(action=AuditAction.CREATE, entity="FinalGate", entity_id="1")
+            second = record_audit_event(action=AuditAction.CREATE, entity="FinalGate", entity_id="2")
+        self.assertTrue(connection.get_autocommit())
+        self.assertFalse(connection.in_atomic_block)
         before = verify_audit_chain()
         assert_audit_trigger_schema()
-        with self.assertRaises(DatabaseError):
+        with self.assertRaisesMessage(DatabaseError, "is append-only"):
             with transaction.atomic():
                 AuditEvent.objects.all().update(reason="forbidden")
-        with self.assertRaises(DatabaseError):
+        with self.assertRaisesMessage(DatabaseError, "is append-only"):
             with transaction.atomic():
-                AuditEvent.objects.all().delete()
+                with connection.cursor() as cursor:
+                    cursor.execute("DELETE FROM security_auditevent")
         if connection.vendor == "sqlite":
             # Test the schema guard even with recursive DELETE triggers off.
             with connection.cursor() as cursor:
@@ -65,10 +74,14 @@ class FinalAuditGuardTests(TestCase):
         self.assertEqual(verify_audit_chain(), before)
         self.assertEqual(AuditEvent.objects.get(pk=first.pk).reason, first.reason)
         self.assertEqual(AuditEvent.objects.get(pk=second.pk).reason, second.reason)
-        third = record_audit_event(action=AuditAction.CREATE, entity="FinalGate", entity_id="3")
+        with transaction.atomic():
+            third = record_audit_event(action=AuditAction.CREATE, entity="FinalGate", entity_id="3")
         self.assertEqual(third.prev_event_hash, before["head_hash"])
         self.assertEqual(verify_audit_chain()["event_count"], before["event_count"] + 1)
+        print(f"FINAL GATE GUARDS [{connection.vendor}]: committed history preserved; exact guard rejection; append verified")
 
+
+class FinalAuditLoadTests(TestCase):
     def test_large_chain_measurement_checks_all_1000_events(self):
         before = verify_audit_chain()
         started = perf_counter()
