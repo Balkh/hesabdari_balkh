@@ -155,7 +155,7 @@ def open_recovery_bundle(path, *, recovery_secret, trusted_public_sha256):
 
 def verify_offline_recovery(*, backup_path, checkpoint_path, bundle_path,
                             recovery_secret, trusted_public_sha256, vendor,
-                            restore_database_config=None):
+                            restore_database_config=None, trusted_checkpoint_sha256=None):
     """Verify into disposable storage without querying or mutating an ERP user DB.
 
     The PostgreSQL target must be a separately authorized isolated server.
@@ -175,4 +175,5 @@ def verify_offline_recovery(*, backup_path, checkpoint_path, bundle_path,
     return verify_encrypted_database_backup(
         backup_path, checkpoint_path, provider=provider, expected_vendor=vendor,
         restore_database_config=restore_database_config,
+        trusted_checkpoint_sha256=trusted_checkpoint_sha256,
     )

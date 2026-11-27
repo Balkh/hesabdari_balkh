@@ -380,10 +380,25 @@ def verify_signed_checkpoint(
     checkpoint_path: str | Path,
     *,
     provider: BackupKeyProvider,
+    trusted_checkpoint_sha256: str | None = None,
 ) -> dict:
     """Verify both the Ed25519 signature and the independently trusted public key."""
+    # Pin the exact bytes used for signature verification, not a second read.
+    # A public-key pin alone cannot distinguish older valid signed manifests.
+    if trusted_checkpoint_sha256 is not None:
+        if (not isinstance(trusted_checkpoint_sha256, str)
+                or len(trusted_checkpoint_sha256) != 64
+                or any(c not in "0123456789abcdef" for c in trusted_checkpoint_sha256)):
+            raise BackupError("independent checkpoint SHA-256 must be 64 lowercase hexadecimal characters")
     try:
-        envelope = json.loads(Path(checkpoint_path).read_text(encoding="utf-8"))
+        raw = Path(checkpoint_path).read_bytes()
+    except OSError:
+        raise BackupError("audit checkpoint cannot be read") from None
+    if trusted_checkpoint_sha256 is not None and not hmac.compare_digest(
+            hashlib.sha256(raw).hexdigest(), trusted_checkpoint_sha256):
+        raise BackupError("checkpoint does not match independently selected SHA-256")
+    try:
+        envelope = json.loads(raw.decode("utf-8"))
         payload = envelope["payload"]
         public_bytes = base64.b64decode(envelope["public_key"], validate=True)
         signature = base64.b64decode(envelope["signature"], validate=True)
@@ -939,6 +954,7 @@ def verify_encrypted_database_backup(
     provider: BackupKeyProvider,
     expected_vendor: str | None = None,
     restore_database_config: dict | None = None,
+    trusted_checkpoint_sha256: str | None = None,
 ) -> dict:
     """Verify signature, ciphertext and a full restore-chain check on a disposable DB."""
     raw_backup_path = Path(backup_path)
@@ -949,7 +965,8 @@ def verify_encrypted_database_backup(
     if raw_checkpoint_path.is_symlink():
         raise BackupError("symbolic-link checkpoint paths are not accepted")
     checkpoint_path = raw_checkpoint_path.resolve()
-    payload = verify_signed_checkpoint(checkpoint_path, provider=provider)
+    payload = verify_signed_checkpoint(checkpoint_path, provider=provider,
+                                       trusted_checkpoint_sha256=trusted_checkpoint_sha256)
     if payload.get("schema") != BACKUP_SCHEMA:
         raise BackupError("signed checkpoint is not a database-backup manifest")
     if (

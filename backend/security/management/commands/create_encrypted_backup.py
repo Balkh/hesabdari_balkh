@@ -38,6 +38,7 @@ class Command(BaseCommand):
             f"Encrypted backup created: {result['backup_path']}\n"
             f"Backup SHA-256: {result['backup_sha256']}\n"
             f"Signed checkpoint: {result['checkpoint_path']}\n"
+            f"Checkpoint SHA-256 (record independently): {result['checkpoint_sha256']}\n"
             f"Covered audit events: {result['covered_event_count']}\n"
             f"Covered chain head: {result['covered_head_hash']}\n"
             f"Retention class: {result['retention_class']}"

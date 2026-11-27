@@ -200,6 +200,25 @@ def _provisioning_mutex(namespace: str):
         kernel32.CloseHandle(handle)
 
 
+def _rollback_new_credentials(written, active_targets):
+    """Keep active pointers if any key cleanup fails; later provisioning must refuse."""
+    cleanup_failed = False
+    for target in reversed(written):
+        if target in active_targets:
+            continue
+        try:
+            _delete_generic(target)
+        except Exception:
+            cleanup_failed = True
+    if not cleanup_failed:
+        for target in reversed(written):
+            if target in active_targets:
+                try:
+                    _delete_generic(target)
+                except Exception:
+                    pass
+
+
 class WindowsCredentialManagerKeyProvider:
     """AES-256 KeyProvider backed by the current user's Credential Manager vault."""
 
@@ -259,9 +278,11 @@ class WindowsCredentialManagerKeyProvider:
         """
         _require_windows()
         active_target = self._active_target()
-        key_target = self._key_target(self.KEY_ID)
+        key_id = f"{self.KEY_ID}-{secrets.token_hex(16)}"
+        key_target = self._key_target(key_id)
         django_target = self._django_secret_target()
-        targets = (active_target, key_target, django_target)
+        # Keep legacy partial-record detection, as well as the new target.
+        targets = (active_target, key_target, django_target, self._key_target(self.KEY_ID))
 
         with _provisioning_mutex(self.namespace):
             if any(_read_generic(target) is not None for target in targets):
@@ -273,6 +294,14 @@ class WindowsCredentialManagerKeyProvider:
             django_secret = secrets.token_urlsafe(64).encode("ascii")
             written: list[str] = []
             try:
+                # Reserve the active pointer first. A process crash leaves a
+                # detectable partial vault rather than an unreferenced key.
+                _write_generic(
+                    active_target,
+                    key_id.encode("ascii"),
+                    comment="Hesabdari Balkh active MFA key identifier",
+                )
+                written.append(active_target)
                 _write_generic(
                     key_target,
                     aes_key,
@@ -285,12 +314,6 @@ class WindowsCredentialManagerKeyProvider:
                     comment="Hesabdari Balkh Django signing secret",
                 )
                 written.append(django_target)
-                _write_generic(
-                    active_target,
-                    self.KEY_ID.encode("ascii"),
-                    comment="Hesabdari Balkh active MFA key identifier",
-                )
-                written.append(active_target)
 
                 read_key = _read_generic(key_target)
                 read_secret = _read_generic(django_target)
@@ -300,19 +323,14 @@ class WindowsCredentialManagerKeyProvider:
                     or not hmac.compare_digest(read_key, aes_key)
                     or read_secret is None
                     or not hmac.compare_digest(read_secret, django_secret)
-                    or read_active != self.KEY_ID.encode("ascii")
+                    or read_active != key_id.encode("ascii")
                 ):
                     raise KeyUnavailableError(
                         "Windows desktop credential read-back verification failed"
                     )
-                return self.KEY_ID
+                return key_id
             except Exception:
-                # Delete only entries this operation successfully created.
-                for target in reversed(written):
-                    try:
-                        _delete_generic(target)
-                    except Exception:
-                        pass
+                _rollback_new_credentials(written, (active_target,))
                 raise KeyUnavailableError(
                     "Windows desktop secret provisioning failed; inspect the current user's credential vault"
                 ) from None
@@ -400,8 +418,8 @@ class WindowsCredentialManagerKeyProvider:
         backup commands on that desktop.
         """
         _require_windows()
-        backup_id = self.BACKUP_ENCRYPTION_KEY_ID
-        signing_id = self.CHECKPOINT_SIGNING_KEY_ID
+        backup_id = f"{self.BACKUP_ENCRYPTION_KEY_ID}-{secrets.token_hex(16)}"
+        signing_id = f"{self.CHECKPOINT_SIGNING_KEY_ID}-{secrets.token_hex(16)}"
         backup_active = self._backup_active_target()
         backup_target = self._backup_key_target(backup_id)
         signing_active = self._checkpoint_active_target()
@@ -413,6 +431,9 @@ class WindowsCredentialManagerKeyProvider:
             signing_active,
             signing_private_target,
             signing_public_target,
+            self._backup_key_target(self.BACKUP_ENCRYPTION_KEY_ID),
+            self._checkpoint_private_target(self.CHECKPOINT_SIGNING_KEY_ID),
+            self._checkpoint_public_target(self.CHECKPOINT_SIGNING_KEY_ID),
         )
 
         with _provisioning_mutex(self.namespace):
@@ -432,12 +453,13 @@ class WindowsCredentialManagerKeyProvider:
                 encoding=serialization.Encoding.Raw,
                 format=serialization.PublicFormat.Raw,
             )
+            # Reserve both active pointers before writing new key material.
             records = (
+                (backup_active, backup_id.encode("ascii"), "Hesabdari Balkh active backup key identifier"),
+                (signing_active, signing_id.encode("ascii"), "Hesabdari Balkh active audit checkpoint key identifier"),
                 (backup_target, backup_key, "Hesabdari Balkh AES-256 offline backup key"),
                 (signing_private_target, private_bytes, "Hesabdari Balkh Ed25519 audit checkpoint private key"),
                 (signing_public_target, public_bytes, "Hesabdari Balkh Ed25519 audit checkpoint public key"),
-                (backup_active, backup_id.encode("ascii"), "Hesabdari Balkh active backup key identifier"),
-                (signing_active, signing_id.encode("ascii"), "Hesabdari Balkh active audit checkpoint key identifier"),
             )
             written: list[str] = []
             try:
@@ -471,11 +493,7 @@ class WindowsCredentialManagerKeyProvider:
                     "checkpoint_signing_key_id": signing_id,
                 }
             except Exception:
-                for target in reversed(written):
-                    try:
-                        _delete_generic(target)
-                    except Exception:
-                        pass
+                _rollback_new_credentials(written, (backup_active, signing_active))
                 raise KeyUnavailableError(
                     "backup/checkpoint key provisioning failed; inspect the dedicated GM Credential Manager vault"
                 ) from None

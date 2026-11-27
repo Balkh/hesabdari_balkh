@@ -42,6 +42,33 @@ class OfflineRecoveryBundleTests(SimpleTestCase):
         create_signed_checkpoint({"event_count": 7}, checkpoint, provider=self.source)
         self.assertEqual(verify_signed_checkpoint(checkpoint, provider=recovered)["event_count"], 7)
 
+    def test_independent_checkpoint_pin_rejects_older_authentic_manifest(self):
+        metadata = self.create()
+        recovered = open_recovery_bundle(self.path, recovery_secret=self.secret,
+            trusted_public_sha256=metadata["trusted_public_sha256"])
+        old = self.path.with_name("old.json")
+        selected = self.path.with_name("selected.json")
+        create_signed_checkpoint({"event_count": 7}, old, provider=self.source)
+        chosen = create_signed_checkpoint({"event_count": 8}, selected, provider=self.source)
+        self.assertEqual(verify_signed_checkpoint(old, provider=recovered)["event_count"], 7)
+        self.assertEqual(verify_signed_checkpoint(selected, provider=recovered,
+            trusted_checkpoint_sha256=chosen["sha256"])["event_count"], 8)
+        with patch.object(type(recovered), "get_checkpoint_signing_public_key", side_effect=AssertionError("provider accessed before pin check")):
+            with self.assertRaisesMessage(BackupError, "independently selected SHA-256"):
+                verify_signed_checkpoint(old, provider=recovered,
+                    trusted_checkpoint_sha256=chosen["sha256"])
+        for malformed in ("", "a"*63, "G"*64):
+            with self.assertRaises(BackupError):
+                verify_signed_checkpoint(selected, provider=recovered, trusted_checkpoint_sha256=malformed)
+        from security.offline_recovery import verify_offline_recovery
+        with patch("security.backup_service.decrypt_backup_file") as decrypt:
+            with self.assertRaisesMessage(BackupError, "independently selected SHA-256"):
+                verify_offline_recovery(backup_path=self.path.with_name("missing.hbak"), checkpoint_path=old,
+                    bundle_path=self.path, recovery_secret=self.secret,
+                    trusted_public_sha256=metadata["trusted_public_sha256"], vendor="sqlite",
+                    trusted_checkpoint_sha256=chosen["sha256"])
+            decrypt.assert_not_called()
+
     def test_wrong_secret_wrong_pin_tamper_and_collision_fail_closed(self):
         metadata = self.create()
         before = self.path.read_bytes()

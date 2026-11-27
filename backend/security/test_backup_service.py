@@ -478,7 +478,8 @@ print(json.dumps(result))
             signing_id=self.provider.active_checkpoint_signing_key_id())
         args = ["--vendor", connection.vendor, "--backup", backup["backup_path"],
                 "--checkpoint", backup["checkpoint_path"], "--bundle", str(bundle),
-                "--trusted-public-sha256", metadata["trusted_public_sha256"]]
+                "--trusted-public-sha256", metadata["trusted_public_sha256"],
+                "--trusted-checkpoint-sha256", backup["checkpoint_sha256"]]
         password = None
         if connection.vendor == "postgresql":
             args += ["--isolated-postgres", "--pg-port", str(connection.settings_dict["PORT"]),
@@ -520,6 +521,7 @@ raise SystemExit(result)
                 env=env, capture_output=True, text=True, timeout=300)
             self.assertEqual(process.returncode, expected, process.stderr)
             self.assertEqual("OFFLINE DISPOSABLE RECOVERY VERIFIED" in process.stdout, expected == 0)
+            self.assertEqual("Checkpoint selection pin: matched" in process.stdout, expected == 0)
             self.assertNotIn(supplied.hex(), process.stdout + process.stderr)
             self.assertEqual(self._temporary_databases(), before_dbs)
         self.assertEqual(verify_audit_chain(), live)
