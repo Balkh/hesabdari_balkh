@@ -11,7 +11,9 @@ from django.contrib.sessions.models import Session
 from django.db import transaction
 from django.utils import timezone
 
-from security.audit_chain import assert_audit_trigger_schema, verify_audit_chain
+from security.audit_chain import (
+    assert_audit_trigger_schema, has_verified_replacement_preparation, verify_audit_chain,
+)
 from security.crypto import encrypt_secret
 from security.emergency_owner_key_service import (
     EmergencyOwnerKeyInvalid, EmergencyOwnerKeyPolicyDenied,
@@ -23,7 +25,7 @@ from security.login_lockout import is_account_locked
 from security.mfa import generate_recovery_codes, hash_recovery_code, matching_totp_counter
 from security.mfa_models import MFADeviceStatus, SecurityLoginSession, SecurityMFADevice, SecurityRecoveryCode
 from security.mfa_service import TOTP_PURPOSE, verify_user_totp
-from security.models import AuditAction, AuditEvent
+from security.models import AuditAction
 from security.services import record_audit_event
 
 
@@ -103,7 +105,7 @@ def reenroll_replacement_employee(employee_id, *, gm_password, gm_totp_code,
     _require_staging(source_isolated)
     now = at or timezone.now()
     gm = get_current_gm_for_local_operation(at=now).user
-    if not AuditEvent.objects.filter(entity="REPLACEMENT_IDENTITY_PREPARATION", user=gm).exists():
+    if not has_verified_replacement_preparation(gm):
         raise EmergencyOwnerKeyPolicyDenied("replacement identity has not been prepared")
     if employee_id == gm.pk:
         raise EmergencyOwnerKeyPolicyDenied("GM must use existing owner-key recovery")

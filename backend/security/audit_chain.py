@@ -16,7 +16,7 @@ from django.conf import settings
 from django.db import DatabaseError, connection, connections, transaction
 from django.utils import timezone
 
-from security.models import AuditChainHead, AuditEvent
+from security.models import AuditAction, AuditChainHead, AuditEvent
 
 GENESIS_HASH = "0" * 64
 HASH_DOMAIN = b"HESABDARI-AUDIT-CHAIN-V1\x00"
@@ -448,6 +448,22 @@ def verify_audit_chain(*, using="default") -> dict:
             head_hash=head.head_hash,
             last_event_id=head.last_event_id,
         )
+
+
+def has_verified_replacement_preparation(gm_user, *, using="default") -> bool:
+    """Read the specific preparation marker only from a verified audit chain.
+
+    Retain the verifier's serialization boundary through the marker query.
+    No event contents or arbitrary audit-query capability leave this module.
+    """
+    with transaction.atomic(using=using):
+        verify_audit_chain(using=using)
+        return AuditEvent.objects.using(using).filter(
+            entity="REPLACEMENT_IDENTITY_PREPARATION",
+            action=AuditAction.ACCOUNT_EMERGENCY_RECOVERY,
+            user_id=gm_user.pk,
+            entity_id=str(gm_user.pk),
+        ).exists()
 
 
 SQLITE_REPLACEMENT_GUARD_SQL = (

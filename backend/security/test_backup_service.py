@@ -642,7 +642,7 @@ django.setup()
 from django.contrib.auth import get_user_model
 from django.db import connection
 from django.utils import timezone
-from security.audit_chain import verify_audit_chain, assert_audit_trigger_schema
+from security.audit_chain import verify_audit_chain, assert_audit_trigger_schema, has_verified_replacement_preparation
 from security.emergency_owner_key_service import generate_emergency_owner_key, validate_current_gm_emergency_owner_key, EmergencyOwnerKeyInvalid, EmergencyOwnerKeyPolicyDenied
 from security.replacement_identity import prepare_replacement_identity, reenroll_replacement_employee
 from django.contrib.sessions.models import Session
@@ -673,6 +673,7 @@ else:
 assert_audit_trigger_schema()
 before = verify_audit_chain()
 assert before == data["snapshot"]
+assert not has_verified_replacement_preparation(gm)
 def financial():
     return [list(m.objects.order_by("pk").values()) for m in (JournalEntry, JournalLine, IdempotencyRecord)]
 baseline = financial()
@@ -723,6 +724,8 @@ assert SecurityMFADevice.objects.filter(user=staff, status=MFADeviceStatus.ACTIV
 assert SecurityRecoveryCode.objects.filter(user=staff, used_at__isnull=True).count() == 10
 recovered, codes = prepare()
 assert recovered.pk == gm.pk and len(codes) == 10
+assert has_verified_replacement_preparation(gm)
+assert not has_verified_replacement_preparation(staff)
 assert recovered.check_password("Fixture-new-GM-Password-2026!")
 assert not recovered.check_password("Fixture-old-GM-Password-2026!")
 assert GMRoleSlot.objects.get(code="GM").assignment_id == data["assignment"]
