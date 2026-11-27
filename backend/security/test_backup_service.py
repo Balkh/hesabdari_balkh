@@ -462,3 +462,240 @@ print(json.dumps(result))
         self.assertEqual(self._temporary_databases(), before_dbs)
         self.assertEqual(verify_audit_chain(), live)
         print(f"OFFLINE RECOVERY [{connection.vendor}]: independent process, no ERP ORM, balanced 125.50 AFN, chain and cleanup verified")
+
+
+    def test_offline_recovery_cli_real_verification_and_wrong_secret(self):
+        import subprocess
+        import sys
+        from security.offline_recovery import create_recovery_bundle
+        backup = self._backup()
+        live = verify_audit_chain()
+        before_dbs = self._temporary_databases()
+        bundle = self.root / "cli.hbr"
+        secret = b"R"*32
+        metadata = create_recovery_bundle(bundle, provider=self.provider, recovery_secret=secret,
+            encryption_id=self.provider.active_backup_encryption_key_id(),
+            signing_id=self.provider.active_checkpoint_signing_key_id())
+        args = ["--vendor", connection.vendor, "--backup", backup["backup_path"],
+                "--checkpoint", backup["checkpoint_path"], "--bundle", str(bundle),
+                "--trusted-public-sha256", metadata["trusted_public_sha256"]]
+        password = None
+        if connection.vendor == "postgresql":
+            args += ["--isolated-postgres", "--pg-port", str(connection.settings_dict["PORT"]),
+                     "--pg-user", str(connection.settings_dict["USER"])]
+            password = str(connection.settings_dict["PASSWORD"])
+        script = r"""
+import json, sys
+from unittest.mock import patch
+from security.offline_recovery_cli import main
+from security.local_console import LocalConsoleRequiredError
+data = json.load(sys.stdin)
+with patch("security.local_console.require_local_console", side_effect=LocalConsoleRequiredError("nonlocal")):
+    assert main(data["args"]) == 1
+# main configures Django before its console guard; a second invocation in
+# the same process is forbidden. This branch deliberately exits here.
+"""
+        env = os.environ.copy()
+        env.pop("DJANGO_SETTINGS_MODULE", None)
+        denied = subprocess.run([sys.executable, "-c", script], input=json.dumps({"args": args}),
+            env=env, capture_output=True, text=True, timeout=300)
+        self.assertEqual(denied.returncode, 0, denied.stderr)
+        self.assertNotIn("OFFLINE DISPOSABLE RECOVERY VERIFIED", denied.stdout)
+        script = r"""
+import json, sys
+from unittest.mock import patch
+from security.offline_recovery_cli import main
+data = json.load(sys.stdin)
+answers = ([data["password"]] if data["password"] is not None else []) + [data["secret"]]
+with patch("security.local_console.require_local_console"), patch("getpass.getpass", side_effect=answers):
+    result = main(data["args"])
+from django.db import connection
+assert connection.vendor == "unknown"
+assert connection.connection is None
+raise SystemExit(result)
+"""
+        for supplied, expected in ((b"X"*32, 1), (secret, 0)):
+            process = subprocess.run([sys.executable, "-c", script],
+                input=json.dumps({"args": args, "password": password, "secret": supplied.hex()}),
+                env=env, capture_output=True, text=True, timeout=300)
+            self.assertEqual(process.returncode, expected, process.stderr)
+            self.assertEqual("OFFLINE DISPOSABLE RECOVERY VERIFIED" in process.stdout, expected == 0)
+            self.assertNotIn(supplied.hex(), process.stdout + process.stderr)
+            self.assertEqual(self._temporary_databases(), before_dbs)
+        self.assertEqual(verify_audit_chain(), live)
+        print(f"ODR CLI [{connection.vendor}]: real entrypoint, nonlocal and wrong-secret denial, disposable success verified")
+
+    def test_recovered_copy_gm_recovery_preserves_financial_history(self):
+        """Use the real restored disposable DB only; no activation of an ERP DB."""
+        import subprocess
+        import sys
+        from datetime import timedelta
+        from django.contrib.auth import get_user_model
+        from django.utils import timezone
+        from security.models import GMRoleSlot, Role, UserRoleAssignment
+        from security.mfa_models import SecurityEmergencyOwnerKey, SecurityLoginSession
+        from security.emergency_owner_key_service import generate_emergency_owner_key, emergency_owner_key_digest
+        from security.mfa import totp_code
+        from security.mfa_service import begin_mfa_enrollment, confirm_mfa_enrollment
+        from security.test_emergency_owner_key import StaticMFAKeyProvider
+        from security.offline_recovery import create_recovery_bundle, verify_offline_recovery
+        from security import backup_service as service
+
+        now = timezone.now()
+        gm = get_user_model().objects.create_user(username="odr-restored-gm", password="Fixture-old-GM-Password-2026!", is_active=True)
+        role, _ = Role.objects.get_or_create(code="GM", defaults={"name": "General Manager", "is_active": True, "is_system": True})
+        assignment = UserRoleAssignment.objects.create(user=gm, role=role, start_at=now-timedelta(minutes=1), reason="disposable recovery test")
+        slot = GMRoleSlot.objects.get(code="GM")
+        slot.assignment = assignment
+        slot.save(update_fields=["assignment", "updated_at"])
+        owner = generate_emergency_owner_key()
+        owner_row = SecurityEmergencyOwnerKey.objects.create(scope=SecurityEmergencyOwnerKey.GM_RECOVERY,
+            source=SecurityEmergencyOwnerKey.SOURCE_INITIAL_BOOTSTRAP, key_hash=emergency_owner_key_digest(owner),
+            issued_at=now, issued_by=gm)
+        old_provider = StaticMFAKeyProvider()
+        started = begin_mfa_enrollment(gm, provider=old_provider)
+        confirm_mfa_enrollment(gm, totp_code(started["secret"], timestamp=now.timestamp()), provider=old_provider, at=now)
+        SecurityLoginSession.objects.create(user=gm, session_key_hash="a"*64, slot_number=1,
+            created_at=now, last_seen_at=now, idle_expires_at=now+timedelta(minutes=15),
+            absolute_expires_at=now+timedelta(hours=12), mfa_verified_at=now)
+        snapshot = verify_audit_chain()
+        backup = self._backup()
+        live = verify_audit_chain()
+        before_dbs = self._temporary_databases()
+        bundle = self.root / "gm-recovery.hbr"
+        secret = b"R"*32
+        metadata = create_recovery_bundle(bundle, provider=self.provider, recovery_secret=secret,
+            encryption_id=self.provider.active_backup_encryption_key_id(),
+            signing_id=self.provider.active_checkpoint_signing_key_id())
+        pg = None
+        if connection.vendor == "postgresql":
+            pg = {k: str(connection.settings_dict.get(k) or "") for k in ("NAME", "USER", "PASSWORD", "PORT")}
+            pg["HOST"] = "127.0.0.1"
+        child = r"""
+import json, sys
+from unittest.mock import patch
+from decimal import Decimal
+from django.conf import settings
+from config.settings.base import INSTALLED_APPS, AUTH_PASSWORD_VALIDATORS
+data = json.load(sys.stdin)
+settings.configure(INSTALLED_APPS=INSTALLED_APPS, AUTH_PASSWORD_VALIDATORS=AUTH_PASSWORD_VALIDATORS,
+    SECRET_KEY="synthetic-replacement-device-only", USE_TZ=True, TIME_ZONE="UTC",
+    DATABASES={"default": data["database"]}, DEFAULT_AUTO_FIELD="django.db.models.BigAutoField")
+import django
+django.setup()
+from django.contrib.auth import get_user_model
+from django.db import connection
+from django.utils import timezone
+from security.audit_chain import verify_audit_chain, assert_audit_trigger_schema
+from security.emergency_owner_key_service import recover_existing_gm_offline, generate_emergency_owner_key, validate_current_gm_emergency_owner_key, EmergencyOwnerKeyInvalid
+from security.models import GMRoleSlot, AuditEvent, AuditChainHead
+from security.mfa_models import SecurityLoginSession, SecurityMFADevice, MFADeviceStatus, SecurityRecoveryCode
+from security.mfa import generate_totp_secret, totp_code
+from security.mfa_service import _encrypted_secret_for
+from security.errors import KeyUnavailableError
+from accounting.models import JournalEntry, JournalLine
+from core.models import IdempotencyRecord
+class ReplacementProvider:
+    def active_key_id(self): return "replacement-fixture-v2"
+    def get_key(self, key_id):
+        if key_id != self.active_key_id(): raise KeyError(key_id)
+        return b"N"*32
+provider = ReplacementProvider()
+gm = get_user_model().objects.get(username="odr-restored-gm")
+old = SecurityMFADevice.objects.get(user=gm, status=MFADeviceStatus.ACTIVE)
+try:
+    _encrypted_secret_for(old, gm, provider)
+except KeyUnavailableError:
+    pass
+else:
+    raise AssertionError("old MFA unexpectedly decryptable on replacement")
+assert_audit_trigger_schema()
+before = verify_audit_chain()
+assert before == data["snapshot"]
+def financial():
+    return [list(m.objects.order_by("pk").values()) for m in (JournalEntry, JournalLine, IdempotencyRecord)]
+baseline = financial()
+now = timezone.now()
+seed = generate_totp_secret()
+new_owner = generate_emergency_owner_key()
+kwargs = dict(new_owner_key=new_owner, new_password="Fixture-new-GM-Password-2026!",
+              new_totp_secret=seed, new_totp_code=totp_code(seed, timestamp=now.timestamp()), provider=provider, at=now)
+def reject(instance, *args, **kwargs):
+    assert instance.last_event.entity == "GM_EMERGENCY_RECOVERY"
+    assert AuditEvent.objects.filter(pk=instance.last_event_id).exists()
+    raise RuntimeError("restored GM audit head failure")
+with patch.object(AuditChainHead, "save", autospec=True, side_effect=reject):
+    try: recover_existing_gm_offline(data["owner"], **kwargs)
+    except RuntimeError as exc: assert str(exc) == "restored GM audit head failure"
+    else: raise AssertionError("missing audit failure")
+gm.refresh_from_db()
+assert gm.check_password("Fixture-old-GM-Password-2026!")
+assert SecurityLoginSession.objects.filter(user=gm, revoked_at__isnull=True).count() == 1
+assert validate_current_gm_emergency_owner_key(data["owner"]) == data["owner_row"]
+assert verify_audit_chain() == before
+assert financial() == baseline
+recovered, codes, revoked, disabled = recover_existing_gm_offline(data["owner"], **kwargs)
+assert recovered.pk == gm.pk and revoked == 1 and disabled == 1 and len(codes) == 10
+assert recovered.check_password("Fixture-new-GM-Password-2026!")
+assert not recovered.check_password("Fixture-old-GM-Password-2026!")
+assert GMRoleSlot.objects.get(code="GM").assignment_id == data["assignment"]
+assert SecurityLoginSession.objects.filter(user=gm, revoked_at__isnull=True).count() == 0
+active = SecurityMFADevice.objects.get(user=gm, status=MFADeviceStatus.ACTIVE)
+assert active.secret_key_id == provider.active_key_id()
+assert _encrypted_secret_for(active, gm, provider) == seed.encode("ascii")
+assert SecurityRecoveryCode.objects.filter(user=gm, used_at__isnull=True).count() == 10
+try: validate_current_gm_emergency_owner_key(data["owner"])
+except EmergencyOwnerKeyInvalid: pass
+else: raise AssertionError("old owner key still accepted")
+assert validate_current_gm_emergency_owner_key(new_owner)
+assert financial() == baseline
+entry = JournalEntry.objects.get(number="JE-1405-99001")
+assert entry.total_debit == entry.total_credit == Decimal("125.50")
+after = verify_audit_chain()
+assert after["event_count"] == before["event_count"] + 1
+connection.close()
+assert verify_audit_chain() == after
+connection.close()
+print("RESTORED GM: new MFA key, old session/owner revoked, rollback and financial history verified")
+"""
+        seen = []
+        def exercise(db):
+            env = os.environ.copy()
+            env.pop("DJANGO_SETTINGS_MODULE", None)
+            result = subprocess.run([sys.executable, "-c", child], input=json.dumps({
+                "database": db, "snapshot": snapshot, "owner": owner, "owner_row": owner_row.pk,
+                "assignment": assignment.pk}), env=env, capture_output=True, text=True, timeout=300)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("RESTORED GM:", result.stdout)
+            seen.append(True)
+        if connection.vendor == "sqlite":
+            original = service._verify_sqlite_snapshot
+            def inspect(path, payload):
+                result = original(path, payload)
+                exercise({"ENGINE": "django.db.backends.sqlite3", "NAME": str(path),
+                          "OPTIONS": {"transaction_mode": "IMMEDIATE", "timeout": 20}})
+                return result
+            target = "_verify_sqlite_snapshot"
+        else:
+            original = service._read_postgresql_restore
+            def inspect(cursor):
+                result = original(cursor)
+                name = cursor.connection.info.dbname
+                self.assertTrue(name.startswith("hb_restore_verify_"))
+                exercise({"ENGINE": "django.db.backends.postgresql", **pg, "NAME": name})
+                return result
+            target = "_read_postgresql_restore"
+        with patch.object(service, target, side_effect=inspect):
+            result = verify_offline_recovery(backup_path=backup["backup_path"], checkpoint_path=backup["checkpoint_path"],
+                bundle_path=bundle, recovery_secret=secret, trusted_public_sha256=metadata["trusted_public_sha256"],
+                vendor=connection.vendor, restore_database_config=pg)
+        self.assertTrue(result["valid"])
+        self.assertEqual(seen, [True])
+        self.assertEqual(self._temporary_databases(), before_dbs)
+        self.assertEqual(verify_audit_chain(), live)
+        gm.refresh_from_db()
+        owner_row.refresh_from_db()
+        self.assertTrue(gm.check_password("Fixture-old-GM-Password-2026!"))
+        self.assertIsNone(owner_row.consumed_at)
+        self.assertEqual(SecurityLoginSession.objects.filter(user=gm, revoked_at__isnull=True).count(), 1)
+        print(f"ODR RESTORED GM [{connection.vendor}]: isolated credential recovery, failure rollback, source unchanged")

@@ -2,7 +2,7 @@
 import hmac
 
 from django.core.management.base import BaseCommand, CommandError
-from django.db import transaction
+from django.db import connection, transaction
 
 from security.audit_chain import assert_audit_trigger_schema, verify_audit_chain
 from security.backup_service import BackupError, load_backup_key_provider
@@ -41,8 +41,10 @@ class Command(BaseCommand):
             owner_bytes = base64.urlsafe_b64decode(raw_owner_key + "=")
             if hmac.compare_digest(secret, owner_bytes):
                 raise BackupError("recovery secret must be independent of the GM emergency owner key")
+            if connection.in_atomic_block or not connection.get_autocommit():
+                raise BackupError("recovery bundle issuance requires an independent commit boundary")
             provider = load_backup_key_provider()
-            with transaction.atomic():
+            with transaction.atomic(durable=True):
                 # Recheck under the same locks held through the audit commit.
                 validate_current_gm_emergency_owner_key(raw_owner_key)
                 gm = get_current_gm_for_local_operation().user
