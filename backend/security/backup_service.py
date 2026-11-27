@@ -858,8 +858,8 @@ def _verify_sqlite_snapshot(snapshot_path: Path, expected_payload: dict) -> dict
         db.close()
 
 
-def _verify_postgresql_snapshot(snapshot_path: Path, expected_payload: dict) -> dict:
-    db = connection.settings_dict
+def _verify_postgresql_snapshot(snapshot_path: Path, expected_payload: dict, *, database_config=None) -> dict:
+    db = connection.settings_dict if database_config is None else database_config
     for tool_name in ("createdb", "pg_restore", "dropdb"):
         if not shutil.which(tool_name):
             raise BackupError(f"{tool_name} is required for isolated PostgreSQL restore verification")
@@ -937,6 +937,8 @@ def verify_encrypted_database_backup(
     checkpoint_path: str | Path,
     *,
     provider: BackupKeyProvider,
+    expected_vendor: str | None = None,
+    restore_database_config: dict | None = None,
 ) -> dict:
     """Verify signature, ciphertext and a full restore-chain check on a disposable DB."""
     raw_backup_path = Path(backup_path)
@@ -970,6 +972,10 @@ def verify_encrypted_database_backup(
         or (payload["chain_event_count"] == 0) != (payload["chain_last_event_id"] is None)
     ):
         raise BackupError("signed database backup manifest has invalid fields")
+    if expected_vendor is not None and payload["database_vendor"] != expected_vendor:
+        raise BackupError("signed backup database engine does not match selected recovery engine")
+    if restore_database_config is not None and expected_vendor != "postgresql":
+        raise BackupError("explicit restore database configuration requires PostgreSQL recovery")
     backup_filename = payload.get("backup_filename", "")
     if (
         not isinstance(backup_filename, str)
@@ -1006,7 +1012,12 @@ def verify_encrypted_database_backup(
         if payload["database_vendor"] == "sqlite":
             result = _verify_sqlite_snapshot(snapshot_path, payload)
         elif payload["database_vendor"] == "postgresql":
-            result = _verify_postgresql_snapshot(snapshot_path, payload)
+            if restore_database_config is None:
+                result = _verify_postgresql_snapshot(snapshot_path, payload)
+            else:
+                result = _verify_postgresql_snapshot(
+                    snapshot_path, payload, database_config=restore_database_config
+                )
         else:
             raise BackupError("signed backup declares an unsupported database engine")
 

@@ -380,3 +380,85 @@ class BatchCDatabaseRestoreTests(AuditTriggerAwareTransactionTestCase):
         with self.assertRaisesMessage(BackupError, "encryption key does not match signed checkpoint"):
             verify_encrypted_database_backup(result["backup_path"], checkpoint, provider=self.provider)
         self.assertEqual(verify_audit_chain(), live)
+
+
+    def test_offline_recovery_bundle_verifies_financial_restore_in_fresh_process(self):
+        import subprocess
+        import sys
+        from security.offline_recovery import create_recovery_bundle
+        backup = self._backup()
+        live = verify_audit_chain()
+        before_dbs = self._temporary_databases()
+        bundle = self.root / "replacement-device.hbr"
+        secret = b"R" * 32  # synthetic fixture only
+        metadata = create_recovery_bundle(bundle, provider=self.provider, recovery_secret=secret,
+            encryption_id=self.provider.active_backup_encryption_key_id(),
+            signing_id=self.provider.active_checkpoint_signing_key_id())
+        pg = None
+        if connection.vendor == "postgresql":
+            pg = {k: str(connection.settings_dict.get(k) or "") for k in ("NAME", "USER", "PASSWORD", "PORT")}
+            pg["HOST"] = "127.0.0.1"
+        script = r"""
+import json, sys
+from pathlib import Path
+from unittest.mock import patch
+from decimal import Decimal
+from security.offline_recovery_cli import configure_offline_django
+configure_offline_django()
+from django.db import connection
+assert connection.vendor == "unknown", connection.vendor
+from security import backup_service as service
+from security.offline_recovery import verify_offline_recovery
+data = json.load(sys.stdin)
+seen = []
+def check(cursor, placeholder):
+    cursor.execute("SELECT status,total_debit,total_credit FROM accounting_journalentry WHERE number="+placeholder, ["JE-1405-99001"])
+    row = cursor.fetchone()
+    assert row[0] == "POSTED"
+    assert tuple(Decimal(str(v)) for v in row[1:]) == (Decimal("125.50"), Decimal("125.50"))
+    cursor.execute("SELECT COUNT(*) FROM core_idempotencyrecord WHERE key="+placeholder, ["batch-c-financial-restore"])
+    assert cursor.fetchone()[0] == 1
+if data["vendor"] == "sqlite":
+    original = service._verify_sqlite_snapshot
+    def inspect(path, payload):
+        import sqlite3
+        db = sqlite3.connect(path.resolve().as_uri()+"?mode=ro", uri=True)
+        try:
+            check(db.cursor(), "?")
+        finally:
+            db.close()
+        seen.append(str(path))
+        return original(path, payload)
+    target = "_verify_sqlite_snapshot"
+else:
+    original = service._read_postgresql_restore
+    def inspect(cursor):
+        check(cursor, "%s")
+        seen.append(cursor.connection.info.dbname)
+        return original(cursor)
+    target = "_read_postgresql_restore"
+with patch.object(service, target, side_effect=inspect):
+    result = verify_offline_recovery(backup_path=data["backup"], checkpoint_path=data["checkpoint"],
+        bundle_path=data["bundle"], recovery_secret=bytes.fromhex(data["secret"]),
+        trusted_public_sha256=data["pin"], vendor=data["vendor"], restore_database_config=data["pg"])
+assert len(seen) == 1
+assert connection.connection is None
+if data["vendor"] == "sqlite":
+    assert not Path(seen[0]).exists()
+print(json.dumps(result))
+"""
+        env = os.environ.copy()
+        env.pop("DJANGO_SETTINGS_MODULE", None)
+        data = {"vendor": connection.vendor, "backup": backup["backup_path"],
+                "checkpoint": backup["checkpoint_path"], "bundle": str(bundle),
+                "secret": secret.hex(), "pin": metadata["trusted_public_sha256"], "pg": pg}
+        process = subprocess.run([sys.executable, "-c", script], input=json.dumps(data),
+            env=env, capture_output=True, text=True, timeout=300)
+        self.assertEqual(process.returncode, 0, process.stderr)
+        restored = json.loads(process.stdout)
+        self.assertTrue(restored["valid"])
+        for field in ("event_count", "head_hash", "last_event_id"):
+            self.assertEqual(restored[field], self.initial[field])
+        self.assertEqual(self._temporary_databases(), before_dbs)
+        self.assertEqual(verify_audit_chain(), live)
+        print(f"OFFLINE RECOVERY [{connection.vendor}]: independent process, no ERP ORM, balanced 125.50 AFN, chain and cleanup verified")

@@ -18,5 +18,7 @@ printf "\nW0-2E final remediation checks (SQLite)\n"
 ../backend/.venv/bin/python manage.py test security.test_final_remediation --settings=config.settings.test --verbosity=2
 printf "\nW0 security acceptance checks (SQLite)\n"
 ../backend/.venv/bin/python manage.py test goods_in_transit.tests.GoodsInTransitTests.test_acceptance_transit_sale_final_audit_rollback goods_in_transit.tests.GoodsInTransitTests.test_acceptance_transit_delivery_final_audit_rollback goods_in_transit.tests.GoodsInTransitTests.test_acceptance_legacy_transit_bridge_final_audit_rollback sales.sales_tests.SalesImplementationTests.test_acceptance_future_sale_final_audit_rollback security.test_security_acceptance --settings=config.settings.test --verbosity=2
+printf "\nW0 offline recovery checks (SQLite)\n"
+../backend/.venv/bin/python manage.py test security.test_offline_recovery security.test_backup_service.BatchCDatabaseRestoreTests.test_offline_recovery_bundle_verifies_financial_restore_in_fresh_process --settings=config.settings.test --verbosity=2
 ../backend/.venv/bin/python manage.py test --settings=config.settings.test --verbosity=2
 ../backend/.venv/bin/pytest -rs
