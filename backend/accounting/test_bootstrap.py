@@ -1,4 +1,5 @@
 from io import StringIO
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
@@ -11,6 +12,7 @@ from accounting.models import Account
 from categories.models import Category
 from currencies.models import Currency
 from security.models import AuditAction, AuditEvent
+from security.services import record_audit_event
 
 
 class FreshDatabaseBootstrapTests(TestCase):
@@ -52,20 +54,29 @@ class FreshDatabaseBootstrapTests(TestCase):
 
     def test_rerun_refuses_when_bootstrap_audit_event_is_missing(self):
         call_command("bootstrap_fresh_database")
-        AuditEvent.objects.filter(
-            entity="SystemBootstrap", reference="fresh-database-v1"
-        ).delete()
+        original_filter = AuditEvent.objects.filter
 
-        with self.assertRaisesMessage(CommandError, "expected exactly one bootstrap audit event"):
-            call_command("bootstrap_fresh_database")
+        def hide_bootstrap_marker(*args, **kwargs):
+            queryset = original_filter(*args, **kwargs)
+            if kwargs.get("entity") == "SystemBootstrap" and kwargs.get("reference") == "fresh-database-v1":
+                return queryset.none()
+            return queryset
+
+        # Simulate a missing marker at the verification boundary without
+        # deleting or mutating a protected audit event.
+        with patch.object(AuditEvent.objects, "filter", side_effect=hide_bootstrap_marker):
+            with self.assertRaisesMessage(CommandError, "expected exactly one bootstrap audit event"):
+                call_command("bootstrap_fresh_database")
 
         self.assertEqual(Account.objects.count(), len(CANONICAL_COA))
         self.assertEqual(set(Currency.objects.values_list("code", flat=True)), {"AFN", "USD"})
-        self.assertFalse(AuditEvent.objects.filter(entity="SystemBootstrap").exists())
+        self.assertTrue(original_filter(
+            entity="SystemBootstrap", reference="fresh-database-v1"
+        ).exists())
 
     def test_rerun_refuses_when_bootstrap_audit_event_is_duplicated(self):
         call_command("bootstrap_fresh_database")
-        AuditEvent.objects.create(
+        record_audit_event(
             action=AuditAction.CREATE,
             entity="SystemBootstrap",
             reference="fresh-database-v1",
@@ -83,7 +94,7 @@ class FreshDatabaseBootstrapTests(TestCase):
         )
 
     def test_fresh_database_refuses_existing_orphaned_bootstrap_audit(self):
-        event = AuditEvent.objects.create(
+        event = record_audit_event(
             action=AuditAction.CREATE,
             entity="SystemBootstrap",
             reference="fresh-database-v1",
@@ -115,11 +126,30 @@ class FreshDatabaseBootstrapTests(TestCase):
         event = AuditEvent.objects.get(
             entity="SystemBootstrap", reference="fresh-database-v1"
         )
-        event.action = AuditAction.UPDATE
-        event.save(update_fields=["action"])
+        original_filter = AuditEvent.objects.filter
 
-        with self.assertRaisesMessage(CommandError, "unexpected action"):
-            call_command("bootstrap_fresh_database")
+        class WrongActionQuery:
+            def count(self):
+                return 1
+
+            def get(self):
+                return SimpleNamespace(action=AuditAction.UPDATE)
+
+        def report_wrong_action(*args, **kwargs):
+            queryset = original_filter(*args, **kwargs)
+            if kwargs.get("entity") == "SystemBootstrap" and kwargs.get("reference") == "fresh-database-v1":
+                return WrongActionQuery()
+            return queryset
+
+        # Simulate a divergent read without changing the persisted chain.
+        with patch.object(AuditEvent.objects, "filter", side_effect=report_wrong_action):
+            with self.assertRaisesMessage(CommandError, "unexpected action"):
+                call_command("bootstrap_fresh_database")
+
+        self.assertEqual(
+            original_filter(entity="SystemBootstrap", reference="fresh-database-v1").get().action,
+            AuditAction.CREATE,
+        )
 
     def test_rerun_refuses_when_another_base_currency_exists(self):
         call_command("bootstrap_fresh_database")

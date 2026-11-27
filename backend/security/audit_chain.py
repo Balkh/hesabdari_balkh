@@ -1,0 +1,525 @@
+"""Canonical, transactional append-only audit hash chain (W0-2E)."""
+
+from __future__ import annotations
+
+import hashlib
+import hmac
+import ipaddress
+import json
+import math
+import re
+from datetime import date, datetime, timezone as dt_timezone
+from decimal import Decimal
+from uuid import UUID, uuid4
+
+from django.conf import settings
+from django.db import DatabaseError, connection, connections, transaction
+from django.utils import timezone
+
+from security.models import AuditAction, AuditChainHead, AuditEvent
+
+GENESIS_HASH = "0" * 64
+HASH_DOMAIN = b"HESABDARI-AUDIT-CHAIN-V1\x00"
+CANONICAL_SCHEMA = "hesabdari.audit-event.v1"
+
+
+class AuditChainError(RuntimeError):
+    """The append protocol or chain integrity check cannot safely continue."""
+
+
+class AuditChainVerificationError(AuditChainError):
+    """Persisted audit history does not form one valid chain."""
+
+
+def _canonical_value(value):
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise TypeError("non-finite floats are not permitted in audit metadata")
+        return value
+    if isinstance(value, UUID):
+        return str(value).lower()
+    if isinstance(value, Decimal):
+        if not value.is_finite():
+            raise TypeError("non-finite Decimal values are not permitted in audit metadata")
+        if value == 0:
+            return "0"
+        # Decimal.normalize() rounds using the ambient decimal context.
+        # Fixed-point formatting preserves every digit regardless of precision.
+        fixed = format(value, "f")
+        return fixed.rstrip("0").rstrip(".") if "." in fixed else fixed
+    if isinstance(value, datetime):
+        if timezone.is_naive(value):
+            raise TypeError("naive datetimes are not permitted in audit metadata")
+        normalized = value.astimezone(dt_timezone.utc)
+        return normalized.isoformat(timespec="microseconds").replace("+00:00", "Z")
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        raise TypeError("binary values are not permitted in audit metadata")
+    if isinstance(value, (list, tuple)):
+        return [_canonical_value(item) for item in value]
+    if isinstance(value, dict):
+        normalized = {}
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise TypeError("audit metadata object keys must be strings")
+            normalized[key] = _canonical_value(item)
+        return {key: normalized[key] for key in sorted(normalized)}
+    raise TypeError(f"unsupported audit metadata type: {type(value).__name__}")
+
+
+def canonical_json_bytes(payload) -> bytes:
+    normalized = _canonical_value(payload)
+    return json.dumps(
+        normalized,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+
+
+def immutable_event_payload(event) -> dict:
+    return {
+        "schema": CANONICAL_SCHEMA,
+        "event_uuid": str(event.event_uuid).lower(),
+        "user_id": event.user_id,
+        "action": event.action,
+        "entity": event.entity,
+        "entity_id": event.entity_id,
+        "reference": event.reference,
+        "previous_state": event.previous_state,
+        "new_state": event.new_state,
+        "reason": event.reason,
+        "created_at": event.created_at,
+        "actor_snapshot": event.actor_snapshot,
+        "authorization_context": event.authorization_context,
+        "source_fingerprint": event.source_fingerprint,
+    }
+
+
+def calculate_event_hash(previous_hash: str, payload: dict) -> str:
+    if (
+        not isinstance(previous_hash, str)
+        or len(previous_hash) != 64
+        or any(char not in "0123456789abcdef" for char in previous_hash)
+    ):
+        raise ValueError("prev_event_hash must be 64 lowercase hexadecimal characters")
+    return hashlib.sha256(
+        HASH_DOMAIN + bytes.fromhex(previous_hash) + canonical_json_bytes(payload)
+    ).hexdigest()
+
+
+_SENSITIVE_AUDIT_KEYS = {
+    "password", "passwd", "passphrase", "totp", "totpcode",
+    "recoverycode", "recoverycodes", "secret", "secretkey",
+    "ownerkey", "encryptionkey", "privatekey", "ciphertext",
+    "nonce", "credential", "credentials", "authorizationheader",
+    "accesstoken", "refreshtoken", "apikey",
+    "ip", "ipaddress", "rawip", "remoteaddr", "remoteip", "clientip", "sourceip",
+    "forwarded", "forwardedfor", "xforwardedfor", "xrealip", "realip",
+    "useragent", "httpuseragent", "headers", "requestheaders", "rawheaders",
+    "httpheaders", "authorization", "httpauthorization", "cookie", "cookies",
+    "httpcookie", "setcookie", "sessionkey", "sessiontoken", "csrftoken",
+    "backupencryptionkey", "signingprivatekey",
+}
+_INLINE_SECRET_PATTERN = re.compile(
+    r"(?i)(\b(?:password|passwd|passphrase|totp(?:[\s_-]*code)?|"
+    r"recovery[\s_-]*codes?|owner[\s_-]*key|access[\s_-]*token|"
+    r"refresh[\s_-]*token|api[\s_-]*key)\b\s*[:=]\s*)"
+    r"[^\s,;&]+"
+)
+_BEARER_SECRET_PATTERN = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/-]+=*")
+_OTP_URI_SECRET_PATTERN = re.compile(r"(?i)(otpauth://totp/[^?\s]+\?secret=)[^&\s]+")
+
+
+# Structured network fields are removed in full. Free-text matching is
+# deliberately limited to labelled fields and validated IP literals.
+_IP_LITERAL_PATTERN = re.compile(
+    r"(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?![\w.])"
+    r"|(?<![\w:])(?:[0-9A-Fa-f]{0,4}:){2,}[0-9A-Fa-f:.]+(?![\w:])"
+)
+_INLINE_NETWORK_PATTERN = re.compile(
+    r"(?i)(\b(?:user[\s_-]*agent|x[\s_-]*forwarded[\s_-]*for|"
+    r"forwarded|authorization|cookie|set[\s_-]*cookie|"
+    r"(?:remote|client|source|raw)[\s_-]*(?:ip|addr(?:ess)?)|"
+    r"ip[\s_-]*address|encryption[\s_-]*key|private[\s_-]*key|"
+    r"session[\s_-]*(?:key|token))\s*[:=]\s*).*"
+)
+
+
+def _mask_ip_literal(match):
+    try:
+        ipaddress.ip_address(match.group(0))
+    except ValueError:
+        return match.group(0)
+    return "[REDACTED]"
+
+
+def _redact_text(value):
+    if not isinstance(value, str):
+        return value
+    value = _INLINE_SECRET_PATTERN.sub(r"\1[REDACTED]", value)
+    value = _BEARER_SECRET_PATTERN.sub("Bearer [REDACTED]", value)
+    value = _OTP_URI_SECRET_PATTERN.sub(r"\1[REDACTED]", value)
+    value = _INLINE_NETWORK_PATTERN.sub(r"\1[REDACTED]", value)
+    return _IP_LITERAL_PATTERN.sub(_mask_ip_literal, value)
+
+
+def _redact_sensitive(value):
+    """Redact credential-like fields recursively before they enter the ledger."""
+    if isinstance(value, dict):
+        result = {}
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise TypeError("audit metadata object keys must be strings")
+            normalized = "".join(ch for ch in key.lower() if ch.isalnum())
+            if normalized in _SENSITIVE_AUDIT_KEYS or any(
+                marker in normalized
+                for marker in ("password", "totp", "recoverycode", "privatekey", "ciphertext",
+                               "useragent", "forwardedfor", "remoteaddr", "encryptionkey",
+                               "authorizationheader", "httpauthorization")
+            ):
+                result[str(key)] = "[REDACTED]"
+            else:
+                result[str(key)] = _redact_sensitive(item)
+        return result
+    if isinstance(value, (list, tuple)):
+        return [_redact_sensitive(item) for item in value]
+    if isinstance(value, str):
+        return _redact_text(value)
+    return value
+
+
+def _persisted_metadata(value):
+    """Normalize new JSON metadata before hashing and persistence.
+
+    JSONB can turn integral floats (notably exponent notation and signed
+    zero) into integers. Normalize those numbers before INSERT on both
+    engines. Do not apply this new-write rule when hashing historical rows:
+    their stored v1 representation must remain verifiable.
+    """
+    if isinstance(value, float) and math.isfinite(value) and value.is_integer():
+        return int(value)
+    if isinstance(value, dict):
+        return {key: _persisted_metadata(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_persisted_metadata(item) for item in value]
+    return _canonical_value(value)
+
+
+def _request_context():
+    try:
+        from security.request_context import get_current_request
+        return get_current_request()
+    except Exception:
+        return None
+
+
+def _source_fingerprint(request) -> str:
+    if request is None:
+        return ""
+    remote = str(getattr(request, "META", {}).get("REMOTE_ADDR") or "unknown")[:128]
+    message = b"audit-source\x00" + remote.encode("utf-8", errors="replace")
+    return hmac.new(str(settings.SECRET_KEY).encode("utf-8"), message, hashlib.sha256).hexdigest()
+
+
+def _actor_snapshot(user, at):
+    if user is None or getattr(user, "pk", None) is None:
+        return {
+            "actor_type": "ANONYMOUS_OR_SYSTEM",
+            "user_id": None,
+            "roles": [],
+            "permission_overrides": [],
+            "historical_source": "captured_at_event_time",
+        }
+
+    from django.db.models import Q
+    from security.models import (
+        GMRoleSlot,
+        RolePermission,
+        UserPermissionOverride,
+        UserRoleAssignment,
+    )
+
+    assignments = list(
+        UserRoleAssignment.objects.filter(
+            user_id=user.pk,
+            role__is_active=True,
+            revoked_at__isnull=True,
+            start_at__lte=at,
+        ).filter(Q(end_at__isnull=True) | Q(end_at__gt=at))
+        .select_related("role")
+        .order_by("role__code", "pk")
+    )
+    gm_slot_assignment_id = GMRoleSlot.objects.filter(code="GM").values_list(
+        "assignment_id", flat=True
+    ).first()
+    roles = []
+    for assignment in assignments:
+        if assignment.role.code == "GM" and assignment.pk != gm_slot_assignment_id:
+            continue
+        permission_keys = list(
+            RolePermission.objects.filter(
+                role_id=assignment.role_id,
+                permission__is_active=True,
+            ).order_by("permission__key").values_list("permission__key", flat=True)
+        )
+        roles.append({
+            "assignment_id": assignment.pk,
+            "role_code": assignment.role.code,
+            "start_at": assignment.start_at,
+            "end_at": assignment.end_at,
+            "permission_keys": permission_keys,
+        })
+
+    overrides = list(
+        UserPermissionOverride.objects.filter(
+            user_id=user.pk,
+            revoked_at__isnull=True,
+            start_at__lte=at,
+        ).filter(Q(end_at__isnull=True) | Q(end_at__gt=at))
+        .select_related("permission")
+        .order_by("permission__key")
+        .values("permission__key", "effect", "start_at", "end_at")
+    )
+    username_field = user.USERNAME_FIELD
+    return {
+        "actor_type": "USER",
+        "user_id": str(user.pk),
+        "username": str(getattr(user, username_field, "")),
+        "roles": roles,
+        "permission_overrides": overrides,
+        "historical_source": "captured_at_event_time",
+    }
+
+
+def _authorization_snapshot(request, supplied):
+    if supplied is not None:
+        return {"capture": "SERVICE_ARGUMENT", "context": supplied}
+    if request is None:
+        return {
+            "capture": "MANAGEMENT_OR_BACKGROUND",
+            "operation_id": None,
+            "permission_key": None,
+        }
+    request_context = getattr(request, "_erp_authorization_audit_context", None)
+    if request_context is not None:
+        return {"capture": "REQUEST_AUTHORIZATION", "context": request_context}
+    authenticator = getattr(request, "successful_authenticator", None)
+    return {
+        "capture": "REQUEST_AUTHENTICATION_ONLY",
+        "operation_id": None,
+        "permission_key": None,
+        "authenticator": type(authenticator).__name__ if authenticator is not None else None,
+    }
+
+
+def append_audit_event(
+    *,
+    user,
+    action,
+    entity,
+    entity_id,
+    reference,
+    previous_state,
+    new_state,
+    reason,
+    authorization_context=None,
+):
+    if not connection.in_atomic_block:
+        raise AuditChainError("audit events must be appended inside the caller's business transaction")
+    if connection.vendor == "sqlite":
+        # The live Django connection determines BEGIN mode, not a possibly
+        # stale settings dictionary. Manual autocommit-off transactions do
+        # not establish the required outermost Django atomic boundary.
+        if (str(connection.transaction_mode).upper() != "IMMEDIATE"
+                or not connection.commit_on_exit):
+            raise AuditChainError("SQLite audit append requires an outermost IMMEDIATE transaction")
+
+    now = timezone.now()
+    request = _request_context()
+    # The head UPDATE is deliberately the first chain operation. On PostgreSQL
+    # it obtains the row lock under READ COMMITTED; SQLite already owns the
+    # write reservation from BEGIN IMMEDIATE.
+    try:
+        touched = AuditChainHead.objects.filter(pk=1).update(updated_at=now)
+        if touched != 1:
+            raise AuditChainError("audit chain singleton head is missing; apply migrations")
+        head = AuditChainHead.objects.select_for_update().get(pk=1)
+    except DatabaseError as exc:
+        raise AuditChainError("audit chain serialization failed; whole business transaction must roll back") from exc
+
+    event = AuditEvent(
+        user=user,
+        action=action,
+        entity=_redact_text(entity),
+        entity_id=_redact_text(str(entity_id)),
+        reference=_redact_text(reference or ""),
+        # Normalize JSONField payloads to their exact persisted representation
+        # before hashing; the JSON encoder must not transform Decimal, UUID or
+        # datetime values after the digest has been calculated.
+        previous_state=_persisted_metadata(_redact_sensitive(previous_state)),
+        new_state=_persisted_metadata(_redact_sensitive(new_state)),
+        reason=_redact_text(reason or ""),
+        event_uuid=uuid4(),
+        prev_event_hash=head.head_hash,
+        actor_snapshot=_persisted_metadata(_redact_sensitive(_actor_snapshot(user, now))),
+        authorization_context=_persisted_metadata(
+            _redact_sensitive(_authorization_snapshot(request, authorization_context))
+        ),
+        source_fingerprint=_source_fingerprint(request),
+        created_at=now,
+    )
+    event.event_hash = calculate_event_hash(
+        event.prev_event_hash, immutable_event_payload(event)
+    )
+    event.save(force_insert=True)
+
+    head.head_hash = event.event_hash
+    head.last_event = event
+    head.save(update_fields=["head_hash", "last_event", "updated_at"])
+    return event
+
+
+def verify_audit_chain_records(events, *, head_hash: str, last_event_id):
+    """Verify already-loaded event rows; shared by live DB and restored backups."""
+    by_previous = {}
+    for event in events:
+        if event.prev_event_hash in by_previous:
+            raise AuditChainVerificationError("duplicate successor/fork at previous hash")
+        by_previous[event.prev_event_hash] = event
+
+    current = GENESIS_HASH
+    visited_count = 0
+    verified_last_id = None
+    seen_uuid = set()
+    while current in by_previous:
+        event = by_previous[current]
+        event_uuid = str(event.event_uuid).lower()
+        if event_uuid in seen_uuid:
+            raise AuditChainVerificationError("duplicate event UUID or cycle detected")
+        seen_uuid.add(event_uuid)
+        expected = calculate_event_hash(current, immutable_event_payload(event))
+        if not hmac.compare_digest(expected, event.event_hash):
+            raise AuditChainVerificationError(
+                f"event hash mismatch at event id {getattr(event, 'pk', getattr(event, 'id', '?'))}"
+            )
+        visited_count += 1
+        verified_last_id = getattr(event, "pk", getattr(event, "id", None))
+        current = event.event_hash
+
+    if visited_count != len(by_previous):
+        raise AuditChainVerificationError("orphan, missing link, or disconnected audit event detected")
+    if head_hash != current or last_event_id != verified_last_id:
+        raise AuditChainVerificationError("audit chain head does not match the verified final event")
+    return {
+        "valid": True,
+        "event_count": visited_count,
+        "head_hash": current,
+        "last_event_id": verified_last_id,
+    }
+
+
+def verify_audit_chain(*, using="default") -> dict:
+    """Verify one consistent ledger snapshot, serialized against appenders.
+
+    PostgreSQL locks the singleton before reading any event. SQLite acquires
+    the configured IMMEDIATE reservation at the outer transaction boundary.
+    An enclosing transaction (e.g. audit review/export) retains that boundary
+    until its verified page has been materialized.
+    """
+    db = connections[using]
+    if db.vendor == "sqlite" and str(db.transaction_mode).upper() != "IMMEDIATE":
+        raise AuditChainError("SQLite audit verification requires an IMMEDIATE transaction")
+
+    with transaction.atomic(using=using):
+        if db.vendor == "sqlite" and not db.commit_on_exit:
+            raise AuditChainError("SQLite audit verification requires an outermost Django transaction")
+        try:
+            head = AuditChainHead.objects.using(using).select_for_update().get(pk=1)
+        except AuditChainHead.DoesNotExist as exc:
+            raise AuditChainVerificationError("audit chain singleton head is missing") from exc
+        events = AuditEvent.objects.using(using).all().order_by("pk").iterator(chunk_size=1000)
+        return verify_audit_chain_records(
+            events,
+            head_hash=head.head_hash,
+            last_event_id=head.last_event_id,
+        )
+
+
+def has_verified_replacement_preparation(gm_user, *, using="default") -> bool:
+    """Read the specific preparation marker only from a verified audit chain.
+
+    Retain the verifier's serialization boundary through the marker query.
+    No event contents or arbitrary audit-query capability leave this module.
+    """
+    with transaction.atomic(using=using):
+        verify_audit_chain(using=using)
+        return AuditEvent.objects.using(using).filter(
+            entity="REPLACEMENT_IDENTITY_PREPARATION",
+            action=AuditAction.ACCOUNT_EMERGENCY_RECOVERY,
+            user_id=gm_user.pk,
+            entity_id=str(gm_user.pk),
+        ).exists()
+
+
+SQLITE_REPLACEMENT_GUARD_SQL = (
+    "CREATE TRIGGER security_auditevent_no_replace BEFORE INSERT ON security_auditevent WHEN EXISTS (SELECT 1 FROM security_auditevent WHERE id = NEW.id OR event_uuid = NEW.event_uuid OR prev_event_hash = NEW.prev_event_hash OR event_hash = NEW.event_hash) BEGIN SELECT RAISE(ABORT, 'security_auditevent replacement is forbidden'); END"
+)
+
+
+def sqlite_replacement_guard_matches(definitions):
+    actual = definitions.get("security_auditevent_no_replace") or ""
+    return " ".join(actual.split()) == " ".join(SQLITE_REPLACEMENT_GUARD_SQL.split())
+
+
+def assert_audit_trigger_schema(*, using="default"):
+    """Read-only structural check for installed append-only guards.
+
+    This is not proof against a privileged database owner replacing trigger
+    bodies. Actual UPDATE/DELETE rejection is covered by integration tests.
+    """
+    db = connections[using]
+    with db.cursor() as cursor:
+        if db.vendor == "sqlite":
+            cursor.execute(
+                "SELECT name, sql FROM sqlite_master WHERE type = 'trigger' "
+                "AND tbl_name = %s", ["security_auditevent"]
+            )
+            definitions = dict(cursor.fetchall())
+            for operation in ("update", "delete"):
+                name = f"security_auditevent_no_{operation}"
+                expected = (
+                    f"CREATE TRIGGER {name} BEFORE {operation.upper()} ON security_auditevent "
+                    "BEGIN SELECT RAISE(ABORT, 'security_auditevent is append-only'); END"
+                )
+                if " ".join((definitions.get(name) or "").split()) != " ".join(expected.split()):
+                    raise AuditChainVerificationError(f"missing or unexpected audit trigger: {name}")
+            if not sqlite_replacement_guard_matches(definitions):
+                raise AuditChainVerificationError("missing or unexpected SQLite audit replacement guard")
+        elif db.vendor == "postgresql":
+            cursor.execute(
+                "SELECT t.tgtype, t.tgenabled, p.proname "
+                "FROM pg_trigger t JOIN pg_proc p ON p.oid = t.tgfoid "
+                "WHERE t.tgrelid = to_regclass(%s) AND t.tgname = %s "
+                "AND NOT t.tgisinternal",
+                ["security_auditevent", "security_auditevent_no_update_delete"],
+            )
+            row = cursor.fetchone()
+            # PostgreSQL trigger type bits: ROW=1, BEFORE=2, DELETE=8, UPDATE=16.
+            if row is None or row[0] != 27 or row[1] not in ("O", "A") or row[2] != "security_reject_audit_mutation":
+                raise AuditChainVerificationError("missing, disabled or unexpected PostgreSQL audit trigger")
+            cursor.execute(
+                "SELECT t.tgtype, t.tgenabled, p.proname FROM pg_trigger t "
+                "JOIN pg_proc p ON p.oid=t.tgfoid WHERE t.tgrelid=to_regclass(%s) "
+                "AND t.tgname=%s AND NOT t.tgisinternal",
+                ["security_auditevent", "security_auditevent_no_truncate"],
+            )
+            row = cursor.fetchone()
+            if row is None or row[0] != 34 or row[1] not in ("O", "A") or row[2] != "security_reject_audit_truncate":
+                raise AuditChainVerificationError("missing, disabled or unexpected PostgreSQL audit truncate guard")
+        else:
+            raise AuditChainVerificationError(f"unsupported audit database vendor: {db.vendor}")

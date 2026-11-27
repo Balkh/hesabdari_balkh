@@ -1,0 +1,499 @@
+"""Candidate Windows Credential Manager KeyProvider for the local desktop runtime.
+
+Credentials are stored as CRED_TYPE_GENERIC in the current user's vault with
+CRED_PERSIST_LOCAL_MACHINE. Despite the Win32 constant's name, this persistence
+scope means subsequent logon sessions of the same user on the same computer;
+it is not a machine-wide credential. Never run the desktop backend as
+LocalSystem or another service account.
+
+This provider is deliberately not selected by config.settings.production.
+It is for the Windows desktop profile only, pending real Windows 10/11 client
+validation and Tauri sidecar identity verification.
+"""
+from __future__ import annotations
+
+import ctypes
+import hmac
+import os
+import re
+import secrets
+from contextlib import contextmanager
+
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from ctypes import wintypes
+
+from security.errors import KeyUnavailableError
+
+KEY_BYTES = 32  # AES-256 key size; kept dependency-free for OS key-store startup.
+
+CRED_TYPE_GENERIC = 1
+CRED_PERSIST_LOCAL_MACHINE = 2
+CRED_MAX_CREDENTIAL_BLOB_SIZE = 5_120
+ERROR_NOT_FOUND = 1168
+WAIT_OBJECT_0 = 0x00000000
+WAIT_ABANDONED = 0x00000080
+WAIT_TIMEOUT = 0x00000102
+DEFAULT_NAMESPACE = "HesabdariBalkh:Desktop"
+DEFAULT_KEY_ID = "windows-credential-manager-aes256-v1"
+_KEY_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,80}$")
+_NAMESPACE_RE = re.compile(r"^[A-Za-z0-9._:-]{1,120}$")
+
+
+class _FileTime(ctypes.Structure):
+    _fields_ = [
+        ("dwLowDateTime", wintypes.DWORD),
+        ("dwHighDateTime", wintypes.DWORD),
+    ]
+
+
+class _CredentialW(ctypes.Structure):
+    _fields_ = [
+        ("Flags", wintypes.DWORD),
+        ("Type", wintypes.DWORD),
+        ("TargetName", wintypes.LPWSTR),
+        ("Comment", wintypes.LPWSTR),
+        ("LastWritten", _FileTime),
+        ("CredentialBlobSize", wintypes.DWORD),
+        ("CredentialBlob", ctypes.POINTER(ctypes.c_ubyte)),
+        ("Persist", wintypes.DWORD),
+        ("AttributeCount", wintypes.DWORD),
+        ("Attributes", ctypes.c_void_p),
+        ("TargetAlias", wintypes.LPWSTR),
+        ("UserName", wintypes.LPWSTR),
+    ]
+
+
+def _require_windows() -> None:
+    if os.name != "nt":
+        raise KeyUnavailableError("Windows Credential Manager is available only on Windows")
+
+
+def _win_error(operation: str) -> KeyUnavailableError:
+    return KeyUnavailableError(
+        f"{operation} failed with Windows error {ctypes.get_last_error()}"
+    )
+
+
+def _credential_api():
+    _require_windows()
+    advapi32 = ctypes.WinDLL("Advapi32.dll", use_last_error=True)
+    advapi32.CredWriteW.argtypes = [
+        ctypes.POINTER(_CredentialW),
+        wintypes.DWORD,
+    ]
+    advapi32.CredWriteW.restype = wintypes.BOOL
+    advapi32.CredReadW.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.POINTER(ctypes.POINTER(_CredentialW)),
+    ]
+    advapi32.CredReadW.restype = wintypes.BOOL
+    advapi32.CredDeleteW.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+    ]
+    advapi32.CredDeleteW.restype = wintypes.BOOL
+    advapi32.CredFree.argtypes = [ctypes.c_void_p]
+    advapi32.CredFree.restype = None
+    return advapi32
+
+
+def _read_generic(target: str) -> bytes | None:
+    api = _credential_api()
+    pointer = ctypes.POINTER(_CredentialW)()
+    if not api.CredReadW(
+        target,
+        CRED_TYPE_GENERIC,
+        0,
+        ctypes.byref(pointer),
+    ):
+        error = ctypes.get_last_error()
+        if error == ERROR_NOT_FOUND:
+            return None
+        raise KeyUnavailableError(
+            f"Windows Credential Manager read failed with error {error}"
+        )
+    try:
+        item = pointer.contents
+        if item.CredentialBlobSize > CRED_MAX_CREDENTIAL_BLOB_SIZE:
+            raise KeyUnavailableError("Windows Credential Manager returned an oversized credential")
+        if item.CredentialBlobSize and not item.CredentialBlob:
+            raise KeyUnavailableError("Windows Credential Manager returned an invalid credential")
+        return ctypes.string_at(item.CredentialBlob, item.CredentialBlobSize)
+    finally:
+        api.CredFree(ctypes.cast(pointer, ctypes.c_void_p))
+
+
+def _write_generic(target: str, blob: bytes, *, comment: str) -> None:
+    api = _credential_api()
+    if not isinstance(blob, bytes) or not blob or len(blob) > CRED_MAX_CREDENTIAL_BLOB_SIZE:
+        raise KeyUnavailableError("credential material has an invalid size")
+    buffer = (ctypes.c_ubyte * len(blob)).from_buffer_copy(blob)
+    record = _CredentialW()
+    record.Flags = 0
+    record.Type = CRED_TYPE_GENERIC
+    record.TargetName = target
+    record.Comment = comment
+    record.LastWritten = _FileTime(0, 0)
+    record.CredentialBlobSize = len(blob)
+    record.CredentialBlob = ctypes.cast(buffer, ctypes.POINTER(ctypes.c_ubyte))
+    # CRED_PERSIST_LOCAL_MACHINE is per-user storage: it persists across
+    # subsequent logons of this same user on this same computer.
+    record.Persist = CRED_PERSIST_LOCAL_MACHINE
+    record.AttributeCount = 0
+    record.Attributes = None
+    record.TargetAlias = None
+    record.UserName = "Hesabdari Balkh"
+    if not api.CredWriteW(ctypes.byref(record), 0):
+        raise _win_error("CredWriteW(Generic)")
+
+
+def _delete_generic(target: str) -> bool:
+    api = _credential_api()
+    if api.CredDeleteW(target, CRED_TYPE_GENERIC, 0):
+        return True
+    error = ctypes.get_last_error()
+    if error == ERROR_NOT_FOUND:
+        return False
+    raise KeyUnavailableError(
+        f"Windows Credential Manager delete failed with error {error}"
+    )
+
+
+@contextmanager
+def _provisioning_mutex(namespace: str):
+    """Serialize first provisioning across processes in the current logon session."""
+    _require_windows()
+    kernel32 = ctypes.WinDLL("Kernel32.dll", use_last_error=True)
+    kernel32.CreateMutexW.argtypes = [
+        ctypes.c_void_p,
+        wintypes.BOOL,
+        wintypes.LPCWSTR,
+    ]
+    kernel32.CreateMutexW.restype = wintypes.HANDLE
+    kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    kernel32.WaitForSingleObject.restype = wintypes.DWORD
+    kernel32.ReleaseMutex.argtypes = [wintypes.HANDLE]
+    kernel32.ReleaseMutex.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+
+    name = "Local\\HesabdariBalkh.CredentialProvision." + namespace.replace(":", ".")
+    handle = kernel32.CreateMutexW(None, False, name)
+    if not handle:
+        raise _win_error("CreateMutexW")
+    acquired = False
+    try:
+        wait = kernel32.WaitForSingleObject(handle, 15_000)
+        if wait not in (WAIT_OBJECT_0, WAIT_ABANDONED):
+            if wait == WAIT_TIMEOUT:
+                raise KeyUnavailableError("Windows credential provisioning is already running")
+            raise _win_error("WaitForSingleObject")
+        acquired = True
+        yield
+    finally:
+        if acquired:
+            kernel32.ReleaseMutex(handle)
+        kernel32.CloseHandle(handle)
+
+
+def _rollback_new_credentials(written, active_targets):
+    """Keep active pointers if any key cleanup fails; later provisioning must refuse."""
+    cleanup_failed = False
+    for target in reversed(written):
+        if target in active_targets:
+            continue
+        try:
+            _delete_generic(target)
+        except Exception:
+            cleanup_failed = True
+    if not cleanup_failed:
+        for target in reversed(written):
+            if target in active_targets:
+                try:
+                    _delete_generic(target)
+                except Exception:
+                    pass
+
+
+class WindowsCredentialManagerKeyProvider:
+    """AES-256 KeyProvider backed by the current user's Credential Manager vault."""
+
+    KEY_ID = DEFAULT_KEY_ID
+
+    def __init__(self, *, namespace: str = DEFAULT_NAMESPACE):
+        if not isinstance(namespace, str) or not _NAMESPACE_RE.fullmatch(namespace):
+            raise ValueError("invalid Windows credential namespace")
+        self.namespace = namespace
+
+    def _active_target(self) -> str:
+        return f"{self.namespace}:MFA:ACTIVE_KEY_ID"
+
+    def _key_target(self, key_id: str) -> str:
+        if not isinstance(key_id, str) or not _KEY_ID_RE.fullmatch(key_id):
+            raise KeyUnavailableError("requested security key identifier is invalid")
+        return f"{self.namespace}:MFA:KEY:{key_id}"
+
+    def _django_secret_target(self) -> str:
+        return f"{self.namespace}:DJANGO:SECRET:v1"
+
+    def active_key_id(self) -> str:
+        raw = _read_generic(self._active_target())
+        if raw is None:
+            raise KeyUnavailableError("active Windows MFA key is not provisioned for this user")
+        try:
+            key_id = raw.decode("ascii")
+        except UnicodeDecodeError:
+            raise KeyUnavailableError("active Windows MFA key identifier is malformed") from None
+        self.get_key(key_id)
+        return key_id
+
+    def get_key(self, key_id: str) -> bytes:
+        raw = _read_generic(self._key_target(key_id))
+        if raw is None or len(raw) != KEY_BYTES:
+            raise KeyUnavailableError("requested Windows AES-256 key is unavailable or invalid")
+        return raw
+
+    def get_django_secret_key(self) -> str:
+        """Read the separate Django signing key; never reuse the AES key."""
+        raw = _read_generic(self._django_secret_target())
+        if raw is None:
+            raise KeyUnavailableError("desktop Django signing secret is not provisioned for this user")
+        try:
+            value = raw.decode("ascii")
+        except UnicodeDecodeError:
+            raise KeyUnavailableError("desktop Django signing secret is malformed") from None
+        if len(value) < 50:
+            raise KeyUnavailableError("desktop Django signing secret is too short")
+        return value
+
+    def provision(self) -> str:
+        """Provision AES and Django signing secrets once for the current Windows user.
+
+        This is a local first-run operation. Existing or partial records are
+        never overwritten. Raw secret values are never returned or printed.
+        """
+        _require_windows()
+        active_target = self._active_target()
+        key_id = f"{self.KEY_ID}-{secrets.token_hex(16)}"
+        key_target = self._key_target(key_id)
+        django_target = self._django_secret_target()
+        # Keep legacy partial-record detection, as well as the new target.
+        targets = (active_target, key_target, django_target, self._key_target(self.KEY_ID))
+
+        with _provisioning_mutex(self.namespace):
+            if any(_read_generic(target) is not None for target in targets):
+                raise KeyUnavailableError(
+                    "Windows desktop secrets already exist or are partially provisioned; refusing to overwrite"
+                )
+
+            aes_key = secrets.token_bytes(KEY_BYTES)
+            django_secret = secrets.token_urlsafe(64).encode("ascii")
+            written: list[str] = []
+            try:
+                # Reserve the active pointer first. A process crash leaves a
+                # detectable partial vault rather than an unreferenced key.
+                _write_generic(
+                    active_target,
+                    key_id.encode("ascii"),
+                    comment="Hesabdari Balkh active MFA key identifier",
+                )
+                written.append(active_target)
+                _write_generic(
+                    key_target,
+                    aes_key,
+                    comment="Hesabdari Balkh AES-256 MFA encryption key",
+                )
+                written.append(key_target)
+                _write_generic(
+                    django_target,
+                    django_secret,
+                    comment="Hesabdari Balkh Django signing secret",
+                )
+                written.append(django_target)
+
+                read_key = _read_generic(key_target)
+                read_secret = _read_generic(django_target)
+                read_active = _read_generic(active_target)
+                if (
+                    read_key is None
+                    or not hmac.compare_digest(read_key, aes_key)
+                    or read_secret is None
+                    or not hmac.compare_digest(read_secret, django_secret)
+                    or read_active != key_id.encode("ascii")
+                ):
+                    raise KeyUnavailableError(
+                        "Windows desktop credential read-back verification failed"
+                    )
+                return key_id
+            except Exception:
+                _rollback_new_credentials(written, (active_target,))
+                raise KeyUnavailableError(
+                    "Windows desktop secret provisioning failed; inspect the current user's credential vault"
+                ) from None
+
+
+
+    # W0-2E backup encryption and audit-checkpoint signing keys are separate
+    # from the MFA AES key and Django signing secret. They are held only in
+    # the current Windows user's Credential Manager vault. Production must
+    # run the offline desktop under the dedicated GM Windows account; an
+    # ordinary employee profile has a different per-user vault.
+    BACKUP_ENCRYPTION_KEY_ID = "backup-aes256-v1"
+    CHECKPOINT_SIGNING_KEY_ID = "audit-checkpoint-ed25519-v1"
+
+    def _backup_active_target(self) -> str:
+        return f"{self.namespace}:BACKUP:ACTIVE_KEY_ID"
+
+    def _backup_key_target(self, key_id: str) -> str:
+        if not isinstance(key_id, str) or not _KEY_ID_RE.fullmatch(key_id):
+            raise KeyUnavailableError("backup encryption key identifier is invalid")
+        return f"{self.namespace}:BACKUP:KEY:{key_id}"
+
+    def _checkpoint_active_target(self) -> str:
+        return f"{self.namespace}:AUDIT_CHECKPOINT:ACTIVE_KEY_ID"
+
+    def _checkpoint_private_target(self, key_id: str) -> str:
+        if not isinstance(key_id, str) or not _KEY_ID_RE.fullmatch(key_id):
+            raise KeyUnavailableError("checkpoint signing key identifier is invalid")
+        return f"{self.namespace}:AUDIT_CHECKPOINT:PRIVATE:{key_id}"
+
+    def _checkpoint_public_target(self, key_id: str) -> str:
+        if not isinstance(key_id, str) or not _KEY_ID_RE.fullmatch(key_id):
+            raise KeyUnavailableError("checkpoint signing key identifier is invalid")
+        return f"{self.namespace}:AUDIT_CHECKPOINT:PUBLIC:{key_id}"
+
+    def active_backup_encryption_key_id(self) -> str:
+        raw = _read_generic(self._backup_active_target())
+        if raw is None:
+            raise KeyUnavailableError("backup encryption key is not provisioned for this Windows user")
+        try:
+            key_id = raw.decode("ascii")
+        except UnicodeDecodeError:
+            raise KeyUnavailableError("backup encryption key identifier is malformed") from None
+        self.get_backup_encryption_key(key_id)
+        return key_id
+
+    def get_backup_encryption_key(self, key_id: str) -> bytes:
+        raw = _read_generic(self._backup_key_target(key_id))
+        if raw is None or len(raw) != KEY_BYTES:
+            raise KeyUnavailableError("requested backup AES-256 key is unavailable or invalid")
+        return raw
+
+    def active_checkpoint_signing_key_id(self) -> str:
+        raw = _read_generic(self._checkpoint_active_target())
+        if raw is None:
+            raise KeyUnavailableError("audit checkpoint signing key is not provisioned for this Windows user")
+        try:
+            key_id = raw.decode("ascii")
+        except UnicodeDecodeError:
+            raise KeyUnavailableError("audit checkpoint signing key identifier is malformed") from None
+        self.get_checkpoint_signing_private_key(key_id)
+        self.get_checkpoint_signing_public_key(key_id)
+        return key_id
+
+    def get_checkpoint_signing_private_key(self, key_id: str) -> bytes:
+        raw = _read_generic(self._checkpoint_private_target(key_id))
+        if raw is None or len(raw) != 32:
+            raise KeyUnavailableError("requested Ed25519 checkpoint private key is unavailable or invalid")
+        return raw
+
+    def get_checkpoint_signing_public_key(self, key_id: str) -> bytes:
+        raw = _read_generic(self._checkpoint_public_target(key_id))
+        if raw is None or len(raw) != 32:
+            raise KeyUnavailableError("requested Ed25519 checkpoint public key is unavailable or invalid")
+        # Trusted public material is independently read from the protected
+        # vault. Signing validates the pair; verification needs no private key.
+        return raw
+
+    def provision_backup_keys(self) -> dict[str, str]:
+        """Provision AES-256 backup and Ed25519 checkpoint keys once.
+
+        The method refuses any partial or existing key set. Key bytes are
+        never returned, logged, exported, or written beside the database.
+        Provision under the dedicated GM Windows account before enabling
+        backup commands on that desktop.
+        """
+        _require_windows()
+        backup_id = f"{self.BACKUP_ENCRYPTION_KEY_ID}-{secrets.token_hex(16)}"
+        signing_id = f"{self.CHECKPOINT_SIGNING_KEY_ID}-{secrets.token_hex(16)}"
+        backup_active = self._backup_active_target()
+        backup_target = self._backup_key_target(backup_id)
+        signing_active = self._checkpoint_active_target()
+        signing_private_target = self._checkpoint_private_target(signing_id)
+        signing_public_target = self._checkpoint_public_target(signing_id)
+        targets = (
+            backup_active,
+            backup_target,
+            signing_active,
+            signing_private_target,
+            signing_public_target,
+            self._backup_key_target(self.BACKUP_ENCRYPTION_KEY_ID),
+            self._checkpoint_private_target(self.CHECKPOINT_SIGNING_KEY_ID),
+            self._checkpoint_public_target(self.CHECKPOINT_SIGNING_KEY_ID),
+        )
+
+        with _provisioning_mutex(self.namespace):
+            if any(_read_generic(target) is not None for target in targets):
+                raise KeyUnavailableError(
+                    "backup/checkpoint keys already exist or are partially provisioned; refusing to overwrite"
+                )
+
+            backup_key = secrets.token_bytes(KEY_BYTES)
+            private_key = Ed25519PrivateKey.generate()
+            private_bytes = private_key.private_bytes(
+                encoding=serialization.Encoding.Raw,
+                format=serialization.PrivateFormat.Raw,
+                encryption_algorithm=serialization.NoEncryption(),
+            )
+            public_bytes = private_key.public_key().public_bytes(
+                encoding=serialization.Encoding.Raw,
+                format=serialization.PublicFormat.Raw,
+            )
+            # Reserve both active pointers before writing new key material.
+            records = (
+                (backup_active, backup_id.encode("ascii"), "Hesabdari Balkh active backup key identifier"),
+                (signing_active, signing_id.encode("ascii"), "Hesabdari Balkh active audit checkpoint key identifier"),
+                (backup_target, backup_key, "Hesabdari Balkh AES-256 offline backup key"),
+                (signing_private_target, private_bytes, "Hesabdari Balkh Ed25519 audit checkpoint private key"),
+                (signing_public_target, public_bytes, "Hesabdari Balkh Ed25519 audit checkpoint public key"),
+            )
+            written: list[str] = []
+            try:
+                for target, value, comment in records:
+                    _write_generic(target, value, comment=comment)
+                    written.append(target)
+
+                if (
+                    _read_generic(backup_target) != backup_key
+                    or _read_generic(signing_private_target) != private_bytes
+                    or _read_generic(signing_public_target) != public_bytes
+                    or _read_generic(backup_active) != backup_id.encode("ascii")
+                    or _read_generic(signing_active) != signing_id.encode("ascii")
+                ):
+                    raise KeyUnavailableError("backup/checkpoint key read-back verification failed")
+
+                # Independently validate the provisioned pair.
+                read_private = Ed25519PrivateKey.from_private_bytes(
+                    self.get_checkpoint_signing_private_key(signing_id)
+                )
+                if not hmac.compare_digest(
+                    self.get_checkpoint_signing_public_key(signing_id),
+                    read_private.public_key().public_bytes(
+                        encoding=serialization.Encoding.Raw,
+                        format=serialization.PublicFormat.Raw,
+                    ),
+                ):
+                    raise KeyUnavailableError("checkpoint signing key-pair validation failed")
+                return {
+                    "backup_encryption_key_id": backup_id,
+                    "checkpoint_signing_key_id": signing_id,
+                }
+            except Exception:
+                _rollback_new_credentials(written, (backup_active, signing_active))
+                raise KeyUnavailableError(
+                    "backup/checkpoint key provisioning failed; inspect the dedicated GM Credential Manager vault"
+                ) from None

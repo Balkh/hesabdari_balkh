@@ -1,16 +1,30 @@
-"""W0-2A / R1 — dormant RBAC authorization resolver (§16).
+"""W0-2A / R1 RBAC policy core, extended by the W0-2B/R2 operation entry point.
+
+The legacy key-only `resolve()` remains a compatibility wrapper with its
+R1 evaluation order. Mounted R2 API views call `resolve_operation()` through
+`HasErpOperation`; the operation-aware path binds a server-declared view
+method and typed target while reusing the same policy core.
 
 Binding contract: W0-2A_RBAC_OFFLINE_SECURITY_DESIGN_DRAFT.md §16.1 (the
 ten-step evaluation sequence), §16.2 (pseudocode), §9A Item 2, as approved
 at commit e0d7db4505b7c04b1093c07e953aa4b1a3944f1d.
 
-DORMANCY (§24.2): this module is CODE, DORMANT in W0-2A/R1 — zero view
-wiring, zero settings changes, and zero importers among view modules. A
-structural regression test (security.test_r1_regression) asserts that no
-installed application's view modules import this module, and that the DRF
-default permission/authentication settings are untouched. Nothing in the
-production request path may call ``resolve`` until a later owner-approved
-batch wires it.
+Historical R1 boundary and current R2 wiring:
+- In W0-2A/R1, the key-only resolver was dormant and no first-party view
+  imported it directly. The R1 regression test continues to pin that direct
+  import boundary and the frozen DRF authentication defaults.
+- W0-2B/R2 now wires only explicitly declared API methods through
+  HasErpOperation, OperationSpec, and resolve_operation(). The operation
+  registry imports the typed TargetReference; view modules do not call the
+  legacy resolve() entry point.
+- Both entry points use the same _resolve() policy core. The legacy
+  key-only resolve() retains its R1 evaluation behavior; the operation
+  entry point supplies a method-specific server-owned resource binding.
+- ERP_RBAC_ENFORCEMENT remains False by default in base/development
+  settings. Production settings now require an explicit true value through
+  security.production_guard.require_rbac_enforcement_from_env(); desktop
+  settings independently enable strict RBAC. This stacked PR remains Draft
+  until its full review, exact-head CI, and owner acceptance are complete.
 
 Evaluation order (§16.1 — never reordered, never short-circuited into an
 allow path):
@@ -23,7 +37,12 @@ allow path):
                                unauthenticated callers learn nothing)
 5. Protected GM authority   -> ALLOW GM_PROTECTED (overrides never
                                consulted for GM; domain invariants still
-                               apply downstream of the resolver)
+                               apply downstream of the resolver).
+                               W0-2B owner decision: GM is recognized ONLY
+                               through the singleton GMRoleSlot row's linked
+                               assignment; an unlinked GM assignment grants
+                               no GM authority (identity, role, and ACTIVE
+                               predicate of the LINKED row are all required).
 6. Explicit user DENY       -> DENY USER_DENY (deny wins over everything
                                below)
 7. Explicit user ALLOW      -> candidate USER_ALLOW (never returned before
@@ -43,25 +62,26 @@ Known R1 limitations (documented, fail-closed, tested):
 - ``account_locked`` is a no-op until the W0-2D lockout store exists; the
   ACCOUNT_LOCKED branch and its position BEFORE the GM step are pinned by
   tests using that seam.
-- ``AuthContext.requires_mfa`` is False for every caller in R1 because MFA
-  does not exist yet (W0-2C). The MFA_REQUIRED branch is implemented now
-  and pinned by tests, so BasicAuthentication can never satisfy an
-  MFA-protected operation later (§6, R27).
+- In the historical R1-only context, ``requires_mfa`` was False.
+  W0-2C now populates the flag from singleton-GM identity and the employee
+  MFA policy; the MFA_REQUIRED gate denies Basic-only authentication and
+  is covered by API regression tests (§6, R27).
 - Per-operation resource binding is SERVER-OWNED operation metadata,
-  independent of the permission's ``scope_policy`` (§16.1 step 9, §16.2:
-  ``server_defined_resource_binding(permission_key)``). The shipped R1
-  registry declares the only architecture-unambiguous bindings: the ten
-  WAREHOUSE_REQUIRED keys bind the persisted ``warehouses.Warehouse``
-  target and the two OBJECT_REQUIRED keys bind the persisted target user
-  (self-scope). ``scope_policy=NONE`` means no warehouse/object
-  authorization restriction — it NEVER waives target resolution or
-  validation for a target-bound operation (§15A classification
-  framework). The §15A ``resolver_context`` column defers each NONE
-  operation's executable binding to the owning API batch (W0-2B), which
-  declares them through ``register_operation_binding``. An undeclared
-  key retains an explicit UNDECLARED status and is denied at the shared
-  gate; only an explicitly registered non-target-bound operation is a
-  collection operation (§24.2).
+  independent of the permission's scope_policy (§16.1 step 9, §16.2).
+  The legacy R1 key-only entry point uses the shipped binding registry and
+  its register_operation_binding seam. The R2 API entry point obtains
+  immutable per-method declarations from security.operation_registry:
+  OperationSpec states COLLECTION or OBJECT, permission key, target kind,
+  and server-owned target source. resolve_operation() converts that
+  declaration into the shared resolver's binding override; this allows
+  collection and object methods to share a permission key without sharing
+  a target rule.
+  The shipped R1 registry still declares the ten WAREHOUSE_REQUIRED keys
+  and two OBJECT_REQUIRED self-user keys. scope_policy=NONE means no
+  warehouse/object authorization restriction — it NEVER waives target
+  resolution or validation for a target-bound operation (§15A). Missing
+  operation declarations fail closed; a collection exists only when
+  explicitly declared as COLLECTION.
 - Target resolution always re-resolves from persisted rows (fresh fetch
   by pk plus any declared required parents): unsaved instances,
   fabricated pks, deleted rows, wrong types, and unresolvable required
@@ -79,6 +99,7 @@ from typing import Optional
 from django.core.exceptions import ObjectDoesNotExist
 from django.utils import timezone
 
+from security.gm_slot import GM_SLOT_CODE, load_singleton_slot
 from security.models import (
     OverrideEffect,
     Permission,
@@ -113,10 +134,21 @@ DENY_FAIL_CLOSED = "FAIL_CLOSED"
 # Target kinds for the R1 resource-binding registry (§16.1 step 9).
 BINDING_TARGET_WAREHOUSE = "WAREHOUSE"
 BINDING_TARGET_SELF_USER = "SELF_USER"
+BINDING_TARGET_USER = "USER"
+BINDING_TARGET_FISCAL_PERIOD = "FISCAL_PERIOD"
+BINDING_TARGET_LANDED_COST_DOCUMENT = "LANDED_COST_DOCUMENT"
 
 # Binding status vocabulary (server-owned operation metadata).
 BINDING_STATUS_DECLARED = "DECLARED"
 BINDING_STATUS_UNDECLARED = "UNDECLARED_W0_2B"  # owning API batch must declare
+
+
+@dataclass(frozen=True)
+class TargetReference:
+    """Server-created reference to a persisted object; never built from client model metadata."""
+
+    target_kind: str
+    pk: object
 
 
 @dataclass(frozen=True)
@@ -141,21 +173,26 @@ class AuthContext:
     from a Django/DRF request using the server session store and DRF's
     successful authenticator.
 
-    Session validity semantics in R1:
-    - A trusted server-side Django session bound to the user is valid until
-      its expiry (binding/revocation validation arrives with W0-2D).
-    - A BasicAuthentication-only context carries NO session evidence. Under
-      the frozen Batch 2/3 authentication contract, Basic remains a valid
-      authentication path until W0-2C introduces MFA; the fail-closed
-      MFA gate (``is_basic_only and requires_mfa``) is what will deny
-      Basic-only access to MFA-protected operations (R27). It must never
-      be set to True by callers in R1.
-    - Any context with neither session evidence nor a recognized
-      mechanism fails closed (NO_ACTIVE_SESSION).
+    Session validity semantics in W0-2C:
+    - SessionAuthentication is accepted only when Django's authenticated
+      user id matches the request user AND the session key resolves to a
+      live, user-bound SecurityLoginSession registry row. The row is
+      touched/validated against revocation, idle expiry, and absolute
+      lifetime before the operation resolver proceeds.
+    - BasicAuthentication carries NO registry-session evidence. The frozen
+      Batch 2/3 compatibility path remains intentionally enabled for
+      selected non-GM operations when employee MFA is not required. Such
+      calls do not consume one of the two registered session slots and do
+      not receive registry idle/absolute timeout or per-session revocation.
+      Basic-only requests can never satisfy the MFA_REQUIRED gate, and the
+      session-only MFA management endpoints do not accept Basic.
+    - Any context with neither a valid registry session nor a recognized
+      Basic compatibility mechanism fails closed (NO_ACTIVE_SESSION).
     """
 
     is_basic_only: bool = False
     requires_mfa: bool = False
+    mfa_verified: bool = False
     session_user_id: Optional[int] = None
     session_expiry: Optional[object] = None
 
@@ -172,48 +209,80 @@ class AuthContext:
 
     @classmethod
     def from_request(cls, request) -> "AuthContext":
-        """Build the context from server-side request evidence only.
+        """Derive context only from authenticated server-side evidence.
 
-        Reads DRF's ``successful_authenticator`` (server fact) and Django's
-        server-side session store. Never reads caller-supplied payloads.
+        Django session cookies are insufficient by themselves: a live,
+        user-bound W0-2C registry row is required. BasicAuthentication remains
+        a temporary compatibility path for non-GM operations, but can never
+        satisfy the mandatory GM MFA gate.
         """
         from rest_framework.authentication import BasicAuthentication
 
         user = getattr(request, "user", None)
         session = getattr(request, "session", None)
-
+        authenticated = bool(user is not None and getattr(user, "is_authenticated", False))
+        at = timezone.now()
         is_basic_only = isinstance(
             getattr(request, "successful_authenticator", None), BasicAuthentication
         )
 
+        requires_mfa = False
+        mfa_verified = False
         session_user_id = None
         session_expiry = None
-        if (
-            session is not None
-            and user is not None
-            and getattr(user, "is_authenticated", False)
-        ):
-            raw_id = session.get("_auth_user_id")
-            if raw_id is not None and str(raw_id) == str(user.pk):
-                session_user_id = user.pk
-                session_expiry = session.get_expiry_date()
+
+        if authenticated:
+            # Only the active assignment linked to the singleton GM slot is
+            # treated as the GM identity. Staff/superuser flags and unlinked
+            # GM assignments cannot activate this requirement.
+            from security.mfa_policy import user_requires_mfa
+
+            requires_mfa = user_requires_mfa(user, at=at)
+
+            if is_basic_only and not requires_mfa:
+                # Successful eligible legacy Basic authentication clears
+                # stale failures, but can never clear a live account lock.
+                from security.login_lockout import clear_failures_after_basic_auth
+
+                clear_failures_after_basic_auth(user, at=at)
+
+            if session is not None:
+                raw_id = session.get("_auth_user_id")
+                session_key = getattr(session, "session_key", None)
+                if raw_id is not None and str(raw_id) == str(user.pk) and session_key:
+                    from security.session_service import touch_login_session
+
+                    record = touch_login_session(user, session_key, at=at)
+                    if record is not None:
+                        session_user_id = user.pk
+                        session_expiry = min(
+                            record.idle_expires_at, record.absolute_expires_at
+                        )
+                        mfa_verified = record.mfa_verified_at is not None
 
         return cls(
             is_basic_only=is_basic_only,
-            requires_mfa=False,  # R1: MFA arrives with W0-2C
+            requires_mfa=requires_mfa,
+            mfa_verified=mfa_verified,
             session_user_id=session_user_id,
             session_expiry=session_expiry,
         )
 
 
 def account_locked(user, at) -> bool:
-    """Account-lockout predicate — NO-OP until W0-2D ships its store.
+    """Fail-closed W0-2D account-lockout predicate (authorization step 2)."""
+    if user is None or getattr(user, "pk", None) is None:
+        return False
+    try:
+        from security.login_lockout import is_account_locked
 
-    The ACCOUNT_LOCKED deny reason and its position BEFORE the protected-GM
-    step are binding (§16.1 steps 2 and 5; test R14). W0-2D implements the
-    real store and keeps this seam.
-    """
-    return False
+        return is_account_locked(user, at=at)
+    except Exception:
+        logger.exception(
+            "account lockout state could not be verified; denying access",
+            extra={"user_id": getattr(user, "pk", None)},
+        )
+        return True
 
 
 @dataclass(frozen=True)
@@ -300,6 +369,7 @@ _BINDING_STATUS_UNDECLARED = _ResourceBinding(
 _BINDING_TARGET_MODELS = {
     BINDING_TARGET_WAREHOUSE: "warehouses.models.Warehouse",
     BINDING_TARGET_SELF_USER: "django.contrib.auth User",
+    BINDING_TARGET_USER: "django.contrib.auth User",
 }
 
 
@@ -314,10 +384,18 @@ def _binding_target_model(kind):
         from warehouses.models import Warehouse
 
         return Warehouse
-    if kind == BINDING_TARGET_SELF_USER:
+    if kind in (BINDING_TARGET_SELF_USER, BINDING_TARGET_USER):
         from django.contrib.auth import get_user_model
 
         return get_user_model()
+    if kind == BINDING_TARGET_FISCAL_PERIOD:
+        from fiscal_periods.models import FiscalPeriod
+
+        return FiscalPeriod
+    if kind == BINDING_TARGET_LANDED_COST_DOCUMENT:
+        from purchases.models import LandedCostDocument
+
+        return LandedCostDocument
     model = _BINDING_TARGET_MODELS.get(kind)
     if model is None:
         raise LookupError(kind)
@@ -493,11 +571,56 @@ def _active_window_q(model, at):
     return Q(end_at__isnull=True) | Q(end_at__gt=at)
 
 
-def _has_active_role(user, role_code, at) -> bool:
-    """ACTIVE role assignment (§14.2) for a live role."""
+def _singleton_gm_assignment_id(user) -> Optional[int]:
+    """Identity of the single GM holder's assignment, when it is this user's.
+
+    W0-2B owner decision (additive): at most ONE user may hold the active
+    GM role in the entire ERP at any time. The singleton ``GMRoleSlot`` row
+    is the authoritative identity of that one holder; the resolver
+    recognizes GM ONLY through it.
+
+    Fail-closed to ``None`` (not GM) for: a missing or malformed slot row,
+    the valid empty slot (no GM provisioned yet), a slot held by another
+    user, and a slot linking a missing/wrong/inactive-role assignment.
+    Database errors propagate to the resolver's fail-closed boundary —
+    they can never read as "not GM silently": the outer except converts
+    them into DENY FAIL_CLOSED.
+    """
+    slot = load_singleton_slot()
+    if slot is None:
+        logger.error(
+            "GM singleton slot row is missing or unreadable; GM authority "
+            "is disabled"
+        )
+        return None
+    assignment = slot.assignment
+    if assignment is None:
+        # Valid pre-provisioning / controlled-recovery state: no GM exists.
+        return None
+    if assignment.user_id != user.pk:
+        return None
+    role = getattr(assignment, "role", None)
+    if role is None or role.code != GM_ROLE_CODE or not role.is_active:
+        logger.error(
+            "GM singleton slot links a malformed or non-GM assignment; "
+            "GM authority is denied"
+        )
+        return None
+    return assignment.pk
+
+
+def _linked_gm_assignment_is_active(user, assignment_id, at) -> bool:
+    """ACTIVE predicate (§14.2) evaluated on the SLOT-LINKED row only.
+
+    Deliberately pinned to the linked assignment's pk: another live GM
+    assignment of the same user (an unlinked row) must never satisfy the
+    predicate, and the (user, role) live-slot uniqueness makes the linked
+    row the user's only possible live GM assignment anyway.
+    """
     return UserRoleAssignment.objects.filter(
+        pk=assignment_id,
         user=user,
-        role__code=role_code,
+        role__code=GM_ROLE_CODE,
         role__is_active=True,
         revoked_at__isnull=True,
         start_at__lte=at,
@@ -517,11 +640,19 @@ def _live_overrides(user, permission, at):
     return base
 
 
-def _union_of_active_role_permission_keys(user, at):
-    """Union of permission keys across all ACTIVE role grants (§14.5)."""
+def _union_of_active_role_permission_keys(user, at, *, include_gm=False):
+    """Union of permission keys across all ACTIVE role grants (§14.5).
+
+    W0-2B singleton-GM: the GM role's keys are granted ONLY through the
+    singleton slot. The GM role is therefore excluded from the ordinary
+    assignment join (an unlinked ``UserRoleAssignment(role=GM)`` grants no
+    GM permission keys) and ``_gm_capability_keys()`` is unioned only when
+    the caller proved the caller user holds the slot-linked ACTIVE GM
+    assignment. Non-GM role evaluation is unchanged.
+    """
     from django.db.models import Q
 
-    return set(
+    keys = set(
         RolePermission.objects.filter(
             role__is_active=True,
             permission__is_active=True,
@@ -531,8 +662,12 @@ def _union_of_active_role_permission_keys(user, at):
         ).filter(
             Q(role__user_assignments__end_at__isnull=True)
             | Q(role__user_assignments__end_at__gt=at)
-        ).values_list("permission__key", flat=True)
+        ).exclude(role__code=GM_SLOT_CODE)
+        .values_list("permission__key", flat=True)
     )
+    if include_gm:
+        keys |= _gm_capability_keys()
+    return keys
 
 
 def _gm_capability_keys():
@@ -552,7 +687,85 @@ def _gm_capability_keys():
 
 
 def resolve(user, permission_key, *, auth_context, resource=None, at=None) -> PermissionDecision:
-    """Resolve one permission decision for one user (§16.1, dormant in R1)."""
+    """Legacy R1 key-only resolver. Its protected-GM sequence is intentionally unchanged."""
+    return _resolve(
+        user, permission_key, auth_context=auth_context,
+        resource=resource, at=at,
+    )
+
+
+def resolve_operation(user, operation, *, auth_context, target_reference=None, at=None) -> PermissionDecision:
+    """Resolve an R2 view+method operation through the shared R1 policy core.
+
+    Operation metadata is server-owned. R2 binds the permission decision to
+    the declared target kind and validates target existence/type before a
+    protected-GM allow. The legacy key-only R1 entry point is unchanged.
+    """
+    binding_kind = getattr(operation, "binding_kind", None)
+    if binding_kind not in ("COLLECTION", "OBJECT"):
+        return PermissionDecision(False, DENY_SCOPE_DENIED, None, ("operation:invalid-binding",))
+    target_kind = getattr(operation, "target_kind", None)
+    if binding_kind == "OBJECT" and not target_kind:
+        return PermissionDecision(False, DENY_SCOPE_DENIED, None, ("operation:missing-target-kind",))
+    if binding_kind == "COLLECTION" and target_kind is not None:
+        return PermissionDecision(False, DENY_SCOPE_DENIED, None, ("operation:collection-target-kind",))
+    binding = _ResourceBinding(
+        is_target_bound=(binding_kind == "OBJECT"),
+        target_kind=target_kind,
+    )
+    return _resolve(
+        user,
+        getattr(operation, "permission_key", None),
+        auth_context=auth_context,
+        at=at,
+        binding_override=binding,
+        target_reference=target_reference,
+        operation_aware=True,
+    )
+
+
+def _resolve_persisted_target_reference(binding, target_reference):
+    """Resolve a typed R2 target using only the operation's server-declared model kind."""
+    if not isinstance(target_reference, TargetReference):
+        return None
+    if target_reference.target_kind != binding.target_kind or target_reference.pk is None:
+        return None
+    if isinstance(target_reference.pk, bool) or not isinstance(target_reference.pk, (int, str)):
+        return None
+    if isinstance(target_reference.pk, str) and not target_reference.pk.strip():
+        return None
+    try:
+        model = _binding_target_model(binding.target_kind)
+    except LookupError:
+        return None
+    try:
+        persisted = model._default_manager.get(pk=target_reference.pk)
+    except ObjectDoesNotExist:
+        return None
+    for parent_path in binding.required_parent_paths:
+        attr = persisted
+        try:
+            for part in parent_path.split("__"):
+                attr = getattr(attr, part)
+                if attr is None:
+                    return None
+        except ObjectDoesNotExist:
+            return None
+    return persisted
+
+
+def _resolve(
+    user,
+    permission_key,
+    *,
+    auth_context,
+    resource=None,
+    at=None,
+    binding_override=None,
+    target_reference=None,
+    operation_aware=False,
+) -> PermissionDecision:
+    """Shared authorization policy core for legacy R1 and operation-aware R2."""
     at = at or timezone.now()
     trace = []
     try:
@@ -575,8 +788,8 @@ def resolve(user, permission_key, *, auth_context, resource=None, at=None) -> Pe
         if auth_context is None or not auth_context.is_valid_for(user, at):
             trace.append("3:NO_ACTIVE_SESSION")
             return PermissionDecision(False, DENY_NO_ACTIVE_SESSION, None, tuple(trace))
-        if getattr(auth_context, "is_basic_only", False) and getattr(
-            auth_context, "requires_mfa", False
+        if getattr(auth_context, "requires_mfa", False) and not getattr(
+            auth_context, "mfa_verified", False
         ):
             trace.append("3:MFA_REQUIRED")
             return PermissionDecision(False, DENY_MFA_REQUIRED, None, tuple(trace))
@@ -594,9 +807,31 @@ def resolve(user, permission_key, *, auth_context, resource=None, at=None) -> Pe
             return PermissionDecision(False, DENY_UNKNOWN_PERMISSION, None, tuple(trace))
 
         # Step 5 — protected GM authority (overrides never consulted).
-        if _has_active_role(user, GM_ROLE_CODE, at) and (
-            permission.key in _gm_capability_keys()
-        ):
+        # W0-2B singleton: identity comes from the GMRoleSlot row; the
+        # ACTIVE predicate is evaluated on the slot-LINKED assignment only.
+        gm_slot_assignment_id = _singleton_gm_assignment_id(user)
+        gm_is_linked_and_active = (
+            gm_slot_assignment_id is not None
+            and _linked_gm_assignment_is_active(user, gm_slot_assignment_id, at)
+        )
+        if gm_is_linked_and_active and permission.key in _gm_capability_keys():
+            if operation_aware:
+                # R2 API operations validate server-declared target identity
+                # before GM authority. This is deliberately not applied to
+                # the frozen legacy R1 key-only resolver.
+                if binding_override is None:
+                    trace.append("5:SCOPE_DENIED:operation-binding-missing")
+                    return PermissionDecision(False, DENY_SCOPE_DENIED, None, tuple(trace))
+                if binding_override.is_target_bound:
+                    gm_target = _resolve_persisted_target_reference(
+                        binding_override, target_reference
+                    )
+                    if gm_target is None:
+                        trace.append("5:SCOPE_DENIED:target-resolution")
+                        return PermissionDecision(False, DENY_SCOPE_DENIED, None, tuple(trace))
+                elif target_reference is not None:
+                    trace.append("5:SCOPE_DENIED:collection-has-target")
+                    return PermissionDecision(False, DENY_SCOPE_DENIED, None, tuple(trace))
             trace.append("5:GM_PROTECTED")
             return PermissionDecision(True, ALLOW_GM_PROTECTED, "GM", tuple(trace))
 
@@ -611,7 +846,9 @@ def resolve(user, permission_key, *, auth_context, resource=None, at=None) -> Pe
         # Steps 7/8 — discover BOTH candidate sources before the shared
         # scope gate. Neither becomes an ALLOW result here.
         user_allow = active_overrides.filter(effect=OverrideEffect.ALLOW).exists()
-        role_grant_keys = _union_of_active_role_permission_keys(user, at)
+        role_grant_keys = _union_of_active_role_permission_keys(
+            user, at, include_gm=gm_is_linked_and_active
+        )
         role_grant = permission.key in role_grant_keys
         if not (user_allow or role_grant):
             trace.append("10:NO_GRANT")
@@ -629,8 +866,12 @@ def resolve(user, permission_key, *, auth_context, resource=None, at=None) -> Pe
             trace.append("9:SCOPE_DENIED:no-registry-metadata")
             return PermissionDecision(False, DENY_SCOPE_DENIED, None, tuple(trace))
 
-        binding = _server_defined_resource_binding(permission.key)
-        if binding.binding_status != BINDING_STATUS_DECLARED:
+        binding = (
+            binding_override
+            if operation_aware
+            else _server_defined_resource_binding(permission.key)
+        )
+        if binding is None or binding.binding_status != BINDING_STATUS_DECLARED:
             # UNDECLARED is a contract/configuration failure, NOT a
             # collection declaration. Fail closed for every candidate
             # grant, including explicit user ALLOW.
@@ -638,17 +879,22 @@ def resolve(user, permission_key, *, auth_context, resource=None, at=None) -> Pe
             return PermissionDecision(False, DENY_SCOPE_DENIED, None, tuple(trace))
 
         if binding.is_target_bound:
-            # Target validation runs REGARDLESS of the key's scope_policy
-            # (§16.1 step 9, §15A): NONE waives warehouse/object
-            # authorization restrictions, never target resolution.
-            resolved_target = _resolve_persisted_target(binding, resource)
+            # Target validation runs REGARDLESS of the key's scope_policy.
+            # R2 resolves typed references through the operation's model kind;
+            # R1 continues to pass a server-side model instance.
+            resolved_target = (
+                _resolve_persisted_target_reference(binding, target_reference)
+                if operation_aware
+                else _resolve_persisted_target(binding, resource)
+            )
             if resolved_target is None:
                 trace.append("9:SCOPE_DENIED:target-resolution")
                 return PermissionDecision(False, DENY_SCOPE_DENIED, None, tuple(trace))
         else:
-            # No target is required ONLY because this operation has an
-            # explicit server-owned non-target-bound (collection)
-            # declaration. UNDECLARED was rejected immediately above.
+            # A collection binding is explicit; it cannot be supplied a target.
+            if operation_aware and target_reference is not None:
+                trace.append("9:SCOPE_DENIED:collection-has-target")
+                return PermissionDecision(False, DENY_SCOPE_DENIED, None, tuple(trace))
             resolved_target = None
 
         trusted_scope = _derive_trusted_scope(resolved_target, scope_policy)

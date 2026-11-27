@@ -1,9 +1,12 @@
+import uuid
+
 from django.conf import settings
 from django.db import models
 from django.utils import timezone
 
 
 class AuditAction(models.TextChoices):
+    # Historical values are permanent: never rename or rewrite them.
     LOGIN = "LOGIN", "Login"
     LOGOUT = "LOGOUT", "Logout"
     CREATE = "CREATE", "Create"
@@ -11,22 +14,74 @@ class AuditAction(models.TextChoices):
     POST = "POST", "Post"
     REVERSE = "REVERSE", "Reverse"
     APPROVE = "APPROVE", "Approve"
+    LOGIN_SUCCESS = "LOGIN_SUCCESS", "Login successful"
+    LOGIN_FAILED = "LOGIN_FAILED", "Failed login"
+    ACCOUNT_CREATED = "ACCOUNT_CREATED", "Account created"
+    ACCOUNT_ACTIVATED = "ACCOUNT_ACTIVATED", "Account activated"
+    ACCOUNT_DEACTIVATED = "ACCOUNT_DEACTIVATED", "Account deactivated"
+    ACCOUNT_RECOVERY = "ACCOUNT_RECOVERY", "Account recovery"
+    ACCOUNT_BOOTSTRAP = "ACCOUNT_BOOTSTRAP", "Account bootstrap"
+    ACCOUNT_LOCKED = "ACCOUNT_LOCKED", "Account locked"
+    ACCOUNT_UNLOCKED = "ACCOUNT_UNLOCKED", "Account unlocked"
+    ACCOUNT_EMERGENCY_RECOVERY = "ACCOUNT_EMERGENCY_RECOVERY", "Emergency account recovery"
+    ROLE_ASSIGNED = "ROLE_ASSIGNED", "Role assigned"
+    ROLE_REVOKED = "ROLE_REVOKED", "Role revoked"
+    PERMISSION_GRANTED = "PERMISSION_GRANTED", "Permission granted"
+    PERMISSION_REVOKED = "PERMISSION_REVOKED", "Permission revoked"
+    PERMISSION_DENIED = "PERMISSION_DENIED", "Permission denied"
+    SESSION_STARTED = "SESSION_STARTED", "Session started"
+    SESSION_TERMINATED = "SESSION_TERMINATED", "Session terminated"
+    MFA_ENROLLED = "MFA_ENROLLED", "MFA enrolled"
+    MFA_REVOKED = "MFA_REVOKED", "MFA revoked"
+    MFA_RESET = "MFA_RESET", "MFA reset"
+    RECOVERY_CODES_ROTATED = "RECOVERY_CODES_ROTATED", "Recovery codes rotated"
+    ACCESS_GRANTED = "ACCESS_GRANTED", "Access granted"
+    ACCESS_EXTENDED = "ACCESS_EXTENDED", "Access extended"
+    ACCESS_REVOKED = "ACCESS_REVOKED", "Access revoked"
+    AUDIT_CHECKPOINT = "AUDIT_CHECKPOINT", "Audit checkpoint"
+    DELETE = "DELETE", "Delete"
 
 
 class AuditEvent(models.Model):
-    """Immutable audit foundation for future financial operations."""
+    """Append-only audit event whose immutable payload is linked by SHA-256."""
     user = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.PROTECT)
-    action = models.CharField(max_length=20, choices=AuditAction.choices)
+    action = models.CharField(max_length=40, choices=AuditAction.choices)
     entity = models.CharField(max_length=100)
     entity_id = models.CharField(max_length=100, blank=True)
     reference = models.CharField(max_length=200, blank=True)
     previous_state = models.JSONField(null=True, blank=True)
     new_state = models.JSONField(null=True, blank=True)
     reason = models.CharField(max_length=500, blank=True)
-    created_at = models.DateTimeField(auto_now_add=True)
+    event_uuid = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
+    prev_event_hash = models.CharField(max_length=64, unique=True, editable=False)
+    event_hash = models.CharField(max_length=64, unique=True, editable=False)
+    actor_snapshot = models.JSONField(default=dict, editable=False)
+    authorization_context = models.JSONField(default=dict, editable=False)
+    source_fingerprint = models.CharField(max_length=64, blank=True, default="", editable=False)
+    # A caller-supplied timestamp is needed so the value hashed before INSERT
+    # is byte-for-byte identical to the value persisted by the database.
+    created_at = models.DateTimeField(default=timezone.now, editable=False)
 
     class Meta:
         ordering = ["-created_at", "-id"]
+
+
+class AuditChainHead(models.Model):
+    """Fixed singleton row serializing the current audit-chain head."""
+    id = models.PositiveSmallIntegerField(primary_key=True)
+    head_hash = models.CharField(max_length=64, default="0000000000000000000000000000000000000000000000000000000000000000")
+    last_event = models.ForeignKey(
+        AuditEvent, null=True, blank=True, on_delete=models.PROTECT, related_name="+"
+    )
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(id=1),
+                name="security_audit_head_singleton",
+            ),
+        ]
 
 
 # ---------------------------------------------------------------------------
@@ -349,3 +404,74 @@ class UserWarehouseScope(models.Model):
 
     def __str__(self):
         return f"{self.user_id}:{self.warehouse_id}"
+
+
+class GMRoleSlot(models.Model):
+    """W0-2B — authoritative singleton identity of the single GM holder.
+
+    Owner decision (additive, W0-2B/R2): **at most ONE user may hold the
+    active General Manager role in the entire ERP at any time.** Zero active
+    GM users are permitted during initial setup or a controlled recovery
+    interval; two active GM users are never permitted. The policy is global
+    — never per department, warehouse, device, or organization unit — and a
+    Django superuser or staff user never receives GM merely by being one.
+
+    The slot is a fixed-identity database singleton:
+
+    - ``code`` is unique and constrained to exactly ``"GM"``, so at most one
+      slot row can exist (unique + check constraint).
+    - ``assignment`` is a nullable OneToOne to the single GM
+      ``UserRoleAssignment``. NULL is a VALID state on a fresh system before
+      first-GM provisioning and during a controlled recovery interval.
+    - ``on_delete=PROTECT`` and the absence of any transfer/revoke service
+      in this batch mean the slot never silently overwrites, clears, or
+      transfers a holder. A second user must never be linked while the slot
+      is held; claiming is exclusively the atomic CAS helper
+      (``security.gm_slot.claim_gm_slot``).
+    - The OneToOne unique constraint prevents one assignment from being
+      linked more than once.
+
+    The resolver (``security/authorization.py``) recognizes GM ONLY through
+    this row's linked assignment; an ordinary unlinked
+    ``UserRoleAssignment(role=GM)`` grants no protected GM capability and no
+    GM permission keys. Historical ``UserRoleAssignment`` rows are never
+    rewritten, merged, or silently revoked by migration 0005.
+    """
+
+    code = models.CharField(max_length=20, unique=True)
+    assignment = models.OneToOneField(
+        UserRoleAssignment,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="gm_slot",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(code="GM"),
+                name="security_gm_slot_code_gm_only",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.code}:{self.assignment_id or '-'}"
+
+
+# W0-2C durable MFA and server-side session records.
+# Kept in a focused module; importing here registers the models with Django.
+from security.mfa_models import (  # noqa: E402,F401
+    MFADeviceStatus,
+    SecurityLoginSession,
+    SecurityMFADevice,
+    SecurityRecoveryCode,
+    SecurityMFARequirement,
+    SecurityBootstrapToken,
+    SecurityEmergencyOwnerKey,
+    SecurityAccountLockout,
+    SecurityLoginAttempt,
+    SecurityLoginAttemptOutcome,
+)

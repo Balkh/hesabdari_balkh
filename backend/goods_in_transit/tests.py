@@ -828,3 +828,139 @@ class GoodsInTransitTests(TestCase):
                 reason="Second final event", idempotency_key="loss-model-003",
                 created_by=self.user,
             )
+
+
+    def _acceptance_financial_state(self):
+        from accounting.models import JournalLine
+        from core.models import IdempotencyRecord
+        from customer_custody.models import CustomerOwnershipEntitlement
+        from party_ledger.models import PartyLedgerAttribution
+        from sales.models import Sale, SaleLine, WarehouseCheck
+        from security.audit_chain import verify_audit_chain
+        models = (GoodsInTransitLot, TransitSaleAllocation, TransitReceipt, TransitCustomerCustody,
+                  Sale, SaleLine, WarehouseCheck, JournalEntry, JournalLine, StockMovement,
+                  CustomerOwnershipEntitlement, CustomerCustodyEvent, PartyLedgerAttribution,
+                  IdempotencyRecord)
+        # Compare persisted fields, not just row counts, so balance or status
+        # changes that leave the number of records unchanged cannot pass.
+        return ([list(model.objects.order_by("pk").values()) for model in models],
+                verify_audit_chain(), stock_for(self.product, self.warehouse))
+
+    def _acceptance_fail_final_head_save(self, operation, entity):
+        from security.models import AuditAction, AuditChainHead, AuditEvent
+        from security.services import record_audit_event
+        before = self._acceptance_financial_state()
+        reached = []
+        def fail_after_event_insert(**kwargs):
+            self.assertEqual(kwargs["entity"], entity)
+            self.assertEqual(kwargs["action"], AuditAction.POST)
+            def reject_head(instance, *args, **save_kwargs):
+                # The real writer has already inserted its final event.
+                self.assertEqual(instance.last_event.entity, entity)
+                self.assertTrue(AuditEvent.objects.filter(pk=instance.last_event_id).exists())
+                reached.append(instance.last_event_id)
+                raise RuntimeError("acceptance final audit head failure")
+            with patch.object(AuditChainHead, "save", autospec=True, side_effect=reject_head):
+                return record_audit_event(**kwargs)
+        with patch("sales.services.record_audit_event", side_effect=fail_after_event_insert):
+            with self.assertRaisesMessage(RuntimeError, "acceptance final audit head failure"):
+                operation()
+        self.assertEqual(len(reached), 1)
+        self.assertEqual(self._acceptance_financial_state(), before)
+
+    def _acceptance_transit_sale(self, suffix):
+        purchase = self._purchase(document_number=f"PI-ACCEPT-{suffix}")
+        post_purchase(purchase=purchase, user=self.user)
+        lot = GoodsInTransitLot.objects.get(purchase_line=purchase.lines.get())
+        sale = create_sale(
+            customer=self.customer, sale_date=date(2026, 2, 10),
+            currency=self.usd, channel=SalesChannel.WHOLESALE,
+            payment_mode=PaymentMode.CREDIT,
+            lines=[{"product": self.product, "unit": self.product.primary_uom,
+                    "quantity": 20, "unit_price": "120", "transit_lot": lot}],
+            user=self.user, document_number=f"SI-ACCEPT-{suffix}",
+        )
+        return lot, sale
+
+    def test_acceptance_transit_sale_final_audit_rollback(self):
+        from security.models import AuditEvent, AuditAction
+        lot, sale = self._acceptance_transit_sale("SALE")
+        self._acceptance_fail_final_head_save(
+            lambda: finalize_sale(sale=sale, user=self.user), "Sale")
+        sale.refresh_from_db()
+        lot.refresh_from_db()
+        self.assertEqual(sale.status, SaleStatus.DRAFT)
+        self.assertEqual(lot.remaining_quantity, 100)
+        finalize_sale(sale=sale, user=self.user)
+        sale.refresh_from_db()
+        lot.refresh_from_db()
+        self.assertEqual(sale.status, SaleStatus.FINALIZED)
+        self.assertEqual(lot.remaining_quantity, 80)
+        allocation = TransitSaleAllocation.objects.get(sale_line=sale.lines.get())
+        self.assertEqual(allocation.quantity, 20)
+        self.assertEqual(allocation.cogs_journal.lines.get(account__code="5100").debit, Decimal("2000.00"))
+        self.assertEqual(allocation.cogs_journal.lines.get(account__code="1430").credit, Decimal("2000.00"))
+        self.assertEqual(sale.journal_entry.total_debit, sale.journal_entry.total_credit)
+        self.assertEqual(stock_for(self.product, self.warehouse), 0)
+        before = self._acceptance_financial_state()
+        finalize_sale(sale=sale, user=self.user)
+        self.assertEqual(self._acceptance_financial_state(), before)
+        self.assertEqual(AuditEvent.objects.filter(entity="Sale", entity_id=str(sale.pk), action=AuditAction.POST).count(), 1)
+
+    def test_acceptance_transit_delivery_final_audit_rollback(self):
+        from security.models import AuditEvent, AuditAction
+        lot, sale = self._acceptance_transit_sale("DELIVERY")
+        finalize_sale(sale=sale, user=self.user)
+        receipt = receive_transit(lot=lot, quantity=90, receipt_date=date(2026, 2, 12),
+                                  user=self.user, idempotency_key="acceptance-transit-receipt")
+        self.assertEqual(receipt.company_quantity, 80)
+        self.assertEqual(receipt.customer_custody_quantity, 10)
+        entitlement = sale.lines.get().customer_ownership_entitlement
+        check = prepare_warehouse_check(sale_line=sale.lines.get(), warehouse=self.warehouse,
+                                        quantity=10, number="WC-ACCEPT-DELIVERY", user=self.user)
+        self._acceptance_fail_final_head_save(
+            lambda: finalize_warehouse_check(check=check, user=self.user), "WarehouseCheck")
+        check.refresh_from_db()
+        self.assertEqual(check.status, "DRAFT")
+        self.assertEqual(custody_balance(entitlement=entitlement, warehouse=self.warehouse), 10)
+        cogs = JournalEntry.objects.filter(source_type="SALES_COGS").count()
+        finalize_warehouse_check(check=check, user=self.user)
+        check.refresh_from_db()
+        self.assertEqual(check.status, "FINALIZED")
+        self.assertEqual(custody_balance(entitlement=entitlement, warehouse=self.warehouse), 0)
+        self.assertEqual(stock_for(self.product, self.warehouse), 80)
+        self.assertEqual(JournalEntry.objects.filter(source_type="SALES_COGS").count(), cogs)
+        before = self._acceptance_financial_state()
+        finalize_warehouse_check(check=check, user=self.user)
+        self.assertEqual(self._acceptance_financial_state(), before)
+        self.assertEqual(AuditEvent.objects.filter(entity="WarehouseCheck", entity_id=str(check.pk), action=AuditAction.POST).count(), 1)
+
+    def test_acceptance_legacy_transit_bridge_final_audit_rollback(self):
+        lot, sale = self._acceptance_transit_sale("LEGACY")
+        finalize_sale(sale=sale, user=self.user)
+        # Historical compatibility fixture, not a new production mutation path.
+        receipt = TransitReceipt.objects.create(
+            lot=lot, warehouse=self.warehouse, quantity=90,
+            company_quantity=80, customer_custody_quantity=10,
+            receipt_date=date(2026, 2, 12), idempotency_key="acceptance-legacy-receipt",
+            created_by=self.user)
+        TransitCustomerCustody.objects.create(
+            receipt=receipt, sale_line=sale.lines.get(), customer=self.customer,
+            warehouse=self.warehouse, quantity=10, receipt_date=date(2026, 2, 12))
+        lot.remaining_quantity = 0
+        lot.status = TransitLotStatus.OPEN
+        lot.save(allow_state_transition=True, update_fields={"remaining_quantity", "status"})
+        check = prepare_warehouse_check(sale_line=sale.lines.get(), warehouse=self.warehouse,
+                                        quantity=5, number="WC-ACCEPT-LEGACY", user=self.user)
+        self._acceptance_fail_final_head_save(
+            lambda: finalize_warehouse_check(check=check, user=self.user), "WarehouseCheck")
+        check.refresh_from_db()
+        self.assertEqual(check.status, "DRAFT")
+        self.assertFalse(CustomerCustodyEvent.objects.filter(
+            idempotency_key=f"legacy-transit-custody:{sale.lines.get().pk}:{self.warehouse.pk}").exists())
+        finalize_warehouse_check(check=check, user=self.user)
+        entitlement = sale.lines.get().customer_ownership_entitlement
+        self.assertEqual(custody_balance(entitlement=entitlement, warehouse=self.warehouse), 5)
+        before = self._acceptance_financial_state()
+        finalize_warehouse_check(check=check, user=self.user)
+        self.assertEqual(self._acceptance_financial_state(), before)

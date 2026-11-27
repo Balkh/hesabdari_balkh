@@ -104,6 +104,7 @@ class ProductionFailFastTests(SimpleTestCase):
         env = {
             **os.environ,
             "DJANGO_SETTINGS_MODULE": "config.settings.production",
+            "ERP_RBAC_ENFORCEMENT": "true",
             "DJANGO_SECRET_KEY": "short-key",
             "DJANGO_DEBUG": "false",
             "DJANGO_ALLOWED_HOSTS": "hesabdari.example",

@@ -260,10 +260,11 @@ class AllocationAuditRegressionTests(TestCase):
 
 import threading
 from django.db import close_old_connections, connection
-from django.test import TransactionTestCase
+from django.test import TestCase
+from security.test_support import AuditTriggerAwareTransactionTestCase
 
 
-class ConcurrentFinalizationTests(TransactionTestCase):
+class ConcurrentFinalizationTests(AuditTriggerAwareTransactionTestCase):
     """PostgreSQL: concurrent finalize of one sale posts COGS exactly once."""
 
     def setUp(self):
@@ -317,7 +318,7 @@ class ConcurrentFinalizationTests(TransactionTestCase):
         self.assertEqual(stock_for(self.product, self.warehouse), 5)
 
 
-class ConcurrentReturnTests(TransactionTestCase):
+class ConcurrentReturnTests(AuditTriggerAwareTransactionTestCase):
     """PostgreSQL: concurrent returns cannot over-return one source issue."""
 
     def setUp(self):

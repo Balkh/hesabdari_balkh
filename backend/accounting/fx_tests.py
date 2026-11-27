@@ -15,7 +15,8 @@ from unittest import mock
 
 from django.db import IntegrityError
 from django.db.models import ProtectedError
-from django.test import TestCase, TransactionTestCase
+from django.test import TestCase
+from security.test_support import AuditTriggerAwareTransactionTestCase
 
 from core.idempotency import DuplicateOperationError, IdempotencyRecord
 from core.money import fx_equivalent, normalize_rate
@@ -701,10 +702,10 @@ class FXIdempotencyTests(FXFixture, TestCase):
 
 
 # ---------------------------------------------------------------------------
-# §23 — genuine transaction-level rollback (TransactionTestCase)
+# §23 — genuine transaction-level rollback (AuditTriggerAwareTransactionTestCase)
 # ---------------------------------------------------------------------------
 
-class FXAtomicRollbackTests(FXFixture, TransactionTestCase):
+class FXAtomicRollbackTests(FXFixture, AuditTriggerAwareTransactionTestCase):
     def setUp(self):
         self.afn, self.usd, self.eur = self._seed()
         self.acc = self._accounts()

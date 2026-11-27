@@ -40,7 +40,15 @@ User = get_user_model()
 
 def grant_role(user, code):
     role, _ = Role.objects.get_or_create(code=code, defaults={"name": code})
-    return UserRoleAssignment.objects.create(user=user, role=role)
+    assignment = UserRoleAssignment.objects.create(user=user, role=role)
+    if code == "GM":
+        # W0-2B singleton GM (owner decision): GM authority exists only
+        # through the singleton slot, so the shared fixture helper claims
+        # it for the approved single holder. Non-GM roles are unchanged.
+        from security.gm_slot import claim_gm_slot
+
+        claim_gm_slot(assignment)
+    return assignment
 
 
 def link(role_code, key):
@@ -544,8 +552,11 @@ class FailClosedTests(ResolverTestBase):
 
     def test_no_exception_escapes_the_resolver(self):
         user = User.objects.create_user(username="exp-escape")
+        # W0-2B seam rename: the protected-GM decision now resolves the
+        # singleton GM slot holder; the pinned intent is unchanged — any
+        # exception on the resolver's internal seam fails closed.
         with patch.object(
-            authorization, "_has_active_role",
+            authorization, "_singleton_gm_assignment_id",
             side_effect=RuntimeError("boom"),
         ):
             with self.assertLogs("security.authorization", level="ERROR"):
@@ -595,6 +606,9 @@ class AuthContextFromRequestTests(TestCase):
         )
         self.assertEqual(session.get("_auth_user_id"), str(user.pk))
 
+        from security.session_service import register_login_session
+
+        register_login_session(user, session.session_key)
         request = self._raw_request(user=user, session=session)
         ctx = AuthContext.from_request(request)
         self.assertIsNotNone(ctx.session_user_id)
