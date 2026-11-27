@@ -576,9 +576,10 @@ raise SystemExit(result)
         import sys
         from datetime import timedelta
         from django.contrib.auth import get_user_model
+        from django.contrib.sessions.models import Session
         from django.utils import timezone
         from security.models import GMRoleSlot, Role, UserRoleAssignment
-        from security.mfa_models import SecurityEmergencyOwnerKey, SecurityLoginSession
+        from security.mfa_models import SecurityEmergencyOwnerKey, SecurityLoginSession, SecurityMFARequirement, SecurityMFADevice, MFADeviceStatus, SecurityRecoveryCode
         from security.emergency_owner_key_service import generate_emergency_owner_key, emergency_owner_key_digest
         from security.mfa import totp_code
         from security.mfa_service import begin_mfa_enrollment, confirm_mfa_enrollment
@@ -603,6 +604,14 @@ raise SystemExit(result)
         SecurityLoginSession.objects.create(user=gm, session_key_hash="a"*64, slot_number=1,
             created_at=now, last_seen_at=now, idle_expires_at=now+timedelta(minutes=15),
             absolute_expires_at=now+timedelta(hours=12), mfa_verified_at=now)
+        staff = get_user_model().objects.create_user(username="odr-restored-employee", password="Fixture-employee-Password-2026!", is_active=True)
+        staff_enrollment = begin_mfa_enrollment(staff, provider=old_provider)
+        confirm_mfa_enrollment(staff, totp_code(staff_enrollment["secret"], timestamp=now.timestamp()), provider=old_provider, at=now)
+        SecurityMFARequirement.objects.create(user=staff, is_required=True, updated_by=gm, reason="fixture required")
+        SecurityLoginSession.objects.create(user=staff, session_key_hash="b"*64, slot_number=1,
+            created_at=now, last_seen_at=now, idle_expires_at=now+timedelta(minutes=15),
+            absolute_expires_at=now+timedelta(hours=12), mfa_verified_at=now)
+        Session.objects.create(session_key="odr-historical", session_data="synthetic", expire_date=now+timedelta(hours=12))
         snapshot = verify_audit_chain()
         backup = self._backup()
         live = verify_audit_chain()
@@ -618,6 +627,7 @@ raise SystemExit(result)
             pg["HOST"] = "127.0.0.1"
         child = r"""
 import json, sys
+from datetime import timedelta
 from unittest.mock import patch
 from decimal import Decimal
 from django.conf import settings
@@ -625,16 +635,21 @@ from config.settings.base import INSTALLED_APPS, AUTH_PASSWORD_VALIDATORS
 data = json.load(sys.stdin)
 settings.configure(INSTALLED_APPS=INSTALLED_APPS, AUTH_PASSWORD_VALIDATORS=AUTH_PASSWORD_VALIDATORS,
     SECRET_KEY="synthetic-replacement-device-only", USE_TZ=True, TIME_ZONE="UTC",
-    DATABASES={"default": data["database"]}, DEFAULT_AUTO_FIELD="django.db.models.BigAutoField")
+    DATABASES={"default": data["database"]}, DEFAULT_AUTO_FIELD="django.db.models.BigAutoField",
+    ERP_OFFLINE_REPLACEMENT_STAGING=True)
 import django
 django.setup()
 from django.contrib.auth import get_user_model
 from django.db import connection
 from django.utils import timezone
 from security.audit_chain import verify_audit_chain, assert_audit_trigger_schema
-from security.emergency_owner_key_service import recover_existing_gm_offline, generate_emergency_owner_key, validate_current_gm_emergency_owner_key, EmergencyOwnerKeyInvalid
+from security.emergency_owner_key_service import generate_emergency_owner_key, validate_current_gm_emergency_owner_key, EmergencyOwnerKeyInvalid, EmergencyOwnerKeyPolicyDenied
+from security.replacement_identity import prepare_replacement_identity, reenroll_replacement_employee
+from django.contrib.sessions.models import Session
+from django.test import override_settings
 from security.models import GMRoleSlot, AuditEvent, AuditChainHead
-from security.mfa_models import SecurityLoginSession, SecurityMFADevice, MFADeviceStatus, SecurityRecoveryCode
+from security.mfa_models import SecurityLoginSession, SecurityMFADevice, MFADeviceStatus, SecurityRecoveryCode, SecurityMFARequirement
+from security.mfa_policy import user_requires_mfa
 from security.mfa import generate_totp_secret, totp_code
 from security.mfa_service import _encrypted_secret_for
 from security.errors import KeyUnavailableError
@@ -647,6 +662,7 @@ class ReplacementProvider:
         return b"N"*32
 provider = ReplacementProvider()
 gm = get_user_model().objects.get(username="odr-restored-gm")
+staff = get_user_model().objects.get(username="odr-restored-employee")
 old = SecurityMFADevice.objects.get(user=gm, status=MFADeviceStatus.ACTIVE)
 try:
     _encrypted_secret_for(old, gm, provider)
@@ -664,13 +680,35 @@ now = timezone.now()
 seed = generate_totp_secret()
 new_owner = generate_emergency_owner_key()
 kwargs = dict(new_owner_key=new_owner, new_password="Fixture-new-GM-Password-2026!",
-              new_totp_secret=seed, new_totp_code=totp_code(seed, timestamp=now.timestamp()), provider=provider, at=now)
+              new_totp_secret=seed, new_totp_code=totp_code(seed, timestamp=now.timestamp()), provider=provider, at=now,
+              expected_checkpoint=before, expected_owner_record=data["owner_row"], source_isolated=True)
+def prepare(**changes):
+    with patch("security.replacement_identity.require_local_console"):
+        return prepare_replacement_identity(data["owner"], **(kwargs | changes))
+class HistoricalProvider:
+    def active_key_id(self): return old.secret_key_id
+    def get_key(self, key_id): raise AssertionError("historical key must be rejected before read")
+for changes in ({"source_isolated": False}, {"expected_owner_record": data["owner_row"]+1},
+                {"expected_checkpoint": {**before, "head_hash": "0"*64}}, {"provider": HistoricalProvider()}):
+    try: prepare(**changes)
+    except (EmergencyOwnerKeyInvalid, EmergencyOwnerKeyPolicyDenied): pass
+    else: raise AssertionError("invalid independent recovery prerequisite accepted")
+with override_settings(ERP_OFFLINE_REPLACEMENT_STAGING=False):
+    try: prepare()
+    except EmergencyOwnerKeyPolicyDenied: pass
+    else: raise AssertionError("non-staging recovery accepted")
+assert verify_audit_chain() == before
+assert SecurityLoginSession.objects.filter(revoked_at__isnull=True).count() == 2
+assert Session.objects.count() == 1
 def reject(instance, *args, **kwargs):
-    assert instance.last_event.entity == "GM_EMERGENCY_RECOVERY"
+    if instance.last_event.entity == "GM_EMERGENCY_RECOVERY":
+        return original_save(instance, *args, **kwargs)
+    assert instance.last_event.entity == "REPLACEMENT_IDENTITY_PREPARATION"
     assert AuditEvent.objects.filter(pk=instance.last_event_id).exists()
     raise RuntimeError("restored GM audit head failure")
+original_save = AuditChainHead.save
 with patch.object(AuditChainHead, "save", autospec=True, side_effect=reject):
-    try: recover_existing_gm_offline(data["owner"], **kwargs)
+    try: prepare()
     except RuntimeError as exc: assert str(exc) == "restored GM audit head failure"
     else: raise AssertionError("missing audit failure")
 gm.refresh_from_db()
@@ -679,12 +717,20 @@ assert SecurityLoginSession.objects.filter(user=gm, revoked_at__isnull=True).cou
 assert validate_current_gm_emergency_owner_key(data["owner"]) == data["owner_row"]
 assert verify_audit_chain() == before
 assert financial() == baseline
-recovered, codes, revoked, disabled = recover_existing_gm_offline(data["owner"], **kwargs)
-assert recovered.pk == gm.pk and revoked == 1 and disabled == 1 and len(codes) == 10
+assert SecurityLoginSession.objects.filter(revoked_at__isnull=True).count() == 2
+assert Session.objects.count() == 1
+assert SecurityMFADevice.objects.filter(user=staff, status=MFADeviceStatus.ACTIVE).count() == 1
+assert SecurityRecoveryCode.objects.filter(user=staff, used_at__isnull=True).count() == 10
+recovered, codes = prepare()
+assert recovered.pk == gm.pk and len(codes) == 10
 assert recovered.check_password("Fixture-new-GM-Password-2026!")
 assert not recovered.check_password("Fixture-old-GM-Password-2026!")
 assert GMRoleSlot.objects.get(code="GM").assignment_id == data["assignment"]
-assert SecurityLoginSession.objects.filter(user=gm, revoked_at__isnull=True).count() == 0
+assert SecurityLoginSession.objects.filter(revoked_at__isnull=True).count() == 0
+assert Session.objects.count() == 0
+assert user_requires_mfa(staff)
+assert not SecurityMFADevice.objects.filter(user=staff, status__in=(MFADeviceStatus.ACTIVE, MFADeviceStatus.PENDING)).exists()
+assert not SecurityRecoveryCode.objects.filter(user=staff, used_at__isnull=True).exists()
 active = SecurityMFADevice.objects.get(user=gm, status=MFADeviceStatus.ACTIVE)
 assert active.secret_key_id == provider.active_key_id()
 assert _encrypted_secret_for(active, gm, provider) == seed.encode("ascii")
@@ -697,7 +743,35 @@ assert financial() == baseline
 entry = JournalEntry.objects.get(number="JE-1405-99001")
 assert entry.total_debit == entry.total_credit == Decimal("125.50")
 after = verify_audit_chain()
-assert after["event_count"] == before["event_count"] + 1
+assert after["event_count"] == before["event_count"] + 2
+staff_seed = generate_totp_secret()
+later = now + timedelta(seconds=60)
+staff_args = dict(gm_password="Fixture-new-GM-Password-2026!",
+    gm_totp_code=totp_code(seed, timestamp=later.timestamp()),
+    employee_password="Fixture-employee-Password-2026!",
+    new_totp_secret=staff_seed, new_totp_code=totp_code(staff_seed, timestamp=later.timestamp()),
+    provider=provider, source_isolated=True, at=later)
+with patch("security.replacement_identity.require_local_console"):
+    try: reenroll_replacement_employee(staff.pk, **(staff_args | {"employee_password": "wrong"}))
+    except EmergencyOwnerKeyInvalid: pass
+    else: raise AssertionError("wrong employee password accepted")
+    assert not SecurityMFADevice.objects.filter(user=staff, status=MFADeviceStatus.ACTIVE).exists()
+    try: reenroll_replacement_employee(staff.pk, **staff_args)
+    except EmergencyOwnerKeyInvalid: pass
+    else: raise AssertionError("GM TOTP replay accepted")
+    later += timedelta(seconds=60)
+    staff_args.update(at=later, gm_totp_code=totp_code(seed, timestamp=later.timestamp()),
+                      new_totp_code=totp_code(staff_seed, timestamp=later.timestamp()))
+    staff_codes = reenroll_replacement_employee(staff.pk, **staff_args)
+assert len(staff_codes) == 10 and user_requires_mfa(staff)
+staff_active = SecurityMFADevice.objects.get(user=staff, status=MFADeviceStatus.ACTIVE)
+assert _encrypted_secret_for(staff_active, staff, provider) == staff_seed.encode("ascii")
+assert SecurityRecoveryCode.objects.filter(user=staff, used_at__isnull=True).count() == 10
+assert financial() == baseline
+assert SecurityLoginSession.objects.filter(revoked_at__isnull=True).count() == 0
+assert Session.objects.count() == 0
+after = verify_audit_chain()
+assert after["event_count"] == before["event_count"] + 3
 connection.close()
 assert verify_audit_chain() == after
 connection.close()
@@ -743,7 +817,11 @@ print("RESTORED GM: new MFA key, old session/owner revoked, rollback and financi
         self.assertTrue(gm.check_password("Fixture-old-GM-Password-2026!"))
         self.assertIsNone(owner_row.consumed_at)
         self.assertEqual(SecurityLoginSession.objects.filter(user=gm, revoked_at__isnull=True).count(), 1)
-        print(f"ODR RESTORED GM [{connection.vendor}]: isolated credential recovery, failure rollback, source unchanged")
+        self.assertEqual(SecurityLoginSession.objects.filter(user=staff, revoked_at__isnull=True).count(), 1)
+        self.assertEqual(Session.objects.filter(session_key="odr-historical").count(), 1)
+        self.assertEqual(SecurityMFADevice.objects.filter(user=staff, status=MFADeviceStatus.ACTIVE).count(), 1)
+        self.assertEqual(SecurityRecoveryCode.objects.filter(user=staff, used_at__isnull=True).count(), 10)
+        print(f"ODR RESTORED GM [{connection.vendor}]: isolated global retirement and employee MFA recovery, failure rollback, source unchanged")
 
 
 
