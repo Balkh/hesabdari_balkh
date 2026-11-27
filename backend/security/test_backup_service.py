@@ -586,6 +586,38 @@ raise SystemExit(result)
         from security.test_emergency_owner_key import StaticMFAKeyProvider
         from security.offline_recovery import create_recovery_bundle, verify_offline_recovery
         from security import backup_service as service
+        from accounting.models import Account, AccountType
+        from accounting.services import post_journal
+        from categories.models import Category
+        from currencies.models import Currency
+        from inventory.models import MovementType, StockMovement
+        from party_ledger.models import PartyLedgerAttribution
+        from parties.models import Party
+        from products.models import Product
+        from uom.models import UnitOfMeasure
+        from warehouses.models import Warehouse
+
+        afn = Currency.objects.get(code="AFN")
+        usd = Currency.objects.create(code="USD", name="Dollar")
+        receivable = Account.objects.create(code="1310", name="Receivable", account_type=AccountType.ASSET)
+        cash = Account.objects.create(code="1110", name="Cash in hand", account_type=AccountType.ASSET)
+        party = Party.objects.create(name="Recovery report fixture", is_customer=True)
+        usd_entry = post_journal(number="JE-1405-99002", posting_date="2026-09-06",
+            description="Currency-separated recovery evidence", currency=usd, rate="70",
+            rate_date="2026-09-06", lines=[{"account": receivable, "debit": "10.25"},
+                                          {"account": cash, "credit": "10.25"}])
+        PartyLedgerAttribution.objects.create(party=party, journal_line=usd_entry.lines.get(account=receivable))
+        product = Product.objects.create(code="ODR-AVCO", name="Fixture", name_fa="Fixture",
+            category=Category.objects.create(name="Recovery AVCO"),
+            primary_uom=UnitOfMeasure.objects.create(name="Piece"))
+        warehouse = Warehouse.objects.create(name="Recovery AVCO")
+        common = dict(product=product, warehouse=warehouse, currency=afn,
+                      movement_date="2026-09-06", rate_date="2026-09-06", rate=1,
+                      unit_cost=10, unit_cost_afn=10)
+        StockMovement.objects.create(**common, movement_type=MovementType.OPENING, quantity=10,
+            qty_before=0, qty_after=10, reference="ODR-valuation-in")
+        StockMovement.objects.create(**common, movement_type=MovementType.SALES_ISSUE, quantity=-3,
+            qty_before=10, qty_after=7, reference="ODR-valuation-out")
 
         now = timezone.now()
         gm = get_user_model().objects.create_user(username="odr-restored-gm", password="Fixture-old-GM-Password-2026!", is_active=True)
@@ -645,6 +677,8 @@ from django.utils import timezone
 from security.audit_chain import verify_audit_chain, assert_audit_trigger_schema, has_verified_replacement_preparation
 from security.emergency_owner_key_service import generate_emergency_owner_key, validate_current_gm_emergency_owner_key, EmergencyOwnerKeyInvalid, EmergencyOwnerKeyPolicyDenied
 from security.replacement_identity import prepare_replacement_identity, reenroll_replacement_employee
+from security.replacement_financial import collect_replacement_financial_report
+from security.recovery_readiness import RecoveryReconciliationError
 from django.contrib.sessions.models import Session
 from django.test import override_settings
 from security.models import GMRoleSlot, AuditEvent, AuditChainHead
@@ -655,6 +689,8 @@ from security.mfa_service import _encrypted_secret_for
 from security.errors import KeyUnavailableError
 from accounting.models import JournalEntry, JournalLine
 from core.models import IdempotencyRecord
+from inventory.models import StockMovement
+from party_ledger.models import PartyLedgerAttribution
 class ReplacementProvider:
     def active_key_id(self): return "replacement-fixture-v2"
     def get_key(self, key_id):
@@ -675,7 +711,7 @@ before = verify_audit_chain()
 assert before == data["snapshot"]
 assert not has_verified_replacement_preparation(gm)
 def financial():
-    return [list(m.objects.order_by("pk").values()) for m in (JournalEntry, JournalLine, IdempotencyRecord)]
+    return [list(m.objects.order_by("pk").values()) for m in (JournalEntry, JournalLine, IdempotencyRecord, StockMovement, PartyLedgerAttribution)]
 baseline = financial()
 now = timezone.now()
 seed = generate_totp_secret()
@@ -775,6 +811,24 @@ assert SecurityLoginSession.objects.filter(revoked_at__isnull=True).count() == 0
 assert Session.objects.count() == 0
 after = verify_audit_chain()
 assert after["event_count"] == before["event_count"] + 3
+with patch("security.replacement_identity.require_local_console"):
+    report = collect_replacement_financial_report(source_isolated=True)
+    assert report["trial_by_currency"] == [
+        {"currency": "AFN", "debit": "125.50", "credit": "125.50"},
+        {"currency": "USD", "debit": "10.25", "credit": "10.25"}]
+    assert report["party_balances"] == [{"currency": "USD", "party_id": data["party_id"],
+        "balance_type": "RECEIVABLE", "debit": "10.25", "credit": "0.00", "balance": "10.25", "line_count": 1}]
+    assert all(row["reconciled"] for row in report["party_control_totals"])
+    assert report["stock_and_avco"] == [{"product_id": data["product_id"], "warehouse_id": data["warehouse_id"],
+        "quantity": 7, "avco_afn": "10.0000", "rounded_avco_extension_afn": "70.00"}]
+    assert next(row for row in report["account_balances"] if row["account_code"] == "1110")["balance"] == "-10.25"
+    assert report["unattributed_party_lines"] == report["unknown_currency_lines"] == 0
+    assert collect_replacement_financial_report(source_isolated=True, expected_report=report) == report
+    try: collect_replacement_financial_report(source_isolated=True, expected_report={**report, "unknown_currency_lines": 1})
+    except RecoveryReconciliationError: pass
+    else: raise AssertionError("mismatched independent report accepted")
+assert verify_audit_chain() == after
+assert financial() == baseline
 connection.close()
 assert verify_audit_chain() == after
 connection.close()
@@ -786,7 +840,8 @@ print("RESTORED GM: new MFA key, old session/owner revoked, rollback and financi
             env.pop("DJANGO_SETTINGS_MODULE", None)
             result = subprocess.run([sys.executable, "-c", child], input=json.dumps({
                 "database": db, "snapshot": snapshot, "owner": owner, "owner_row": owner_row.pk,
-                "assignment": assignment.pk}), env=env, capture_output=True, text=True, timeout=300)
+                "assignment": assignment.pk, "party_id": party.pk, "product_id": product.pk,
+                "warehouse_id": warehouse.pk}), env=env, capture_output=True, text=True, timeout=300)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("RESTORED GM:", result.stdout)
             seen.append(True)
@@ -824,7 +879,7 @@ print("RESTORED GM: new MFA key, old session/owner revoked, rollback and financi
         self.assertEqual(Session.objects.filter(session_key="odr-historical").count(), 1)
         self.assertEqual(SecurityMFADevice.objects.filter(user=staff, status=MFADeviceStatus.ACTIVE).count(), 1)
         self.assertEqual(SecurityRecoveryCode.objects.filter(user=staff, used_at__isnull=True).count(), 10)
-        print(f"ODR RESTORED GM [{connection.vendor}]: isolated global retirement and employee MFA recovery, failure rollback, source unchanged")
+        print(f"ODR RESTORED GM [{connection.vendor}]: isolated identity, financial report comparison, failure rollback, source unchanged")
 
 
 
