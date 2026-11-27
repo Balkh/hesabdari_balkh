@@ -850,7 +850,7 @@ def _read_postgresql_restore(cursor):
     return events, head
 
 
-def _verify_sqlite_snapshot(snapshot_path: Path, expected_payload: dict) -> dict:
+def _verify_sqlite_snapshot(snapshot_path: Path, expected_payload: dict, *, include_readiness=False) -> dict:
     db = sqlite3.connect(snapshot_path.resolve().as_uri() + "?mode=ro", uri=True)
     db.row_factory = sqlite3.Row
     try:
@@ -866,14 +866,18 @@ def _verify_sqlite_snapshot(snapshot_path: Path, expected_payload: dict) -> dict
         ).fetchall()
         if len(head_rows) != 1:
             raise BackupError("restored SQLite database has an invalid audit-chain head row")
-        return _verify_restored_rows(events, dict(head_rows[0]), expected_payload)
+        result = _verify_restored_rows(events, dict(head_rows[0]), expected_payload)
+        if include_readiness:
+            from security.recovery_readiness import inspect_disposable_recovery
+            result["readiness"] = inspect_disposable_recovery(db.cursor())
+        return result
     except sqlite3.DatabaseError as exc:
         raise BackupError("restored SQLite database schema or audit tables are invalid") from exc
     finally:
         db.close()
 
 
-def _verify_postgresql_snapshot(snapshot_path: Path, expected_payload: dict, *, database_config=None) -> dict:
+def _verify_postgresql_snapshot(snapshot_path: Path, expected_payload: dict, *, database_config=None, include_readiness=False) -> dict:
     db = connection.settings_dict if database_config is None else database_config
     for tool_name in ("createdb", "pg_restore", "dropdb"):
         if not shutil.which(tool_name):
@@ -918,7 +922,11 @@ def _verify_postgresql_snapshot(snapshot_path: Path, expected_payload: dict, *, 
             ) as restored:
                 with restored.cursor() as cursor:
                     events, head = _read_postgresql_restore(cursor)
-            return _verify_restored_rows(events, head, expected_payload)
+                    result = _verify_restored_rows(events, head, expected_payload)
+                    if include_readiness:
+                        from security.recovery_readiness import inspect_disposable_recovery
+                        result["readiness"] = inspect_disposable_recovery(cursor)
+            return result
         except BackupError:
             raise
         except Exception as exc:
@@ -955,8 +963,11 @@ def verify_encrypted_database_backup(
     expected_vendor: str | None = None,
     restore_database_config: dict | None = None,
     trusted_checkpoint_sha256: str | None = None,
+    include_readiness: bool = False,
 ) -> dict:
     """Verify signature, ciphertext and a full restore-chain check on a disposable DB."""
+    if include_readiness and trusted_checkpoint_sha256 is None:
+        raise BackupError("readiness review requires an independently selected checkpoint SHA-256")
     raw_backup_path = Path(backup_path)
     if raw_backup_path.is_symlink():
         raise BackupError("symbolic-link backup paths are not accepted")
@@ -1026,14 +1037,15 @@ def verify_encrypted_database_backup(
         decrypted = decrypt_backup_file(private_backup, snapshot_path, provider=provider)
         if decrypted["key_id"] != payload["backup_encryption_key_id"]:
             raise BackupError("backup encryption key does not match signed checkpoint")
+        readiness_options = {"include_readiness": True} if include_readiness else {}
         if payload["database_vendor"] == "sqlite":
-            result = _verify_sqlite_snapshot(snapshot_path, payload)
+            result = _verify_sqlite_snapshot(snapshot_path, payload, **readiness_options)
         elif payload["database_vendor"] == "postgresql":
             if restore_database_config is None:
-                result = _verify_postgresql_snapshot(snapshot_path, payload)
+                result = _verify_postgresql_snapshot(snapshot_path, payload, **readiness_options)
             else:
                 result = _verify_postgresql_snapshot(
-                    snapshot_path, payload, database_config=restore_database_config
+                    snapshot_path, payload, database_config=restore_database_config, **readiness_options
                 )
         else:
             raise BackupError("signed backup declares an unsupported database engine")
@@ -1045,4 +1057,5 @@ def verify_encrypted_database_backup(
         "head_hash": result["head_hash"],
         "last_event_id": result["last_event_id"],
         "retention_class": payload["retention_class"],
+        **({"readiness": result["readiness"]} if include_readiness else {}),
     }

@@ -40,3 +40,18 @@ Record the exact **backup checkpoint SHA-256** returned by successful backup iss
 New tests cover distinct real Windows vault generations, legacy reads/no-overwrite, valid signed old-manifest rejection, malformed selection pins and CLI integration. Execution pending. Global session retirement, employee MFA re-enrollment, comprehensive reconciliation, fail-closed activation and physical owner acceptance remain open.
 
 If rollback cleanup itself fails, retain active pointer records for detection and refuse further provisioning; manual inspection of the protected vault is required. A Windows test injects both a provisioning write failure and a cleanup failure.
+
+
+## Recovery readiness report — read-only engineering candidate
+
+Add `--readiness-report` to the standalone disposable recovery CLI together with the independently recorded `--trusted-checkpoint-sha256`. The tool checks all POSTED/REVERSED journal totals against their one-sided lines, verifies stock movement direction and running quantities in posting ID order per product/warehouse, and checks existing party ledger attribution account/status. It reports counts only (including idempotency records, cash-account masters, historical registry/Django sessions, MFA devices/policies, unused recovery codes and owner-key rows); no personal details, financial line contents or credentials are printed. The report does not assert cash balances, inventory valuation, all subsidiary ledger completeness, full source-to-restore reconciliation, current owner-key validity, or authorization to activate. Missing or inconsistent data blocks the readiness report without mutating or repairing anything. SQLite numeric representation can limit exact stored-decimal verification; discrepancies require investigation, never automatic rounding correction.
+
+### Owner-controlled recovery decision checklist (not an activation command)
+
+1. Keep source device and any copies offline and under owner custody; do not allow concurrent writers. If isolation is uncertain, do not resume business operations. Software on one offline device cannot prove another is off.
+2. Select the latest independently recorded successful backup/manifest digest and trusted public fingerprint; account for any later emergency-owner-key rotation or consumption. If independent freshness evidence is missing, stop. A valid old signature is insufficient.
+3. Verify a disposable restore with the readiness report in isolated storage. Investigate every mismatch; compare actual trial balance per currency, party balances, warehouse stock and valuation, cash/payment balances, allocations and open documents against independently retained business reports. No automatic correction.
+4. Keep recovered database unpublished. New Windows vault provisioning must be on the dedicated replacement OS identity. Do not overwrite historical keys, disable required MFA, reuse old Django signing secrets, or use old recovery codes to evade owner-approved re-enrollment. Global session revocation and secure employee MFA recovery are still engineering blockers.
+5. Record actual media custody, backup schedule/retention, recovery-point/time objectives and physical replacement-device drill with owner approval. No production publication until all engineering and operational gates pass. No automatic retention deletion.
+
+Tests: extend real offline CLI recovery on both database engines to check the report with two stock movements and historical session fixtures, and add signed-but-inconsistent journal rejection/cleanup. Actual CI pending. No new dependencies, migrations, services, production database publication or change to normal financial operations.

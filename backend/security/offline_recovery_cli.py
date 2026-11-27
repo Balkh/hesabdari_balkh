@@ -29,6 +29,7 @@ def main(argv=None):
     parser.add_argument("--bundle", required=True)
     parser.add_argument("--trusted-public-sha256", required=True, help="independently recorded PUBLIC fingerprint")
     parser.add_argument("--trusted-checkpoint-sha256", help="independently recorded exact selected backup manifest SHA-256; not a freshness guarantee")
+    parser.add_argument("--readiness-report", action="store_true", help="read-only business invariant and security workload report; requires independent checkpoint pin")
     parser.add_argument("--vendor", required=True, choices=("sqlite", "postgresql"))
     parser.add_argument("--isolated-postgres", action="store_true",
                         help="confirm a dedicated loopback recovery server, never production")
@@ -58,11 +59,15 @@ def main(argv=None):
             backup_path=args.backup, checkpoint_path=args.checkpoint, bundle_path=args.bundle,
             recovery_secret=secret, trusted_public_sha256=args.trusted_public_sha256,
             vendor=args.vendor, restore_database_config=pg,
-            trusted_checkpoint_sha256=args.trusted_checkpoint_sha256)
+            trusted_checkpoint_sha256=args.trusted_checkpoint_sha256,
+            include_readiness=args.readiness_report)
         print("OFFLINE DISPOSABLE RECOVERY VERIFIED; no ERP database activated")
         print("Checkpoint selection pin:", "matched" if args.trusted_checkpoint_sha256 is not None else "not supplied; freshness unverified")
         print("Events:", result["event_count"], "Head:", result["head_hash"])
         print("Backup SHA-256:", result["backup_sha256"])
+        if args.readiness_report:
+            import json
+            print("RECOVERY READINESS REPORT (not activation approval):", json.dumps(result["readiness"], sort_keys=True))
         return 0
     except Exception:
         # Do not echo secrets, arbitrary provider errors or tracebacks.

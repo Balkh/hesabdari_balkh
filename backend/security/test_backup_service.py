@@ -467,7 +467,38 @@ print(json.dumps(result))
     def test_offline_recovery_cli_real_verification_and_wrong_secret(self):
         import subprocess
         import sys
+        from datetime import timedelta
+        from django.contrib.auth import get_user_model
+        from django.contrib.sessions.models import Session
+        from django.utils import timezone
+        from categories.models import Category
+        from currencies.models import Currency
+        from inventory.models import MovementType, StockMovement
+        from products.models import Product
+        from uom.models import UnitOfMeasure
+        from warehouses.models import Warehouse
+        from security.mfa_models import SecurityLoginSession
         from security.offline_recovery import create_recovery_bundle
+
+        category = Category.objects.create(name="Recovery fixture")
+        unit = UnitOfMeasure.objects.create(name="Piece")
+        product = Product.objects.create(code="ODR-STOCK", name="Fixture", name_fa="Fixture",
+                                         category=category, primary_uom=unit)
+        warehouse = Warehouse.objects.create(name="Recovery fixture")
+        common = dict(product=product, warehouse=warehouse, currency=Currency.objects.get(code="AFN"),
+                      movement_date="2026-09-06", rate_date="2026-09-06", rate=1,
+                      unit_cost=10, unit_cost_afn=10)
+        StockMovement.objects.create(**common, movement_type=MovementType.OPENING, quantity=10,
+                                     qty_before=0, qty_after=10, reference="ODR-in")
+        StockMovement.objects.create(**common, movement_type=MovementType.SALES_ISSUE, quantity=-3,
+                                     qty_before=10, qty_after=7, reference="ODR-out")
+        staff = get_user_model().objects.create_user(username="odr-readiness-fixture")
+        now = timezone.now()
+        SecurityLoginSession.objects.create(user=staff, session_key_hash="d"*64, slot_number=1,
+            created_at=now, last_seen_at=now, idle_expires_at=now+timedelta(minutes=15),
+            absolute_expires_at=now+timedelta(hours=12))
+        Session.objects.create(session_key="odr-readiness-fixture", session_data="synthetic",
+                               expire_date=now+timedelta(hours=12))
         backup = self._backup()
         live = verify_audit_chain()
         before_dbs = self._temporary_databases()
@@ -479,7 +510,7 @@ print(json.dumps(result))
         args = ["--vendor", connection.vendor, "--backup", backup["backup_path"],
                 "--checkpoint", backup["checkpoint_path"], "--bundle", str(bundle),
                 "--trusted-public-sha256", metadata["trusted_public_sha256"],
-                "--trusted-checkpoint-sha256", backup["checkpoint_sha256"]]
+                "--trusted-checkpoint-sha256", backup["checkpoint_sha256"], "--readiness-report"]
         password = None
         if connection.vendor == "postgresql":
             args += ["--isolated-postgres", "--pg-port", str(connection.settings_dict["PORT"]),
@@ -522,6 +553,18 @@ raise SystemExit(result)
             self.assertEqual(process.returncode, expected, process.stderr)
             self.assertEqual("OFFLINE DISPOSABLE RECOVERY VERIFIED" in process.stdout, expected == 0)
             self.assertEqual("Checkpoint selection pin: matched" in process.stdout, expected == 0)
+            prefix = "RECOVERY READINESS REPORT (not activation approval): "
+            if expected == 0:
+                report = json.loads(next(line[len(prefix):] for line in process.stdout.splitlines() if line.startswith(prefix)))
+                self.assertEqual(report["posted_or_reversed_journals"], 1)
+                self.assertEqual(report["checked_journal_lines"], 2)
+                self.assertEqual(report["checked_stock_movements"], 2)
+                self.assertEqual(report["stock_product_warehouse_groups"], 1)
+                self.assertEqual(report["historical_registry_sessions"], 1)
+                self.assertEqual(report["django_session_rows"], 1)
+                self.assertEqual(report["idempotency_records"], 1)
+            else:
+                self.assertNotIn(prefix, process.stdout)
             self.assertNotIn(supplied.hex(), process.stdout + process.stderr)
             self.assertEqual(self._temporary_databases(), before_dbs)
         self.assertEqual(verify_audit_chain(), live)
@@ -701,3 +744,37 @@ print("RESTORED GM: new MFA key, old session/owner revoked, rollback and financi
         self.assertIsNone(owner_row.consumed_at)
         self.assertEqual(SecurityLoginSession.objects.filter(user=gm, revoked_at__isnull=True).count(), 1)
         print(f"ODR RESTORED GM [{connection.vendor}]: isolated credential recovery, failure rollback, source unchanged")
+
+
+
+    def test_readiness_rejects_inconsistent_signed_financial_snapshot(self):
+        from accounting.models import JournalEntry
+        from security.offline_recovery import create_recovery_bundle, verify_offline_recovery
+
+        # Deliberate corruption in the synthetic test DB only, bypassing model
+        # guards. A valid signature is not evidence of internal journal balance.
+        JournalEntry.objects.filter(pk=self.entry.pk).update(total_credit=Decimal("125.51"))
+        backup = self._backup()
+        live = verify_audit_chain()
+        before_dbs = self._temporary_databases()
+        bundle = self.root / "readiness.hbr"
+        secret = b"R" * 32
+        metadata = create_recovery_bundle(bundle, provider=self.provider, recovery_secret=secret,
+            encryption_id=self.provider.active_backup_encryption_key_id(),
+            signing_id=self.provider.active_checkpoint_signing_key_id())
+        pg = None
+        if connection.vendor == "postgresql":
+            pg = {k: str(connection.settings_dict.get(k) or "") for k in ("NAME", "USER", "PASSWORD", "PORT")}
+            pg["HOST"] = "127.0.0.1"
+        kwargs = dict(backup_path=backup["backup_path"], checkpoint_path=backup["checkpoint_path"],
+                      bundle_path=bundle, recovery_secret=secret, trusted_public_sha256=metadata["trusted_public_sha256"],
+                      vendor=connection.vendor, restore_database_config=pg, include_readiness=True)
+        with self.assertRaisesMessage(BackupError, "independently selected checkpoint"):
+            verify_offline_recovery(**kwargs)
+        with self.assertRaisesMessage(BackupError, "posted journal totals"):
+            verify_offline_recovery(**kwargs, trusted_checkpoint_sha256=backup["checkpoint_sha256"])
+        self.assertEqual(self._temporary_databases(), before_dbs)
+        self.assertEqual(verify_audit_chain(), live)
+        self.entry.refresh_from_db()
+        self.assertEqual(self.entry.total_credit, Decimal("125.51"))
+        print(f"ODR READINESS [{connection.vendor}]: authenticated inconsistent journal rejected; source unchanged and cleanup verified")
